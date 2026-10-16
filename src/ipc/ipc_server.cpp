@@ -149,11 +149,13 @@ void IpcServer::Stop() {
     if (!m_running.exchange(false)) return;
 #ifdef _WIN32
     if (m_accept_thread.joinable()) {
+        CancelSynchronousIo(m_accept_thread.native_handle());
         std::wstring wpipe(m_socket_path.begin(), m_socket_path.end());
         HANDLE hDummy = CreateFileW(wpipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (hDummy != INVALID_HANDLE_VALUE) {
             CloseHandle(hDummy);
         }
+        CancelSynchronousIo(m_accept_thread.native_handle());
         m_accept_thread.join();
     }
 #else
@@ -287,11 +289,11 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             return MakeRpcError(id, -32001, "ERR_IPC_VERSION_MISMATCH: Expected protocol 1.x, got " + proto_ver).dump();
         }
         json::Value res = json::Object{};
-        res["appVersion"] = "0.2.0";
+        res["appVersion"] = "0.3.0";
         res["protocolVersion"] = "1.0";
         res["captureEnabled"] = m_capture_enabled.load();
         res["workersAvailable"] = m_controller.AreWorkersAvailable();
-        json::Array exts = {"zip", "rar", "7z", "iso", "exe", "msi", "mp4", "mkv", "webm", "mp3", "flac", "pdf", "tar", "gz"};
+        json::Array exts = {"zip", "rar", "7z", "iso", "exe", "msi", "mp4", "mkv", "webm", "mp3", "flac", "pdf", "tar", "gz", "bin"};
         res["interceptExtensions"] = std::move(exts);
         res["minCaptureSizeBytes"] = 1048576;
         return MakeRpcResult(id, std::move(res)).dump();
@@ -398,22 +400,35 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         std::string stream_type = params["streamType"].as_string("HLS");
         std::string manifest_url = params["manifestUrl"].as_string();
         if (manifest_url.empty()) manifest_url = params["url"].as_string();
+        std::string cached_body = params["cachedManifestBody"].as_string();
 
         TaskModel t;
         if (stream_type == "DASH" || manifest_url.find(".mpd") != std::string::npos) {
             t.task_type = TaskType::kStreamDash;
-        } else if (stream_type == "HTTP_FILE" || (manifest_url.find(".m3u8") == std::string::npos && stream_type != "HLS")) {
-            t.task_type = TaskType::kHttpFile;
-        } else {
+        } else if (stream_type == "YOUTUBE" || stream_type == "SITE_EXTRACTION" || stream_type == "VIMEO" ||
+                   stream_type == "HLS" || manifest_url.find(".m3u8") != std::string::npos || !cached_body.empty()) {
             t.task_type = TaskType::kStreamHls;
+        } else {
+            t.task_type = TaskType::kHttpFile;
         }
         t.url = manifest_url;
         t.page_url = params["tabUrl"].as_string();
 
         std::string title = params["pageTitle"].as_string();
+        auto yt_suffix = title.rfind(" - YouTube");
+        if (yt_suffix != std::string::npos && yt_suffix + 10 == title.size()) {
+            title = title.substr(0, yt_suffix);
+        }
         std::string out_fmt = params["outputFormat"].as_string("mp4");
         if (!title.empty()) {
-            t.file_name = PathSanitizer::SanitizeFileName(title) + "." + out_fmt;
+            std::string sanitized_title = PathSanitizer::SanitizeFileName(title);
+            std::string dot_ext = "." + out_fmt;
+            if (sanitized_title.size() > dot_ext.size() &&
+                sanitized_title.substr(sanitized_title.size() - dot_ext.size()) == dot_ext) {
+                t.file_name = sanitized_title;
+            } else {
+                t.file_name = sanitized_title + dot_ext;
+            }
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
@@ -422,7 +437,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         t.stream_options.subtitle_filter = params["subtitleFilter"].as_string("all");
         t.stream_options.output_format = out_fmt;
         t.stream_options.custom_hls_key_hex = params["customKeyHex"].as_string("");
-        t.stream_options.cached_manifest_body = params["cachedManifestBody"].as_string("");
+        t.stream_options.cached_manifest_body = cached_body;
 
         auto add_res = m_controller.AddTask(std::move(t), true, false);
         if (!add_res.ok()) {

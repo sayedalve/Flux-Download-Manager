@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Flux Download Manager",
   "version": "0.3.0",
-  "description": "Automatic download capture and multi-layered video/stream detection (HLS/DASH/MP4/WebM) for Flux Download Manager.",
+  "description": "Automatic download capture and multi-layered video/stream detection (HLS/DASH/MP4/WebM/YouTube) for Flux Download Manager.",
   "permissions": [
     "nativeMessaging",
     "downloads",
@@ -24,6 +24,18 @@
     "default_popup": "popup.html"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "catch-script/catch.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
     {
       "matches": [
         "http://*/*",

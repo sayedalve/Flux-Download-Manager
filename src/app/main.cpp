@@ -123,12 +123,9 @@ int main(int argc, char* argv[]) {
     }
 
     if (mode == "gui-snapshot") {
-        openidm::ipc::IpcServer server(controller, ipc_socket_path);
-        server.Start();
-        openidm::ui::DesktopView view(controller, &server);
+        openidm::ui::DesktopView view(controller, nullptr);
         view.SelectFirstRow();
         std::cout << view.RenderFullDesktopSnapshotText();
-        server.Stop();
         controller.Shutdown();
         return 0;
     }

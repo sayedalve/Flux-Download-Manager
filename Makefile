@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# OpenIDM — Reproducible C++20 Build System
+# Flux Download Manager — Reproducible C++20 Build System
 
 CXX       := g++
 CXXFLAGS  := -std=c++20 -O2 -Wall -Wextra -Werror -pthread -Isrc
@@ -35,10 +35,12 @@ $(BUILD_DIR)/obj/%.o: src/%.cpp $(HEADERS)
 $(BUILD_DIR)/openidm: $(CORE_OBJS) src/app/main.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(CORE_OBJS) src/app/main.cpp -o $@ $(LDFLAGS)
 	strip -s $@
+	cp -f $@ $(BUILD_DIR)/flux
 
 $(BUILD_DIR)/openidm-nmh: $(CORE_OBJS) src/nmh/main.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(CORE_OBJS) src/nmh/main.cpp -o $@ $(LDFLAGS)
 	strip -s $@
+	cp -f $@ $(BUILD_DIR)/flux-nmh
 
 $(BUILD_DIR)/N_m3u8DL-RE: $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker_stream/nm3u8dl_re_worker.cpp $(HEADERS)
 	@mkdir -p tools
@@ -49,9 +51,10 @@ $(BUILD_DIR)/N_m3u8DL-RE: $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker
 
 $(BUILD_DIR)/openidm_unit_tests: $(CORE_OBJS) tests/cpp/unit_tests.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(CORE_OBJS) tests/cpp/unit_tests.cpp -o $@ $(LDFLAGS)
+	cp -f $@ $(BUILD_DIR)/flux_unit_tests
 
 test: all
-	./$(BUILD_DIR)/openidm_unit_tests
+	./$(BUILD_DIR)/flux_unit_tests
 	node tests/test_extension_detection.js
 	python3 tests/run_all_integration_tests.py
 

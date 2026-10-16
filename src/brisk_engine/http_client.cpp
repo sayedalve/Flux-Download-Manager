@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -362,12 +363,25 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         // ---------------------------------------------------------------------
         // POSIX Socket + OpenSSL Implementation
         // ---------------------------------------------------------------------
+        std::string connect_host = pu.host;
+        if (const char* host_map = std::getenv("FLUX_HOST_RESOLVER_MAP")) {
+            std::string map_s(host_map);
+            std::string lower_map = ToLower(map_s);
+            std::string key = ToLower(pu.host) + "=";
+            auto pos = lower_map.find(key);
+            if (pos != std::string::npos) {
+                auto val_start = pos + key.size();
+                auto comma = map_s.find(',', val_start);
+                connect_host = Trim(map_s.substr(val_start, comma == std::string::npos ? std::string::npos : comma - val_start));
+            }
+        }
+
         struct addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
         struct addrinfo* res = nullptr;
         std::string port_str = std::to_string(pu.port);
-        if (getaddrinfo(pu.host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+        if (getaddrinfo(connect_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
             return Result<HttpResponseMeta>::Err("ERR_NET_DNS", "Failed to resolve host: " + pu.host, true);
         }
 

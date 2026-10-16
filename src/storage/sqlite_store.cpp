@@ -468,9 +468,24 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
     }
     sqlite3_finalize(stmt);
 
+    std::map<std::string, std::vector<Segment>> seg_map;
+    sqlite3_stmt* seg_stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, "SELECT task_id, segment_id, start_offset, current_offset, end_offset, completed FROM task_segments ORDER BY segment_id ASC;", -1, &seg_stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(seg_stmt) == SQLITE_ROW) {
+            std::string tid = ColText(seg_stmt, 0);
+            Segment s;
+            s.segment_id = static_cast<uint32_t>(sqlite3_column_int(seg_stmt, 1));
+            s.start_offset = static_cast<uint64_t>(sqlite3_column_int64(seg_stmt, 2));
+            s.current_offset = static_cast<uint64_t>(sqlite3_column_int64(seg_stmt, 3));
+            s.end_offset = static_cast<uint64_t>(sqlite3_column_int64(seg_stmt, 4));
+            s.completed = sqlite3_column_int(seg_stmt, 5) != 0;
+            seg_map[tid].push_back(s);
+        }
+        sqlite3_finalize(seg_stmt);
+    }
     for (auto& t : tasks) {
-        auto segs = LoadSegmentsLocked(t.task_id);
-        if (segs.ok()) t.segments = std::move(*segs.value);
+        auto it = seg_map.find(t.task_id);
+        if (it != seg_map.end()) t.segments = std::move(it->second);
     }
     return Result<std::vector<TaskModel>>::Ok(std::move(tasks));
 }

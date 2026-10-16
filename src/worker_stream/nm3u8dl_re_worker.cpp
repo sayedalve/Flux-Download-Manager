@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — Native C++20 Stream Worker Executable (N_m3u8DL-RE Compatible)
-// Replaces the prototype Python script at tools/N_m3u8DL-RE with a compiled native binary (BUG-006 Fix).
+// OpenIDM — Native C++20 Stream Worker Executable (N_m3u8DL-RE Compatible + YouTube/Site Extractor)
 // Supports:
 //   - @args.rsp response file parsing with quoted arguments
 //   - HLS (#EXTM3U Master & Media playlists, #EXT-X-MEDIA Audio/Subtitles, #EXT-X-MAP, #EXT-X-KEY AES-128)
 //   - MPEG-DASH (<MPD> AdaptationSet, Representation, SegmentTemplate, SegmentTimeline, BaseURL)
+//   - YouTube & Site Extraction (YOUTUBE_STREAM descriptors, ytInitialPlayerResponse HTML/JSON extraction,
+//     separate adaptive Video+Audio stream downloading & FFmpeg muxing, and external yt-dlp worker delegation)
 //   - DRM detection (SAMPLE-AES, CENC, Widevine, PlayReady, FairPlay) & meta.json emission
 //   - Multi-threaded HTTP/HTTPS segment downloading via OpenIDM's HttpClient
 //   - Native in-process AES-128-CBC segment decryption (OpenSSL EVP / Windows CNG BCrypt)
@@ -35,6 +36,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #else
+#include <fcntl.h>
 #include <openssl/evp.h>
 #ifdef __GLIBC__
 #include <malloc.h>
@@ -120,6 +122,33 @@ std::string ToUpper(std::string_view sv) {
     std::string s(sv);
     for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     return s;
+}
+
+std::string StripGooglevideoRangeParams(const std::string& url) {
+    if (url.find("googlevideo.com") == std::string::npos && url.find("/videoplayback") == std::string::npos) {
+        return url;
+    }
+    auto qpos = url.find('?');
+    if (qpos == std::string::npos) return url;
+    std::string base = url.substr(0, qpos);
+    std::string query = url.substr(qpos + 1);
+    std::ostringstream kept;
+    bool first = true;
+    std::istringstream qss(query);
+    std::string pair;
+    while (std::getline(qss, pair, '&')) {
+        if (pair.empty()) continue;
+        auto eq = pair.find('=');
+        std::string key = (eq == std::string::npos) ? pair : pair.substr(0, eq);
+        if (key == "range" || key == "rn" || key == "rbuf" || key == "ump" || key == "srfvp" || key == "alr" || key == "cpn") {
+            continue;
+        }
+        if (!first) kept << "&";
+        kept << pair;
+        first = false;
+    }
+    std::string qs = kept.str();
+    return qs.empty() ? base : (base + "?" + qs);
 }
 
 std::vector<std::string> SplitShellLine(const std::string& line) {
@@ -386,6 +415,357 @@ std::string ExtractXmlAttr(const std::string& tag_text, const std::string& attr_
     return "";
 }
 
+std::string ExtractBalancedJsonObject(const std::string& s, size_t start_pos) {
+    size_t open_brace = s.find('{', start_pos);
+    if (open_brace == std::string::npos) return "";
+    int depth = 0;
+    bool in_str = false;
+    bool escaped = false;
+    for (size_t i = open_brace; i < s.size(); ++i) {
+        char c = s[i];
+        if (in_str) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_str = false;
+            }
+        } else {
+            if (c == '"') {
+                in_str = true;
+            } else if (c == '{') {
+                ++depth;
+            } else if (c == '}') {
+                --depth;
+                if (depth == 0) {
+                    return s.substr(open_brace, i - open_brace + 1);
+                }
+            }
+        }
+    }
+    return "";
+}
+
+std::string FindYtDlpBinary() {
+    std::error_code ec;
+#ifdef _WIN32
+    const std::string name = "yt-dlp.exe";
+    const char sep = ';';
+#else
+    const std::string name = "yt-dlp";
+    const char sep = ':';
+#endif
+    const std::filesystem::path local_candidates[] = {
+        std::filesystem::current_path(ec) / "tools" / "win-x64" / name,
+        std::filesystem::current_path(ec) / "tools" / name
+    };
+    for (const auto& c : local_candidates) {
+        if (std::filesystem::exists(c, ec)) return c.string();
+    }
+    if (const char* path_env = std::getenv("PATH")) {
+        std::stringstream ss(path_env);
+        std::string dir;
+        while (std::getline(ss, dir, sep)) {
+            if (dir.empty()) continue;
+            auto cand = std::filesystem::path(dir) / name;
+            if (std::filesystem::exists(cand, ec)) return cand.string();
+        }
+    }
+    return "";
+}
+
+bool TryExtractViaYtDlp(const std::string& url, ManifestMeta& meta) {
+    std::string ytdlp_bin = FindYtDlpBinary();
+    if (ytdlp_bin.empty()) return false;
+
+    std::string out;
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE hReadPipe = NULL, hWritePipe = NULL;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return false;
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+    auto to_wide = [](std::string_view sv) {
+        if (sv.empty()) return std::wstring();
+        int sz = MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), nullptr, 0);
+        std::wstring w(sz, 0);
+        MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), w.data(), sz);
+        return w;
+    };
+
+    std::wstring cmd = L"\"" + to_wide(ytdlp_bin) + L"\" --dump-single-json --no-warnings --no-playlist \"" + to_wide(url) + L"\"";
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return false;
+    }
+    CloseHandle(hWritePipe);
+
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(hReadPipe, buf, sizeof(buf), &got, nullptr) && got > 0) {
+        out.append(buf, got);
+    }
+    CloseHandle(hReadPipe);
+
+    WaitForSingleObject(pi.hProcess, 15000);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (exit_code != 0 || out.empty()) return false;
+#else
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return false;
+    pid_t pid = fork();
+    if (pid == 0) {
+        ::close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        int devnull = ::open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, STDERR_FILENO); ::close(devnull); }
+        if (pipefd[1] > 2) ::close(pipefd[1]);
+        execl(ytdlp_bin.c_str(), ytdlp_bin.c_str(), "--dump-single-json", "--no-warnings", "--no-playlist", url.c_str(), nullptr);
+        _exit(127);
+    }
+    ::close(pipefd[1]);
+    char buf[4096];
+    ssize_t n = 0;
+    while ((n = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+        out.append(buf, static_cast<size_t>(n));
+    }
+    ::close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || out.empty()) return false;
+#endif
+
+    try {
+        auto root = openidm::json::Parse(out);
+        if (!root.is_object()) return false;
+        std::string direct_url = root["url"].as_string();
+        if (!direct_url.empty()) {
+            TrackItem tr;
+            tr.id = "vid_0";
+            tr.media_type = "VIDEO";
+            tr.group_id = "main";
+            tr.name = root["title"].as_string("youtube_video");
+            tr.resolution = root["resolution"].as_string("1280x720");
+            tr.playlist_url = direct_url;
+            SegmentItem seg;
+            seg.index = 0;
+            seg.url = StripGooglevideoRangeParams(direct_url);
+            seg.duration = root["duration"].as_double(4.0);
+            tr.segments.push_back(std::move(seg));
+            tr.duration_sec = root["duration"].as_double(4.0);
+            meta.tracks.push_back(std::move(tr));
+            return true;
+        }
+    } catch (...) {}
+    return false;
+}
+
+bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta);
+
+bool ParseYouTubeJsonIntoMeta(const openidm::json::Value& root, const WorkerOptions& opts, ManifestMeta& meta) {
+    if (!root.is_object()) return false;
+
+    // Case A: Structured YOUTUBE_STREAM descriptor emitted by Flux extension catch.js
+    if (root["fluxType"].as_string() == "YOUTUBE_STREAM") {
+        std::string hls_url = root["hlsManifestUrl"].as_string();
+        if (!hls_url.empty()) {
+            WorkerOptions sub = opts;
+            sub.input = hls_url;
+            sub.base_url = hls_url;
+            if (ExtractManifestInfo(sub, meta)) return true;
+        }
+        std::string dash_url = root["dashManifestUrl"].as_string();
+        if (!dash_url.empty()) {
+            WorkerOptions sub = opts;
+            sub.input = dash_url;
+            sub.base_url = dash_url;
+            if (ExtractManifestInfo(sub, meta)) return true;
+        }
+
+        std::string video_url = StripGooglevideoRangeParams(root["videoUrl"].as_string());
+        std::string audio_url = StripGooglevideoRangeParams(root["audioUrl"].as_string());
+        std::string watch_url = root["watchUrl"].as_string(opts.base_url);
+
+        if (!video_url.empty()) {
+            meta.url = watch_url.empty() ? video_url : watch_url;
+            TrackItem vtr;
+            vtr.id = "vid_0";
+            vtr.media_type = "VIDEO";
+            vtr.group_id = "youtube_video";
+            vtr.language = "und";
+            vtr.name = root["title"].as_string("youtube_video");
+            vtr.resolution = root["resolution"].as_string("1280x720");
+            vtr.codecs = "avc1.64001f";
+            vtr.bandwidth = 2500000;
+            vtr.playlist_url = video_url;
+            SegmentItem vseg;
+            vseg.index = 0;
+            vseg.url = video_url;
+            vseg.duration = 4.0;
+            vtr.segments.push_back(std::move(vseg));
+            vtr.duration_sec = 4.0;
+            meta.tracks.push_back(std::move(vtr));
+
+            if (!audio_url.empty() && audio_url != video_url) {
+                TrackItem atr;
+                atr.id = "aud_0";
+                atr.media_type = "AUDIO";
+                atr.group_id = "youtube_audio";
+                atr.language = "en";
+                atr.name = "audio_main";
+                atr.codecs = "mp4a.40.2";
+                atr.bandwidth = 128000;
+                atr.playlist_url = audio_url;
+                SegmentItem aseg;
+                aseg.index = 0;
+                aseg.url = audio_url;
+                aseg.duration = 4.0;
+                atr.segments.push_back(std::move(aseg));
+                atr.duration_sec = 4.0;
+                meta.tracks.push_back(std::move(atr));
+            }
+            return true;
+        }
+
+        if (!watch_url.empty() && watch_url != opts.input) {
+            if (TryExtractViaYtDlp(watch_url, meta)) return true;
+            WorkerOptions sub = opts;
+            sub.input = watch_url;
+            sub.base_url = watch_url;
+            return ExtractManifestInfo(sub, meta);
+        }
+        return false;
+    }
+
+    // Case B: Raw ytInitialPlayerResponse JSON object
+    const auto& play_status = root["playabilityStatus"];
+    if (play_status.is_object()) {
+        std::string st = play_status["status"].as_string("OK");
+        if (st != "OK" && !root["streamingData"].is_object()) {
+            std::string reason = play_status["reason"].as_string("Stream status: " + st);
+            std::cerr << "ERROR: YouTube stream unplayable: " << reason << "\n";
+            return false;
+        }
+    }
+
+    const auto& sdata = root["streamingData"];
+    if (!sdata.is_object()) return false;
+
+    std::string hls_url = sdata["hlsManifestUrl"].as_string();
+    if (!hls_url.empty()) {
+        WorkerOptions sub = opts;
+        sub.input = hls_url;
+        sub.base_url = hls_url;
+        if (ExtractManifestInfo(sub, meta)) return true;
+    }
+
+    std::string dash_url = sdata["dashManifestUrl"].as_string();
+    if (!dash_url.empty()) {
+        WorkerOptions sub = opts;
+        sub.input = dash_url;
+        sub.base_url = dash_url;
+        if (ExtractManifestInfo(sub, meta)) return true;
+    }
+
+    std::string best_video_url;
+    std::string best_video_res = "640x360";
+    uint64_t best_video_bw = 0;
+    std::string best_audio_url;
+    uint64_t best_audio_bw = 0;
+
+    if (sdata["adaptiveFormats"].is_array()) {
+        for (const auto& item : sdata["adaptiveFormats"].as_array()) {
+            std::string u = item["url"].as_string();
+            if (u.empty()) continue;
+            std::string mime = ToLower(item["mimeType"].as_string());
+            uint64_t bw = static_cast<uint64_t>(item["bitrate"].as_int64(item["averageBitrate"].as_int64(500000)));
+            if (mime.rfind("video/", 0) == 0) {
+                if (bw >= best_video_bw) {
+                    best_video_bw = bw;
+                    best_video_url = StripGooglevideoRangeParams(u);
+                    std::string q = item["qualityLabel"].as_string();
+                    if (!q.empty()) best_video_res = q;
+                }
+            } else if (mime.rfind("audio/", 0) == 0) {
+                if (bw >= best_audio_bw) {
+                    best_audio_bw = bw;
+                    best_audio_url = StripGooglevideoRangeParams(u);
+                }
+            }
+        }
+    }
+
+    if (best_video_url.empty() && sdata["formats"].is_array()) {
+        for (const auto& item : sdata["formats"].as_array()) {
+            std::string u = item["url"].as_string();
+            if (u.empty()) continue;
+            uint64_t bw = static_cast<uint64_t>(item["bitrate"].as_int64(1000000));
+            if (bw >= best_video_bw || best_video_url.empty()) {
+                best_video_bw = bw;
+                best_video_url = StripGooglevideoRangeParams(u);
+                std::string q = item["qualityLabel"].as_string();
+                if (!q.empty()) best_video_res = q;
+            }
+        }
+    }
+
+    if (!best_video_url.empty()) {
+        TrackItem vtr;
+        vtr.id = "vid_0";
+        vtr.media_type = "VIDEO";
+        vtr.group_id = "youtube_video";
+        vtr.name = root["videoDetails"]["title"].as_string("youtube_video");
+        vtr.resolution = best_video_res;
+        vtr.bandwidth = best_video_bw > 0 ? best_video_bw : 1500000;
+        vtr.playlist_url = best_video_url;
+        SegmentItem vseg;
+        vseg.index = 0;
+        vseg.url = best_video_url;
+        vseg.duration = 4.0;
+        vtr.segments.push_back(std::move(vseg));
+        vtr.duration_sec = 4.0;
+        meta.tracks.push_back(std::move(vtr));
+
+        if (!best_audio_url.empty() && best_audio_url != best_video_url) {
+            TrackItem atr;
+            atr.id = "aud_0";
+            atr.media_type = "AUDIO";
+            atr.group_id = "youtube_audio";
+            atr.language = "en";
+            atr.name = "audio_main";
+            atr.bandwidth = best_audio_bw > 0 ? best_audio_bw : 128000;
+            atr.playlist_url = best_audio_url;
+            SegmentItem aseg;
+            aseg.index = 0;
+            aseg.url = best_audio_url;
+            aseg.duration = 4.0;
+            atr.segments.push_back(std::move(aseg));
+            atr.duration_sec = 4.0;
+            meta.tracks.push_back(std::move(atr));
+        }
+        return true;
+    }
+
+    std::cerr << "ERROR: YouTube stream requires external signature deciphering (install yt-dlp in tools/ or PATH)\n";
+    return false;
+}
+
 bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
     std::vector<uint8_t> raw_bytes;
     std::string resolved_url;
@@ -499,7 +879,6 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
         }
         meta.is_live = (ToLower(ExtractXmlAttr(text, "type")) == "dynamic");
 
-        // Parse AdaptationSet blocks
         static const std::regex kAdaptRe(R"(<AdaptationSet\b([^>]*)>([\s\S]*?)</AdaptationSet>)");
         static const std::regex kRepRe(R"(<Representation\b([^>]*)>([\s\S]*?)</Representation>)");
         static const std::regex kBaseUrlRe(R"(<BaseURL>([^<]+)</BaseURL>)");
@@ -606,6 +985,35 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                 meta.tracks.push_back(std::move(tr));
             }
         }
+        return true;
+    }
+
+    // 3. JSON Stream Descriptor (YOUTUBE_STREAM or ytInitialPlayerResponse JSON)
+    if (!text.empty() && text.front() == '{') {
+        try {
+            auto root = openidm::json::Parse(text);
+            if (ParseYouTubeJsonIntoMeta(root, opts, meta)) {
+                return true;
+            }
+        } catch (...) {}
+    }
+
+    // 4. HTML Webpage containing ytInitialPlayerResponse (YouTube watch/shorts/embed page)
+    auto yt_pos = text.find("ytInitialPlayerResponse");
+    if (yt_pos != std::string::npos) {
+        std::string json_str = ExtractBalancedJsonObject(text, yt_pos);
+        if (!json_str.empty()) {
+            try {
+                auto root = openidm::json::Parse(json_str);
+                if (ParseYouTubeJsonIntoMeta(root, opts, meta)) {
+                    return true;
+                }
+            } catch (...) {}
+        }
+    }
+
+    // 5. Fallback to external yt-dlp binary if input is a webpage URL
+    if (TryExtractViaYtDlp(base_url, meta)) {
         return true;
     }
 
@@ -898,8 +1306,12 @@ int main(int argc, char* argv[]) {
 #endif
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--version" || a == "-v" || a == "--help" || a == "-h") {
-            std::cout << "N_m3u8DL-RE (OpenIDM Stream Worker Bridge v0.2.0 / N_m3u8DL-RE v0.6.0-beta CLI contract)\n";
+        if (a == "--version" || a == "-v") {
+            std::cout << "N_m3u8DL-RE (Flux Stream Worker v0.3.0 / N_m3u8DL-RE v0.3.0-beta CLI contract)\n";
+            return 0;
+        }
+        if (a == "--help" || a == "-h") {
+            std::cout << "N_m3u8DL-RE v0.3.0 --auto-select --ffmpeg-binary-path --skip-download --write-meta-json\n";
             return 0;
         }
     }

@@ -424,7 +424,7 @@ std::filesystem::path PathSanitizer::GetDefaultAppDataDir() {
         if (env_legacy[0] != '\0') return std::filesystem::path(env_legacy);
     }
 #endif
-    std::filesystem::path fallback_dir = std::filesystem::temp_directory_path(ec) / "flux_data";
+    std::filesystem::path fallback_dir = std::filesystem::temp_directory_path(ec) / "Flux_Data";
     MigrateLegacyDataIfNeeded(fallback_dir);
     return fallback_dir;
 }
@@ -449,7 +449,7 @@ std::filesystem::path PathSanitizer::GetDefaultDownloadsDir(const std::filesyste
     }
 #endif
     std::error_code ec;
-    return std::filesystem::temp_directory_path(ec) / "flux_downloads";
+    return std::filesystem::temp_directory_path(ec) / "Flux_Downloads";
 }
 
 std::filesystem::path PathSanitizer::FindWorkerBinary(
@@ -486,6 +486,7 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
         }
     }
     const std::filesystem::path bundled_dirs[] = {
+        exe_dir,
         exe_dir / "tools" / "win-x64",
         exe_dir / "tools",
         exe_dir.parent_path() / "tools" / "win-x64",

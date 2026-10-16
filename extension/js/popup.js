@@ -19,15 +19,25 @@ function extractSourceHost(urlStr) {
   }
 }
 
+function isStreamCandidate(item) {
+  if (!item) return false;
+  return item.streamType === "HLS" ||
+         item.streamType === "DASH" ||
+         item.streamType === "MSS" ||
+         item.streamType === "YOUTUBE" ||
+         item.streamType === "SITE_EXTRACTION" ||
+         item.streamType === "VIMEO";
+}
+
 function filterPopupCandidates(candidates, filterMode = "all", searchQuery = "") {
   if (!Array.isArray(candidates)) return [];
   const q = (searchQuery || "").trim().toLowerCase();
   return candidates.filter(item => {
-    const isStream = (item.streamType === "HLS" || item.streamType === "DASH");
+    const isStream = isStreamCandidate(item);
     if (filterMode === "stream" && !isStream) return false;
     if (filterMode === "direct" && isStream) return false;
     if (q) {
-      const title = (item.pageTitle || item.url || "").toLowerCase();
+      const title = (item.pageTitle || item.fileName || item.url || "").toLowerCase();
       const badge = (item.streamType || item.ext || "").toLowerCase();
       const res = (item.resolution || "").toLowerCase();
       return title.includes(q) || badge.includes(q) || res.includes(q);
@@ -62,12 +72,16 @@ function renderDetectedMediaList(candidates, options = {}) {
     : '<div class="error-banner" data-state="disconnected">Flux Desktop is offline. Direct files will fall back to browser download.</div>';
 
   const itemsHtml = filtered.map(item => {
-    const isStream = (item.streamType === "HLS" || item.streamType === "DASH");
-    const badge = item.streamType || (item.ext ? item.ext.toUpperCase() : "MEDIA");
+    const isStream = isStreamCandidate(item);
+    const badge = isStream
+      ? item.streamType
+      : (item.ext ? item.ext.toUpperCase() : (item.streamType || "MEDIA"));
     const badgeClass = isStream ? "badge badge-stream" : "badge";
-    const rawName = item.pageTitle || (item.url ? item.url.split("?")[0].split("/").pop() : "media");
+    const rawName = item.pageTitle || item.fileName || (item.url ? item.url.split("?")[0].split("/").pop() : "media");
     const sourceHost = extractSourceHost(item.tabUrl || item.url);
-    const qualityTag = item.resolution ? `<span>${item.resolution}</span>` : `<span>${formatMediaSize(item.size)}</span>`;
+    const qualityTag = item.resolution
+      ? `<span>${item.resolution}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
+      : `<span>${formatMediaSize(item.size)}</span>`;
     const variantNote = (item.variants && item.variants.length > 0)
       ? `<small>(+${item.variants.length} sub-playlists grouped)</small>`
       : "";
@@ -83,7 +97,7 @@ function renderDetectedMediaList(candidates, options = {}) {
         <div class="media-sub-row">
           <span>${sourceHost}</span>
           ${qualityTag}
-          <span>${statusText}</span>
+          <span class="item-status">${statusText}</span>
           ${variantNote}
         </div>
       </div>
@@ -103,7 +117,8 @@ function initPopupUI() {
   let currentCandidates = [];
   let activeFilterMode = "all";
   let activeSearchQuery = "";
-  let isDesktopConnected = true;
+  let isDesktopConnected = false;
+  let activeErrorMessage = "";
 
   const mediaListEl = document.getElementById("mediaList");
   const connectionBadge = document.getElementById("connectionBadge");
@@ -118,7 +133,8 @@ function initPopupUI() {
     mediaListEl.innerHTML = renderDetectedMediaList(currentCandidates, {
       filterMode: activeFilterMode,
       searchQuery: activeSearchQuery,
-      desktopConnected: isDesktopConnected
+      desktopConnected: isDesktopConnected,
+      errorMessage: activeErrorMessage
     });
     attachItemClickListeners();
   }
@@ -128,23 +144,33 @@ function initPopupUI() {
     const buttons = mediaListEl.querySelectorAll(".dl-btn");
     buttons.forEach(btn => {
       btn.addEventListener("click", (ev) => {
-        const candidateId = ev.target.getAttribute("data-id");
-        const url = ev.target.getAttribute("data-url");
-        ev.target.textContent = "Connecting...";
-        ev.target.disabled = true;
+        const targetBtn = ev.currentTarget || ev.target;
+        const candidateId = targetBtn.getAttribute("data-id");
+        const url = targetBtn.getAttribute("data-url");
+        targetBtn.textContent = "Connecting...";
+        targetBtn.disabled = true;
 
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
           chrome.runtime.sendMessage({
             action: "downloadMedia",
             candidateId,
             url,
-            tabId: currentTabId
+            tabId: currentTabId,
+            tabUrl: currentTabUrl
           }, (resp) => {
-            if (resp && resp.success) {
-              ev.target.textContent = "Queued in Flux";
+            const lastErr = chrome.runtime.lastError ? chrome.runtime.lastError.message : null;
+            if (!lastErr && resp && resp.success) {
+              const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
+              targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Flux";
+              const taskId = (resp.result && resp.result.taskId) ? resp.result.taskId : "";
+              if (taskId) targetBtn.setAttribute("data-task-id", taskId);
+              const itemCand = currentCandidates.find(c => c.candidateId === candidateId);
+              if (itemCand) itemCand.handoffStatus = isFallback ? "Browser Fallback" : "Queued in Flux";
             } else {
-              ev.target.textContent = (resp && resp.error) ? "Error" : "Failed";
-              ev.target.disabled = false;
+              const errMsg = lastErr || (resp && resp.error) || "Failed";
+              targetBtn.textContent = "Failed";
+              targetBtn.title = errMsg;
+              targetBtn.disabled = false;
             }
           });
         }
@@ -152,37 +178,79 @@ function initPopupUI() {
     });
   }
 
-  function fetchTabData() {
+  function updateConnectionBadge(connected) {
+    isDesktopConnected = Boolean(connected);
+    if (!connectionBadge) return;
+    if (isDesktopConnected) {
+      connectionBadge.textContent = "Desktop Connected";
+      connectionBadge.className = "conn-badge conn-connected";
+    } else {
+      connectionBadge.textContent = "Desktop Offline";
+      connectionBadge.className = "conn-badge conn-disconnected";
+    }
+  }
+
+  function fetchTabData(explicitTabId = null) {
     if (typeof chrome === "undefined" || !chrome.tabs || !chrome.runtime) return;
+
+    const queryAndLoad = (tabId, tabUrl) => {
+      currentTabId = tabId;
+      currentTabUrl = tabUrl || "";
+      chrome.runtime.sendMessage({
+        action: "getMediaList",
+        tabId: currentTabId,
+        tabUrl: currentTabUrl
+      }, (res) => {
+        const lastErr = chrome.runtime.lastError ? chrome.runtime.lastError.message : null;
+        if (lastErr || !res) {
+          updateConnectionBadge(false);
+          activeErrorMessage = lastErr ? ("Extension service worker error: " + lastErr) : "";
+          refreshListDisplay();
+          return;
+        }
+        updateConnectionBadge(res.desktopConnected);
+        if (siteToggle) {
+          siteToggle.checked = Boolean(res.captureEnabled && !res.siteDisabled);
+        }
+        currentCandidates = res.candidates || [];
+        activeErrorMessage = (currentCandidates.length === 0 && res.playerError) ? res.playerError : "";
+        refreshListDisplay();
+      });
+    };
+
+    const urlParams = (typeof window !== "undefined" && window.location)
+      ? new URLSearchParams(window.location.search)
+      : null;
+    const paramTabId = explicitTabId || (urlParams && urlParams.get("tabId") ? Number(urlParams.get("tabId")) : null);
+    const paramTabUrl = (urlParams && urlParams.get("tabUrl")) || "";
+
+    if (paramTabId && paramTabId > 0) {
+      queryAndLoad(paramTabId, paramTabUrl);
+      return;
+    }
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs && tabs[0]) {
-        currentTabId = tabs[0].id;
-        currentTabUrl = tabs[0].url || "";
+        // If popup.html itself was opened as a tab, find the active non-extension tab in the window
+        let targetTab = tabs[0];
+        if (targetTab.url && targetTab.url.startsWith("chrome-extension://")) {
+          chrome.tabs.query({ currentWindow: true }, (allTabs) => {
+            const nonExt = (allTabs || []).find(t => t.url && !t.url.startsWith("chrome-extension://"));
+            if (nonExt) targetTab = nonExt;
+            queryAndLoad(targetTab.id, targetTab.url || "");
+          });
+          return;
+        }
+        queryAndLoad(targetTab.id, targetTab.url || "");
+      }
+    });
+  }
 
-        chrome.runtime.sendMessage({
-          action: "getMediaList",
-          tabId: currentTabId,
-          tabUrl: currentTabUrl
-        }, (res) => {
-          if (res) {
-            isDesktopConnected = Boolean(res.desktopConnected);
-            if (connectionBadge) {
-              if (isDesktopConnected) {
-                connectionBadge.textContent = "Desktop Connected";
-                connectionBadge.className = "conn-badge conn-connected";
-              } else {
-                connectionBadge.textContent = "Desktop Offline";
-                connectionBadge.className = "conn-badge conn-disconnected";
-              }
-            }
-            if (siteToggle) {
-              siteToggle.checked = Boolean(res.captureEnabled && !res.siteDisabled);
-            }
-            currentCandidates = res.candidates || [];
-            refreshListDisplay();
-          }
-        });
+  // Listen for live updates from background service worker while popup is open
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.action === "mediaUpdated" && (!msg.tabId || msg.tabId === currentTabId)) {
+        fetchTabData(currentTabId);
       }
     });
   }
@@ -222,6 +290,7 @@ function initPopupUI() {
   if (clearListBtn) {
     clearListBtn.addEventListener("click", () => {
       currentCandidates = [];
+      activeErrorMessage = "";
       refreshListDisplay();
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage({
@@ -246,7 +315,8 @@ function initPopupUI() {
             action: "downloadMedia",
             candidateId: item.candidateId,
             url: item.url,
-            tabId: currentTabId
+            tabId: currentTabId,
+            tabUrl: currentTabUrl
           });
         }
       });

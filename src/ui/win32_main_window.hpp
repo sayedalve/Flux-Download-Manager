@@ -213,8 +213,8 @@ struct BrowserIntegrationStatusView {
 };
 
 struct AboutDialogView {
-    std::string app_name{"OpenIDM"};
-    std::string version{"0.2.0"};
+    std::string app_name{"Flux Download Manager"};
+    std::string version{"0.3.0"};
     std::string license{"GPL-3.0-or-later"};
     std::string target_platform{"Windows 11 x64 (Native Win32 + Direct2D/GDI)"};
     std::vector<std::string> upstream_attributions;

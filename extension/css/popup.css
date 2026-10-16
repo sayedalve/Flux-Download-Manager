@@ -1,13 +1,13 @@
 :root {
-  --bg-main: #18181B;
-  --bg-surface: #1F1F23;
-  --bg-elevated: #27272A;
-  --border-subtle: #3F3F46;
-  --text-primary: #F4F4F5;
-  --text-secondary: #A1A1AA;
-  --accent-blue: #3B82F6;
-  --accent-blue-hover: #2563EB;
-  --badge-stream: #8B5CF6;
+  --bg-main: #0F172A;
+  --bg-surface: #1E293B;
+  --bg-elevated: #334155;
+  --border-subtle: #475569;
+  --text-primary: #F8FAFC;
+  --text-secondary: #94A3B8;
+  --accent-blue: #2563EB;
+  --accent-blue-hover: #3B82F6;
+  --badge-stream: #7C3AED;
   --status-ok: #22C55E;
   --status-warn: #F59E0B;
   --status-err: #EF4444;

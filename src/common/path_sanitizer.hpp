@@ -34,13 +34,16 @@ public:
         std::string_view final_filename,
         ConflictPolicy policy = ConflictPolicy::kAutoRename);
 
-    // Resolves the directory containing the running OpenIDM executable (GetModuleFileNameW / /proc/self/exe)
+    // Resolves the directory containing the running Flux executable (GetModuleFileNameW / /proc/self/exe)
     static std::filesystem::path GetExecutableDir(const char* argv0 = nullptr);
 
-    // Resolves platform-appropriate application data directory (%LOCALAPPDATA%\OpenIDM on Windows 11)
+    // Safely migrates legacy OpenIDM state database and settings to Flux Download Manager
+    static bool MigrateLegacyDataIfNeeded(const std::filesystem::path& target_flux_dir);
+
+    // Resolves platform-appropriate application data directory (%LOCALAPPDATA%\Flux Download Manager on Windows 11)
     static std::filesystem::path GetDefaultAppDataDir();
 
-    // Resolves platform-appropriate default downloads directory (%USERPROFILE%\Downloads\OpenIDM on Windows 11)
+    // Resolves platform-appropriate default downloads directory (%USERPROFILE%\Downloads\Flux on Windows 11)
     static std::filesystem::path GetDefaultDownloadsDir(const std::filesystem::path& exe_dir);
 
     // Dynamically discovers a worker executable (e.g., "N_m3u8DL-RE" or "ffmpeg") across:
@@ -57,6 +60,10 @@ public:
         const std::filesystem::path& dir,
         uint64_t required_bytes,
         uint64_t reserve_bytes = 4ULL * 1048576ULL);
+
+    // Classifies whether a URL is an HTML webpage (e.g. YouTube watch page, Vimeo page)
+    // rather than a direct downloadable media file or stream manifest
+    static bool IsWebpageWatchUrl(std::string_view url);
 };
 
 } // namespace openidm

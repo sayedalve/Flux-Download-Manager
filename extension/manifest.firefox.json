@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "OpenIDM Browser Integration (Cat Catch + Brisk Engine)",
-  "version": "0.1.0",
-  "description": "Automatic download capture and multi-layered video/stream detection (HLS/DASH/MP4/WebM) for OpenIDM.",
+  "name": "Flux Download Manager (Flux Browser Integration)",
+  "version": "0.3.0",
+  "description": "Automatic download capture and multi-layered video/stream detection (HLS/DASH/MP4/WebM) for Flux Download Manager.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "extension@openidm.org",
+      "id": "flux-extension@fluxdownloadmanager.org",
       "strict_min_version": "115.0"
     }
   },
@@ -24,7 +24,7 @@
     "scripts": ["js/background.js"]
   },
   "action": {
-    "default_title": "OpenIDM Media & Download Capture",
+    "default_title": "Flux Media & Download Capture",
     "default_popup": "popup.html"
   },
   "content_scripts": [

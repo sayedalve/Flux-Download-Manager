@@ -96,6 +96,21 @@ Without deduplication, the user sees three confusing `.m3u8` entries in the popu
 
 ## 6. Explicit Limitations on MSE `blob:` URLs (`KNOWN_LIMITATIONS.md`)
 
-OpenIDM's documentation and UI never promise that every `blob:` URL can be reconstructed into a downloadable file:
+OpenIDM / Flux documentation and UI never promise that every `blob:` URL can be reconstructed into a downloadable file:
 - Standard `blob:` URLs created via `URL.createObjectURL(mediaSource)` are downloaded by capturing the **network manifest (`.m3u8`/`.mpd`)** that feeds the `MediaSource`.
 - If a site uses a custom proprietary binary WebSocket protocol or custom WebAssembly cipher to feed raw decrypted frames into `SourceBuffer.appendBuffer` without any HTTP manifest, `N_m3u8DL-RE` cannot download it. Supporting raw MSE buffer recording (`SourceBuffer` tap) is deferred as an experimental post-MVP option (`OPEN_QUESTIONS.md` `OQ-004`).
+
+---
+
+## 7. Webpage Watch URL Guard & Intent Classification (`BUG-034`)
+
+Websites like YouTube (`youtube.com/watch?v=...`, `youtube.com/shorts/...`), Vimeo (`vimeo.com/...`), and Twitch (`twitch.tv/...`) present HTML watch pages rather than direct media files or static manifests.
+
+1. **The Watch Page Failure Mode:**
+   - If a user passes an HTML watch page URL directly to an ordinary segmented HTTP engine, the engine issues concurrent byte-range requests (`Range: bytes=0-1048575`) against an HTML web page. Streaming platforms detect this anomalous non-browser traffic and immediately return **HTTP 429 Too Many Requests** or generic HTML blocks.
+2. **Intent Classification & Rejection Guard:**
+   - `extension/js/function.js` (`isWebpageWatchUrl`) and `src/common/path_sanitizer.cpp` (`PathSanitizer::IsWebpageWatchUrl`) intercept watch URLs before network requests are dispatched.
+   - The desktop controller and IPC layer reject watch URLs with error code `ERR_URL_IS_WEBPAGE`, informing the user that the URL is a streaming webpage and directing them to open the page in their browser and play the video so Flux's extension can capture the stream manifests.
+3. **Capture via In-Page Playback Hooks:**
+   - When the user plays the video in the browser, `catch-script/catch.js` (hooking `window.fetch` and `XMLHttpRequest` in the `MAIN` world) and the background network monitor capture the actual stream manifests (`.m3u8`, `.mpd`) and progressive segments, routing them cleanly through `N_m3u8DL-RE` or the segmented engine.
+

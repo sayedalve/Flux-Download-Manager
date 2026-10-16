@@ -168,24 +168,24 @@ public:
     static ThemePalette GetDarkPalette() {
         ThemePalette p;
         p.mode = ThemeMode::kDark;
-        p.app_background   = {0x18, 0x18, 0x1B, 255}; // #18181B Deep Charcoal
-        p.surface_primary  = {0x1F, 0x1F, 0x23, 255}; // #1F1F23 Elevated Charcoal
-        p.surface_elevated = {0x27, 0x27, 0x2A, 255}; // #27272A Card / Dialog Surface
-        p.surface_hover    = {0x2E, 0x2E, 0x33, 255}; // #2E2E33 Interactive Hover
-        p.surface_selected = {0x1E, 0x29, 0x3B, 255}; // #1E293B Restrained Blue-Slate Selection
-        p.border_subtle    = {0x3F, 0x3F, 0x46, 255}; // #3F3F46 Hairline Divider
-        p.border_focus     = {0x60, 0xA5, 0xFA, 255}; // #60A5FA High-Contrast Focus Ring
-        p.text_primary     = {0xF4, 0xF4, 0xF5, 255}; // #F4F4F5 Crisp Off-White
-        p.text_secondary   = {0xA1, 0xA1, 0xAA, 255}; // #A1A1AA Secondary Metadata
-        p.text_muted       = {0x71, 0x71, 0x7A, 255}; // #71717A Disabled / Hint
-        p.accent_primary   = {0x3B, 0x82, 0xF6, 255}; // #3B82F6 Restrained Blue Accent
-        p.accent_hover     = {0x25, 0x63, 0xEB, 255}; // #2563EB Accent Hover
+        p.app_background   = {0x0F, 0x17, 0x2A, 255}; // #0F172A Flux Deep Slate
+        p.surface_primary  = {0x1E, 0x29, 0x3B, 255}; // #1E293B Dark Navy Surface
+        p.surface_elevated = {0x33, 0x41, 0x55, 255}; // #334155 Elevated Surface
+        p.surface_hover    = {0x47, 0x55, 0x69, 255}; // #475569 Interactive Hover
+        p.surface_selected = {0x1E, 0x3A, 0x8A, 255}; // #1E3A8A Deep Blue Selection
+        p.border_subtle    = {0x33, 0x41, 0x55, 255}; // #334155 Hairline Divider
+        p.border_focus     = {0x60, 0xA5, 0xFA, 255}; // #60A5FA Focus Ring
+        p.text_primary     = {0xF8, 0xFA, 0xFC, 255}; // #F8FAFC Crisp Off-White
+        p.text_secondary   = {0x94, 0xA3, 0xB8, 255}; // #94A3B8 Secondary Metadata
+        p.text_muted       = {0x64, 0x74, 0x8B, 255}; // #64748B Disabled / Hint
+        p.accent_primary   = {0x25, 0x63, 0xEB, 255}; // #2563EB Flux Blue Accent
+        p.accent_hover     = {0x3B, 0x82, 0xF6, 255}; // #3B82F6 Accent Hover
         p.badge_stream     = {0x8B, 0x5C, 0xF6, 255}; // #8B5CF6 Media Stream Badge
-        p.badge_file       = {0x3B, 0x82, 0xF6, 255}; // #3B82F6 Direct File Badge
+        p.badge_file       = {0x25, 0x63, 0xEB, 255}; // #2563EB Direct File Badge
         p.status_success   = {0x22, 0xC5, 0x5E, 255}; // #22C55E Completed Green
         p.status_warning   = {0xF5, 0x9E, 0x0B, 255}; // #F59E0B Paused / Warning Amber
         p.status_danger    = {0xEF, 0x44, 0x44, 255}; // #EF4444 Failed / Error Red
-        p.progress_track   = {0x32, 0x32, 0x38, 255}; // #323238 Progress Track
+        p.progress_track   = {0x1E, 0x29, 0x3B, 255}; // #1E293B Progress Track
         return p;
     }
 

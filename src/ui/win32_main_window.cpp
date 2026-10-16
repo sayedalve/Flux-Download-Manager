@@ -745,7 +745,7 @@ TaskDetailsViewModel DesktopView::BuildSelectedTaskDetails() const {
     } else if (t.error_code == "ERR_HTTP_403_EXPIRED_OR_AUTH") {
         vm.error_explanation = t.error_message + " — The server rejected the link or the signed token expired. Use 'Refresh URL' or re-capture from your browser.";
     } else if (t.error_code == "ERR_STREAM_DRM_PROTECTED") {
-        vm.error_explanation = t.error_message + " — Encrypted with commercial DRM (Widevine/PlayReady/FairPlay), which OpenIDM does not circumvent.";
+        vm.error_explanation = t.error_message + " — Encrypted with commercial DRM (Widevine/PlayReady/FairPlay), which Flux does not circumvent.";
     } else if (t.error_code == "ERR_DISK_FULL") {
         vm.error_explanation = t.error_message + " — Free up disk space in the destination folder and click Resume or Retry.";
     } else {
@@ -784,7 +784,7 @@ StatusBarViewModel DesktopView::BuildStatusBar() const {
 std::string DesktopView::GetEmptyStateMessage() const {
     auto all = m_controller.ListTasks();
     if (all.empty()) {
-        return "No downloads yet. Click '+ Add URL' (Ctrl+N) or use the OpenIDM Browser Extension to capture files and video streams.";
+        return "No downloads yet. Click '+ Add URL' (Ctrl+N) or use the Flux Browser Extension to capture files and video streams.";
     }
     if (!m_search_query.empty()) {
         return "No downloads match the search filter \"" + m_search_query + "\". Clear the search box to view all tasks.";
@@ -1192,7 +1192,7 @@ std::string DesktopView::RenderQueueTableText() const {
     auto rows = BuildVisibleTaskRows(0, 500);
     std::ostringstream oss;
     oss << "========================================================================================================================\n";
-    oss << " OpenIDM v0.2.0 — Unified Download Manager  |  Category: " << CategoryToLabel(m_selected_category)
+    oss << " Flux Download Manager v0.3.0 — Unified Download Manager  |  Category: " << CategoryToLabel(m_selected_category)
         << "  |  Theme: " << m_theme_name << "\n";
     oss << "========================================================================================================================\n";
     oss << std::left
@@ -1332,15 +1332,15 @@ void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController
     if (clip_url.empty()) {
         MessageBoxW(
             hwnd,
-            L"Copy an http:// or https:// download or stream (.m3u8 / .mpd) URL to your clipboard and click '+ Add URL' (or press Ctrl+N), or capture media directly from your browser via the OpenIDM Extension.",
-            L"OpenIDM — Add Download",
+            L"Copy an http:// or https:// download or stream (.m3u8 / .mpd) URL to your clipboard and click '+ Add URL' (or press Ctrl+N), or capture media directly from your browser via the Flux Browser Extension.",
+            L"Flux — Add Download",
             MB_OK | MB_ICONINFORMATION);
         return;
     }
 
     std::wstring prompt = L"Add download from clipboard URL?\n\nURL: " + Utf8ToW(clip_url) +
                           L"\nDestination: " + Utf8ToW(controller.GetSettings().default_download_dir);
-    if (MessageBoxW(hwnd, prompt.c_str(), L"OpenIDM — Add Download", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
+    if (MessageBoxW(hwnd, prompt.c_str(), L"Flux — Add Download", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
         AddDownloadDialogInput in;
         in.url = clip_url;
         in.save_dir = controller.GetSettings().default_download_dir;
@@ -1352,7 +1352,7 @@ void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController
 
 void ShowSettingsModalWin32(HWND hwnd, DesktopView& view, DownloadController& controller) {
     auto s = controller.GetSettings();
-    std::wstring msg = L"Current OpenIDM Settings:\n\n"
+    std::wstring msg = L"Current Flux Settings:\n\n"
                        L"• Theme: " + Utf8ToW(s.theme) + L" (Click 'Yes' to toggle Dark / Light theme)\n"
                        L"• Max Concurrent Downloads: " + std::to_wstring(s.max_concurrent_tasks) + L"\n"
                        L"• Default Connections per Task: " + std::to_wstring(s.default_connections_per_task) + L"\n"
@@ -1360,7 +1360,7 @@ void ShowSettingsModalWin32(HWND hwnd, DesktopView& view, DownloadController& co
                        L"• Browser Capture: " + (s.browser_capture_enabled ? L"Enabled" : L"Paused") + L"\n"
                        L"• Close Window to System Tray: " + (s.close_to_tray ? L"Yes" : L"No") + L"\n\n"
                        L"Click [Yes] to switch Theme, [No] to Restore Default Settings, or [Cancel] to close.";
-    int r = MessageBoxW(hwnd, msg.c_str(), L"OpenIDM — Settings", MB_YESNOCANCEL | MB_ICONINFORMATION);
+    int r = MessageBoxW(hwnd, msg.c_str(), L"Flux — Settings", MB_YESNOCANCEL | MB_ICONINFORMATION);
     if (r == IDYES) {
         s.theme = (s.theme == "dark") ? "light" : "dark";
         view.ActionSaveSettings(s);
@@ -1377,7 +1377,7 @@ void ShowBrowserStatusModalWin32(HWND hwnd, DesktopView& view) {
                        L"• Browser Capture: " + std::wstring(st.capture_enabled ? L"Enabled" : L"Disabled") + L"\n"
                        L"• Stream Worker (N_m3u8DL-RE): " + std::wstring(st.nm3u8dl_available ? L"Ready (" : L"Missing (") + Utf8ToW(st.nm3u8dl_path) + L")\n"
                        L"• Media Muxer (FFmpeg): " + std::wstring(st.ffmpeg_available ? L"Ready (" : L"Missing (") + Utf8ToW(st.ffmpeg_path) + L")";
-    MessageBoxW(hwnd, msg.c_str(), L"OpenIDM — Browser Integration Status", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(hwnd, msg.c_str(), L"Flux — Browser Integration Status", MB_OK | MB_ICONINFORMATION);
 }
 
 void ShowAboutModalWin32(HWND hwnd, DesktopView& view) {
@@ -1390,7 +1390,7 @@ void ShowAboutModalWin32(HWND hwnd, DesktopView& view) {
     for (const auto& attr : ab.upstream_attributions) {
         oss << "• " << attr << "\n";
     }
-    MessageBoxW(hwnd, Utf8ToW(oss.str()).c_str(), L"About OpenIDM", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(hwnd, Utf8ToW(oss.str()).c_str(), L"About Flux Download Manager", MB_OK | MB_ICONINFORMATION);
 }
 
 void PaintMainWindow(HWND hwnd, DesktopView& view) {
@@ -1704,7 +1704,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             AppendMenuW(hMenu, tb.can_delete_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_DELETE_DISK, L"Delete File from Disk (Shift+Delete)");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration & Worker Status...");
-            AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About OpenIDM...");
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About Flux Download Manager...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
             DestroyMenu(hMenu);
@@ -1763,13 +1763,13 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 POINT pt{};
                 GetCursorPos(&pt);
                 HMENU hMenu = CreatePopupMenu();
-                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW, L"Show OpenIDM");
+                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW, L"Show Flux");
                 AppendMenuW(hMenu, MF_STRING, IDM_TRAY_HIDE, L"Hide to Tray");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
                 AppendMenuW(hMenu, MF_STRING, IDM_TRAY_PAUSE_ALL, L"Pause All Downloads");
                 AppendMenuW(hMenu, MF_STRING, IDM_TRAY_RESUME_ALL, L"Resume All Downloads");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit OpenIDM");
+                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit Flux");
                 SetForegroundWindow(hwnd);
                 int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(hMenu);
@@ -1824,14 +1824,14 @@ int DesktopView::RunWin32MessageLoop() {
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.lpszClassName = L"OpenIDM_MainWindowClass";
+    wc.lpszClassName = L"Flux_MainWindowClass";
     RegisterClassExW(&wc);
 
     Win32WindowContext ctx{this, &m_controller, nullptr, nullptr, {}, false};
     HWND hwnd = CreateWindowExW(
         0,
         wc.lpszClassName,
-        L"OpenIDM",
+        L"Flux Download Manager",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT,
         m_window_width, m_window_height,
@@ -1848,7 +1848,7 @@ int DesktopView::RunWin32MessageLoop() {
     ctx.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     ctx.nid.uCallbackMessage = WM_OPENIDM_TRAYICON;
     ctx.nid.hIcon = wc.hIcon;
-    wcsncpy_s(ctx.nid.szTip, L"OpenIDM Download Manager", _TRUNCATE);
+    wcsncpy_s(ctx.nid.szTip, L"Flux Download Manager", _TRUNCATE);
     ctx.tray_added = (Shell_NotifyIconW(NIM_ADD, &ctx.nid) != FALSE);
 
     SetTimer(hwnd, IDT_UI_REFRESH, 100, nullptr);

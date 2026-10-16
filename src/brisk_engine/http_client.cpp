@@ -209,7 +209,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         // Native Windows 11 WinHTTP Implementation (BUG-003 Fix)
         // ---------------------------------------------------------------------
         HINTERNET hSession = WinHttpOpen(
-            L"OpenIDM/0.2.0 (Windows NT 10.0; Win64; x64)",
+            L"Flux/0.3.0 (Windows NT 10.0; Win64; x64)",
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
             WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS,
@@ -449,7 +449,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             req << k << ": " << v << "\r\n";
         }
         if (!has_ua) {
-            req << "User-Agent: OpenIDM/0.2.0 (Windows NT 10.0; Win64; x64)\r\n";
+            req << "User-Agent: Flux/0.3.0 (Windows NT 10.0; Win64; x64)\r\n";
         }
         if (range_start.has_value()) {
             req << "Range: bytes=" << *range_start << "-";

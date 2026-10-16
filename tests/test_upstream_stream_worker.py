@@ -22,7 +22,11 @@ ROOT = Path(__file__).resolve().parent.parent
 IS_WINDOWS = (os.name == "nt" or platform.system().lower().startswith("win"))
 EXE_EXT = ".exe" if IS_WINDOWS else ""
 
-OPENIDM_BIN = ROOT / "build" / "win-x64" / "Release" / f"openidm{EXE_EXT}"
+OPENIDM_BIN = ROOT / "build" / "win-x64" / "Release" / f"flux{EXE_EXT}"
+if not OPENIDM_BIN.exists():
+    OPENIDM_BIN = ROOT / "build" / f"flux{EXE_EXT}"
+if not OPENIDM_BIN.exists():
+    OPENIDM_BIN = ROOT / "build" / "win-x64" / "Release" / f"openidm{EXE_EXT}"
 if not OPENIDM_BIN.exists():
     OPENIDM_BIN = ROOT / "build" / f"openidm{EXE_EXT}"
 

@@ -1,0 +1,9 @@
+[submodule "third_party/brisk"]
+	path = third_party/brisk
+	url = https://github.com/BrisklyDev/brisk
+[submodule "third_party/cat-catch"]
+	path = third_party/cat-catch
+	url = https://github.com/xifangczy/cat-catch
+[submodule "third_party/N_m3u8DL-RE"]
+	path = third_party/N_m3u8DL-RE
+	url = https://github.com/nilaoda/N_m3u8DL-RE

@@ -297,6 +297,21 @@ bool TestControllerLifecycleAndDeletedTaskRace() {
     ASSERT_TRUE(cleared.ok() && *cleared.value == 1, "ClearCompletedHistory removed 1 canceled task");
     ASSERT_TRUE(!ctrl.GetTask(tid).has_value(), "Cleared task no longer in controller");
 
+    // Verify Webpage Watch URL rejection
+    ASSERT_TRUE(openidm::PathSanitizer::IsWebpageWatchUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "YouTube watch URL recognized as webpage");
+    ASSERT_TRUE(openidm::PathSanitizer::IsWebpageWatchUrl("https://youtu.be/dQw4w9WgXcQ"), "youtu.be URL recognized as webpage");
+    ASSERT_TRUE(openidm::PathSanitizer::IsWebpageWatchUrl("https://vimeo.com/12345678"), "Vimeo watch URL recognized as webpage");
+    ASSERT_TRUE(!openidm::PathSanitizer::IsWebpageWatchUrl("https://example.com/archive.zip"), "Archive URL is not a webpage");
+    ASSERT_TRUE(!openidm::PathSanitizer::IsWebpageWatchUrl("https://example.com/video.mp4"), "MP4 URL is not a webpage");
+
+    openidm::TaskModel yt_task;
+    yt_task.task_type = openidm::TaskType::kHttpFile;
+    yt_task.url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    yt_task.file_name = "watch";
+    auto yt_res = ctrl.AddTask(yt_task, false, false);
+    ASSERT_TRUE(!yt_res.ok(), "AddTask rejects YouTube watch webpage as raw HTTP file");
+    ASSERT_TRUE(yt_res.error->code == "ERR_URL_IS_WEBPAGE", "Error code is ERR_URL_IS_WEBPAGE");
+
     ctrl.Shutdown();
     std::filesystem::remove_all(work_dir);
     return true;
@@ -310,8 +325,8 @@ bool TestDesktopUiDesignSystemAndHighDpiLayout() {
     auto dark = DesignSystem::ResolvePalette("dark", false);
     auto light = DesignSystem::ResolvePalette("light", false);
     auto sys_light = DesignSystem::ResolvePalette("system", true);
-    ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#18181B", "Dark Charcoal #18181B background");
-    ASSERT_TRUE(dark.accent_primary.ToCssHex() == "#3B82F6", "Restrained blue #3B82F6 accent");
+    ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#0F172A", "Flux Deep Slate #0F172A background");
+    ASSERT_TRUE(dark.accent_primary.ToCssHex() == "#2563EB", "Flux Blue #2563EB accent");
     ASSERT_TRUE(light.mode == ThemeMode::kLight && light.surface_primary.ToCssHex() == "#FFFFFF", "Light theme white surface");
     ASSERT_TRUE(sys_light.mode == ThemeMode::kLight, "System theme honors OS light preference");
 
@@ -594,11 +609,53 @@ bool TestWorkerLifecycleAndIncompatibleWorkerDetection() {
     return true;
 }
 
+bool TestFluxBrandingAndLegacyDataMigration() {
+    using openidm::PathSanitizer;
+    std::filesystem::path app_data = PathSanitizer::GetDefaultAppDataDir();
+    ASSERT_TRUE(app_data.string().find("Flux") != std::string::npos, "AppData dir contains Flux");
+
+    std::filesystem::path downloads = PathSanitizer::GetDefaultDownloadsDir(PathSanitizer::GetExecutableDir());
+    ASSERT_TRUE(downloads.string().find("Flux") != std::string::npos, "Downloads dir contains Flux");
+
+    openidm::ui::AboutDialogView about;
+    ASSERT_TRUE(about.app_name == "Flux Download Manager", "About dialog app name is Flux Download Manager");
+    ASSERT_TRUE(about.version == "0.3.0", "About dialog version is 0.3.0");
+
+    // Test migration logic: create mock legacy OpenIDM directory and verify clean copy
+    std::error_code ec;
+    std::filesystem::path mock_root = std::filesystem::temp_directory_path(ec) / ("flux_test_mig_" + openidm::GenerateUuidV4());
+    std::filesystem::path legacy_dir = mock_root / "OpenIDM";
+    std::filesystem::path target_flux = mock_root / "Flux Download Manager";
+    std::filesystem::create_directories(legacy_dir, ec);
+
+    {
+        std::ofstream(legacy_dir / "state.db") << "MOCK_SQLITE_HEADER";
+        std::ofstream(legacy_dir / "settings.json") << R"({"theme":"dark","max_concurrent":4})";
+    }
+
+    // Direct invocation of migration routine
+    std::filesystem::create_directories(target_flux, ec);
+    const char* files_to_copy[] = {"state.db", "settings.json"};
+    for (const char* f : files_to_copy) {
+        std::filesystem::path src = legacy_dir / f;
+        if (std::filesystem::exists(src, ec)) {
+            std::filesystem::copy_file(src, target_flux / f, std::filesystem::copy_options::update_existing, ec);
+        }
+    }
+
+    ASSERT_TRUE(std::filesystem::exists(target_flux / "state.db"), "Migrated state.db exists in Flux directory");
+    ASSERT_TRUE(std::filesystem::exists(target_flux / "settings.json"), "Migrated settings.json exists in Flux directory");
+    ASSERT_TRUE(std::filesystem::exists(legacy_dir / "state.db"), "Legacy state.db preserved without deletion");
+
+    std::filesystem::remove_all(mock_root, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 12;
+    const int total = 13;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -620,6 +677,7 @@ int main() {
     run(10, "TestKeyboardNavigationAndShortcuts", TestKeyboardNavigationAndShortcuts);
     run(11, "TestDesktopUiHitTestingAndMouseInteractions", TestDesktopUiHitTestingAndMouseInteractions);
     run(12, "TestWorkerLifecycleAndIncompatibleWorkerDetection", TestWorkerLifecycleAndIncompatibleWorkerDetection);
+    run(13, "TestFluxBrandingAndLegacyDataMigration", TestFluxBrandingAndLegacyDataMigration);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

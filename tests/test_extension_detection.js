@@ -184,6 +184,7 @@ async function runTests() {
   fullscreenHandler();
   assert(obsResult.activeOverlays[0].hostEl.style.cssText.includes("left:1752px"), "Overlay repositioned on fullscreenchange");
 
+  assert.strictEqual(obsResult.activeOverlays[0].btn.textContent, "Download with Flux", "Overlay button text rebranded to Flux");
   obsResult.activeOverlays[0].btn._clickHandler({ stopPropagation: () => {}, preventDefault: () => {} });
   assert.ok(clickedVideoPayload, "Overlay button click triggers real download handoff");
   assert.strictEqual(clickedVideoPayload.isMseBlob, true);
@@ -242,8 +243,10 @@ async function runTests() {
   assert(loadingHtml.includes('data-state="loading"'));
   const offlineHtml = renderDetectedMediaList(combinedList, { desktopConnected: false });
   assert(offlineHtml.includes('data-state="disconnected"') && offlineHtml.includes("Browser Download"));
+  const onlineHtml = renderDetectedMediaList(combinedList, { desktopConnected: true });
+  assert(onlineHtml.includes("Download in Flux"), "Popup renders 'Download in Flux' action label");
 
-  // Direct MP4 handoff falls back to browser download when OpenIDM is offline
+  // Direct MP4 handoff falls back to browser download when Flux is offline
   let browserFallbackTriggeredUrl = null;
   const mp4Candidate = G.cacheData.get(10)[0];
   const fbDirect = await submitMediaCandidateToOpenIDM(
@@ -256,7 +259,81 @@ async function runTests() {
   assert.strictEqual(browserFallbackTriggeredUrl, "https://cdn.example.com/media/lecture42.mp4");
   console.log("  -> PASS");
 
-  console.log("\nBrowser Extension & Detection Suite: 8 / 8 suites PASSED.");
+  console.log("[9/10] Testing Link-Click Interception & Alt-Key Bypass Behavior...");
+  const { handleLinkClick } = require("../extension/js/content-script.js");
+  let sentLinkMessages = [];
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: (msg) => { sentLinkMessages.push(msg); }
+    }
+  };
+
+  // Normal link click on .zip file
+  const fakeZipAnchor = {
+    pathname: "/downloads/archive.zip",
+    href: "https://files.example.com/downloads/archive.zip",
+    download: "archive.zip",
+    hasAttribute: (attr) => attr === "download"
+  };
+  const fakeZipEvent = {
+    altKey: false,
+    target: { closest: (tag) => (tag === "a" ? fakeZipAnchor : null) }
+  };
+  handleLinkClick(fakeZipEvent);
+  assert.strictEqual(sentLinkMessages.length, 1);
+  assert.strictEqual(sentLinkMessages[0].action, "linkClicked");
+  assert.strictEqual(sentLinkMessages[0].url, "https://files.example.com/downloads/archive.zip");
+  assert.strictEqual(sentLinkMessages[0].filename, "archive.zip");
+
+  // Alt-key bypass modifier click
+  sentLinkMessages = [];
+  const fakeAltEvent = {
+    altKey: true,
+    target: { closest: () => fakeZipAnchor }
+  };
+  handleLinkClick(fakeAltEvent);
+  assert.strictEqual(sentLinkMessages.length, 1);
+  assert.strictEqual(sentLinkMessages[0].action, "bypassNextDownload");
+  console.log("  -> PASS");
+
+  console.log("[10/10] Testing Webpage Watch URL Guard & Background Runtime Message Routing...");
+  const { isWebpageWatchUrl, classifyUrlIntent } = require("../extension/js/function.js");
+  const { handleRuntimeMessage } = require("../extension/js/background.js");
+
+  // YouTube watch page guard
+  assert.strictEqual(isWebpageWatchUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), true);
+  assert.strictEqual(isWebpageWatchUrl("https://youtu.be/dQw4w9WgXcQ"), true);
+  assert.strictEqual(isWebpageWatchUrl("https://www.youtube.com/shorts/abcd1234efg"), true);
+  assert.strictEqual(isWebpageWatchUrl("https://vimeo.com/12345678"), true);
+  assert.strictEqual(classifyUrlIntent("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "WEBPAGE");
+
+  // Direct files & stream manifests
+  assert.strictEqual(isWebpageWatchUrl("https://cdn.example.com/video.mp4"), false);
+  assert.strictEqual(classifyUrlIntent("https://cdn.example.com/stream.m3u8"), "HLS");
+  assert.strictEqual(classifyUrlIntent("https://cdn.example.com/stream.mpd"), "DASH");
+  assert.strictEqual(classifyUrlIntent("https://cdn.example.com/archive.zip"), "DIRECT_FILE");
+
+  // Message router test: addMedia and getMediaList
+  let msgResponse = null;
+  handleRuntimeMessage({
+    action: "addMedia",
+    url: "https://video.example.com/direct_test.mp4",
+    streamType: "HTTP_FILE",
+    tabId: 99,
+    pageTitle: "Test Video"
+  }, { tab: { id: 99, url: "https://video.example.com/watch" } }, (res) => { msgResponse = res; });
+  assert.strictEqual(msgResponse.success, true);
+  assert.strictEqual(G.cacheData.get(99).length, 1);
+
+  handleRuntimeMessage({
+    action: "clearMedia",
+    tabId: 99
+  }, {}, (res) => { msgResponse = res; });
+  assert.strictEqual(msgResponse.success, true);
+  assert.strictEqual(G.cacheData.has(99), false);
+  console.log("  -> PASS");
+
+  console.log("\nBrowser Extension & Detection Suite: 10 / 10 suites PASSED.");
 }
 
 runTests().catch((err) => {

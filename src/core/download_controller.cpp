@@ -128,6 +128,13 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     if (task.url.empty()) {
         return Result<TaskModel>::Err("ERR_INVALID_URL", "Task URL cannot be empty");
     }
+    if (task.task_type == TaskType::kHttpFile && PathSanitizer::IsWebpageWatchUrl(task.url)) {
+        return Result<TaskModel>::Err(
+            "ERR_URL_IS_WEBPAGE",
+            "The specified URL is an HTML webpage, not a direct media file or stream. "
+            "To download video from this site, play it in your web browser with the Flux extension enabled."
+        );
+    }
     auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
     if (!parsed_u.ok()) {
         return Result<TaskModel>::Err(parsed_u.error->code, parsed_u.error->message);

@@ -84,10 +84,16 @@ void ExtractHeadersMap(
 } // namespace
 
 std::string IpcServer::DefaultSocketPath() {
+    if (const char* env_flux = std::getenv("FLUX_IPC_SOCKET")) {
+        if (env_flux[0] != '\0') return env_flux;
+    }
+    if (const char* env_old = std::getenv("OPENIDM_IPC_SOCKET")) {
+        if (env_old[0] != '\0') return env_old;
+    }
 #ifdef _WIN32
-    return "\\\\.\\pipe\\OpenIDM_IPC_Default";
+    return "\\\\.\\pipe\\Flux_IPC_Default";
 #else
-    return "/tmp/openidm_ipc_" + std::to_string(geteuid()) + ".sock";
+    return "/tmp/flux_ipc_" + std::to_string(geteuid()) + ".sock";
 #endif
 }
 
@@ -317,7 +323,10 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
 
         auto add_res = m_controller.AddTask(std::move(t), true, false);
         if (!add_res.ok()) {
-            return MakeRpcError(id, -32602, add_res.error->code + ": " + add_res.error->message).dump();
+            json::Value res = json::Object{};
+            res["accepted"] = false;
+            res["reason"] = add_res.error->code + ": " + add_res.error->message;
+            return MakeRpcResult(id, std::move(res)).dump();
         }
         json::Value res = json::Object{};
         res["accepted"] = true;

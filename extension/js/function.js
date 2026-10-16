@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/function.js) for OpenIDM.
-// Implements URL/MIME/Regex resource classification, segment suppression,
-// master/child playlist deduplication, and per-site exclusion checks.
+// Adapted from xifangczy/cat-catch (js/function.js) for Flux Download Manager.
+// Implements URL/MIME/Regex resource classification, webpage watch URL filtering,
+// segment suppression, master/child playlist deduplication, and per-site exclusion checks.
 
 const { G } = (typeof require !== "undefined") ? require("./init.js") : { G: globalThis.G };
 
@@ -49,6 +49,46 @@ function extractUrlExtension(url) {
   return "";
 }
 
+function isWebpageWatchUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    const path = u.pathname.toLowerCase();
+
+    // YouTube watch pages and shorts
+    if (host.includes("youtube.com") && (path.includes("/watch") || path.includes("/shorts/"))) return true;
+    if (host === "youtu.be") return true;
+
+    // Vimeo watch pages (e.g. vimeo.com/12345678)
+    if (host.includes("vimeo.com") && /^\/\d+$/.test(path)) return true;
+
+    // Twitch stream/video pages
+    if (host.includes("twitch.tv") && (path.includes("/videos/") || path.split("/").filter(Boolean).length === 1)) {
+      if (!path.endsWith(".m3u8") && !path.endsWith(".mpd") && !path.endsWith(".mp4")) return true;
+    }
+
+    // Generic HTML pages
+    if (path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".php") || path.endsWith(".asp") || path.endsWith(".aspx")) {
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
+function classifyUrlIntent(url) {
+  if (!url || typeof url !== "string") return "UNKNOWN";
+  if (isWebpageWatchUrl(url)) return "WEBPAGE";
+
+  const ext = extractUrlExtension(url);
+  if (ext === "m3u8" || ext === "m3u") return "HLS";
+  if (ext === "mpd") return "DASH";
+  if (ext === "ism") return "MSS";
+  if (G.SegmentExts.has(ext)) return "SEGMENT";
+  if (G.InterceptFileExts.has(ext)) return "DIRECT_FILE";
+  return "UNKNOWN";
+}
+
 function parseResponseHeaderMap(responseHeaders) {
   const map = {};
   if (!Array.isArray(responseHeaders)) return map;
@@ -82,11 +122,16 @@ function isMediaSegmentRequest(url, ext, responseHeaderMap, tabId) {
   return false;
 }
 
-// Cat Catch core resource classifier (findMedia logic)
+// Core network resource classifier (findMedia logic)
 function classifyNetworkResource(details) {
   if (!details || !details.url) return null;
   const url = details.url;
   if (url.startsWith("blob:") || url.startsWith("data:") || url.startsWith("chrome-extension:")) {
+    return null;
+  }
+
+  // Reject webpage URLs (e.g. YouTube watch page HTML responses)
+  if (isWebpageWatchUrl(url)) {
     return null;
   }
 
@@ -202,7 +247,7 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
     const prefix = getParentUrlPrefix(candidate.url);
 
     if (!isMaster) {
-      // Check if a Master playlist in the same directory tree was captured within the last 10 seconds
+      // Check if a Master playlist in the same directory tree was captured
       const parentMaster = list.find(item =>
         item.streamType === "HLS" &&
         item.isMaster &&
@@ -240,6 +285,8 @@ if (typeof module !== "undefined" && module.exports) {
     isSiteDisabled,
     setSiteDisabled,
     extractUrlExtension,
+    isWebpageWatchUrl,
+    classifyUrlIntent,
     classifyNetworkResource,
     addOrDeduplicateMediaCandidate
   };

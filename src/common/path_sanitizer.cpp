@@ -373,37 +373,83 @@ std::filesystem::path PathSanitizer::GetExecutableDir(const char* argv0) {
     return std::filesystem::current_path(ec);
 }
 
+bool PathSanitizer::MigrateLegacyDataIfNeeded(const std::filesystem::path& target_flux_dir) {
+    std::error_code ec;
+#ifdef _WIN32
+    const char* local_app_data = std::getenv("LOCALAPPDATA");
+    if (!local_app_data || local_app_data[0] == '\0') return false;
+    std::filesystem::path legacy_dir = std::filesystem::path(local_app_data) / "OpenIDM";
+#else
+    const char* env_dir = std::getenv("OPENIDM_DATA_DIR");
+    std::filesystem::path legacy_dir = env_dir ? std::filesystem::path(env_dir) : (std::filesystem::temp_directory_path(ec) / "openidm_data");
+#endif
+    if (!std::filesystem::exists(legacy_dir / "state.db", ec)) {
+        return false; // No legacy data to migrate
+    }
+
+    // Only migrate if target does not already have a state.db
+    if (std::filesystem::exists(target_flux_dir / "state.db", ec)) {
+        return false;
+    }
+
+    std::filesystem::create_directories(target_flux_dir, ec);
+    const char* files_to_copy[] = {"state.db", "state.db-wal", "state.db-shm", "settings.json"};
+    for (const char* f : files_to_copy) {
+        std::filesystem::path src = legacy_dir / f;
+        if (std::filesystem::exists(src, ec)) {
+            std::filesystem::copy_file(src, target_flux_dir / f, std::filesystem::copy_options::update_existing, ec);
+        }
+    }
+    return true;
+}
+
 std::filesystem::path PathSanitizer::GetDefaultAppDataDir() {
     std::error_code ec;
 #ifdef _WIN32
+    if (const char* env_flux = std::getenv("FLUX_DATA_DIR")) {
+        if (env_flux[0] != '\0') return std::filesystem::path(env_flux);
+    }
     if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
         if (local_app_data[0] != '\0') {
-            return std::filesystem::path(local_app_data) / "OpenIDM";
+            std::filesystem::path flux_dir = std::filesystem::path(local_app_data) / "Flux Download Manager";
+            MigrateLegacyDataIfNeeded(flux_dir);
+            return flux_dir;
         }
     }
 #else
-    if (const char* env_dir = std::getenv("OPENIDM_DATA_DIR")) {
-        if (env_dir[0] != '\0') return std::filesystem::path(env_dir);
+    if (const char* env_flux = std::getenv("FLUX_DATA_DIR")) {
+        if (env_flux[0] != '\0') return std::filesystem::path(env_flux);
+    }
+    if (const char* env_legacy = std::getenv("OPENIDM_DATA_DIR")) {
+        if (env_legacy[0] != '\0') return std::filesystem::path(env_legacy);
     }
 #endif
-    return std::filesystem::temp_directory_path(ec) / "openidm_data";
+    std::filesystem::path fallback_dir = std::filesystem::temp_directory_path(ec) / "flux_data";
+    MigrateLegacyDataIfNeeded(fallback_dir);
+    return fallback_dir;
 }
 
 std::filesystem::path PathSanitizer::GetDefaultDownloadsDir(const std::filesystem::path& exe_dir) {
     (void)exe_dir;
 #ifdef _WIN32
+    if (const char* env_dl = std::getenv("FLUX_DOWNLOAD_DIR")) {
+        if (env_dl[0] != '\0') return std::filesystem::path(env_dl);
+    }
     if (const char* user_profile = std::getenv("USERPROFILE")) {
         if (user_profile[0] != '\0') {
-            return std::filesystem::path(user_profile) / "Downloads" / "OpenIDM";
+            return std::filesystem::path(user_profile) / "Downloads" / "Flux";
         }
     }
 #else
-    if (const char* env_dl = std::getenv("OPENIDM_DOWNLOAD_DIR")) {
+    if (const char* env_dl = std::getenv("FLUX_DOWNLOAD_DIR")) {
         if (env_dl[0] != '\0') return std::filesystem::path(env_dl);
+    }
+    if (const char* env_dl_old = std::getenv("OPENIDM_DOWNLOAD_DIR")) {
+        if (env_dl_old[0] != '\0') return std::filesystem::path(env_dl_old);
     }
 #endif
     std::error_code ec;
-    return std::filesystem::temp_directory_path(ec) / "openidm_downloads";
+    return std::filesystem::temp_directory_path(ec) / "flux_downloads";
 }
 
 std::filesystem::path PathSanitizer::FindWorkerBinary(
@@ -504,6 +550,43 @@ Result<uint64_t> PathSanitizer::CheckAvailableDiskSpace(
             true);
     }
     return Result<uint64_t>::Ok(avail);
+}
+
+bool PathSanitizer::IsWebpageWatchUrl(std::string_view url) {
+    if (url.empty()) return false;
+    std::string lower(url);
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    // YouTube watch and shorts URLs
+    if (lower.find("youtube.com/watch") != std::string::npos ||
+        lower.find("youtube.com/shorts/") != std::string::npos ||
+        lower.find("youtu.be/") != std::string::npos) {
+        return true;
+    }
+
+    // Vimeo watch URLs (e.g. vimeo.com/12345678)
+    if (lower.find("vimeo.com/") != std::string::npos &&
+        lower.find(".mp4") == std::string::npos &&
+        lower.find(".m3u8") == std::string::npos &&
+        lower.find(".mpd") == std::string::npos) {
+        return true;
+    }
+
+    // Twitch stream/video URLs
+    if (lower.find("twitch.tv/") != std::string::npos &&
+        lower.find(".m3u8") == std::string::npos &&
+        lower.find(".mpd") == std::string::npos) {
+        return true;
+    }
+
+    // Generic HTML pages without direct media format
+    size_t qmark = lower.find('?');
+    std::string path = (qmark != std::string::npos) ? lower.substr(0, qmark) : lower;
+    if (path.ends_with(".html") || path.ends_with(".htm") || path.ends_with(".php") ||
+        path.ends_with(".asp") || path.ends_with(".aspx")) {
+        return true;
+    }
+    return false;
 }
 
 } // namespace openidm

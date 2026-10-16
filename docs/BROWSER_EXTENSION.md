@@ -59,13 +59,15 @@ To minimize security risk and pass Chrome Web Store / Firefox AMO review without
 
 | Permission | Scope | Exact Engineering Justification | Why It Cannot Be Removed |
 | :--- | :--- | :--- | :--- |
-| **`nativeMessaging`** | Required | Allows `runtime.connectNative("org.openidm.native")` to spawn `openidm-nmh.exe`. | Primary secure IPC mechanism (`ADR-0003`); eliminates localhost HTTP servers. |
-| **`downloads`** | Required | Allows listening to `downloads.onCreated` / `onDeterminingFilename` (`FR-008`) and canceling the browser's built-in download once `openidm.exe` accepts the task. | Required to intercept ordinary file downloads automatically. |
+| **`nativeMessaging`** | Required | Allows `runtime.connectNative("com.flux.downloadmanager")` to spawn `flux-nmh.exe`. | Primary secure IPC mechanism (`ADR-0003`); eliminates localhost HTTP servers. |
+| **`downloads`** | Required | Allows listening to `downloads.onCreated` / `onDeterminingFilename` (`FR-008`) and canceling browser downloads once `flux.exe` accepts the task. | Required to intercept browser-initiated downloads automatically. |
 | **`webRequest`** | Required | Observational read-only access to `onBeforeSendHeaders` and `onHeadersReceived` to detect `.m3u8`/`.mpd` manifests and capture transient `Referer`/`Cookie` headers (`FR-014`). | Without `webRequest`, MSE-fetched manifests (`hls.js`/`dash.js`) are invisible to isolated content scripts. |
 | **`storage`** | Required | Stores user exclusion lists (`chrome.storage.sync`/`local`) and survives MV3 Service Worker suspension via `chrome.storage.session` (`RISK-002`). | Required for MV3 state persistence. |
-| **`contextMenus`** | Required | Adds `"Download link with OpenIDM"` and `"Download selected links with OpenIDM"` (`FR-010`). | Required for right-click user workflows. |
-| **`scripting`** | Required | Dynamically registers the opt-in Layer 3 `MAIN`-world hook only on user-requested domains (`FR-017`). | Avoids injecting `MAIN`-world hooks globally on all sites. |
+| **`contextMenus`** | Required | Adds `"Download with Flux"` and `"Download selected links with Flux"` (`FR-010`). | Required for right-click user workflows. |
+| **`scripting`** | Required | Dynamically executes or injects the Layer 3 `MAIN`-world hook (`catch.js`) into webpage DOM (`FR-017`, `BUG-032`). | Allows deep search for obfuscated HLS/DASH streams in page JavaScript context. |
+| **`tabs`** | Required | Queries active tab info and URLs for media classification, watch URL guard, and badge counts. | Required for popup tab binding and per-site capture toggle. |
 | **`host_permissions`: `["*://*/*"]`** | Required | Needed by `webRequest` to observe media CDN requests (which are almost always hosted on third-party CDN domains different from the tab's top-level origin, e.g., `*.akamaized.net`, `*.cloudfront.net`). | Cross-origin CDN requests cannot be observed with `activeTab` alone. |
+
 
 **Permissions Explicitly Excluded (Compared to Cat Catch):**
 - **No `declarativeNetRequest`:** OpenIDM performs all downloading in `openidm.exe`, never inside the browser, so the extension never needs to modify browser request headers.

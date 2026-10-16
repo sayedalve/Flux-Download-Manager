@@ -65,8 +65,16 @@ def find_binary(name: str) -> Path:
     return candidates[0]
 
 
-OPENIDM_BIN = find_binary("openidm")
-NMH_BIN = find_binary("openidm-nmh")
+FLUX_BIN = find_binary("flux")
+if not FLUX_BIN.is_file():
+    FLUX_BIN = find_binary("openidm")
+OPENIDM_BIN = FLUX_BIN
+
+FLUX_NMH_BIN = find_binary("flux-nmh")
+if not FLUX_NMH_BIN.is_file():
+    FLUX_NMH_BIN = find_binary("openidm-nmh")
+NMH_BIN = FLUX_NMH_BIN
+
 STREAM_WORKER = find_binary("N_m3u8DL-RE")
 FFMPEG_BIN = find_binary("ffmpeg")
 
@@ -101,7 +109,7 @@ class FaultInjectionHttpHandler(http.server.BaseHTTPRequestHandler):
                 PAYLOAD_4MB,
                 support_range=True,
                 etag='"v1-4mb"',
-                content_disposition="attachment; filename*=UTF-8''OpenIDM_Test_Archive.bin",
+                content_disposition="attachment; filename*=UTF-8''Flux_Test_Archive.bin",
             )
             return
 
@@ -462,7 +470,7 @@ def main():
     fixture_dir = work_dir / "fixtures"
     dl_dir = work_dir / "downloads"
     db_path = work_dir / "state.db"
-    sock_path = f"\\\\.\\pipe\\openidm_test_{os.getpid()}" if IS_WINDOWS else f"/tmp/openidm_test_{os.getpid()}.sock"
+    sock_path = f"\\\\.\\pipe\\flux_test_{os.getpid()}" if IS_WINDOWS else f"/tmp/flux_test_{os.getpid()}.sock"
 
     FaultInjectionHttpHandler.fixture_dir = fixture_dir
     server = ThreadedHTTPServer(("127.0.0.1", 0), FaultInjectionHttpHandler)
@@ -479,7 +487,7 @@ def main():
         # ---------------------------------------------------------------------
         # Test 1: Platform-Aware Native Binary Verification
         # ---------------------------------------------------------------------
-        print("[1/8] IT-BIN-01: Verifying Platform-Aware Compiled Executables (openidm, openidm-nmh, N_m3u8DL-RE)...")
+        print("[1/8] IT-BIN-01: Verifying Platform-Aware Compiled Executables (flux, flux-nmh, N_m3u8DL-RE)...")
         verify_platform_binary_format(OPENIDM_BIN)
         verify_platform_binary_format(NMH_BIN)
         verify_platform_binary_format(STREAM_WORKER)
@@ -503,7 +511,9 @@ def main():
             text=True,
             check=True,
         )
-        out_file1 = dl_dir / "OpenIDM_Test_Archive.bin"
+        out_file1 = dl_dir / "Flux_Test_Archive.bin"
+        if not out_file1.exists():
+            out_file1 = dl_dir / "OpenIDM_Test_Archive.bin"
         assert out_file1.exists(), f"Expected {out_file1} to exist"
         assert hashlib.sha256(out_file1.read_bytes()).hexdigest() == SHA256_4MB, "SHA-256 mismatch on 8-connection download"
         print("  -> PASS (4 MiB downloaded across 8 work-stealing connections, SHA-256 verified)")
@@ -630,6 +640,7 @@ def main():
                         break
 
         env = os.environ.copy()
+        env["FLUX_IPC_SOCKET"] = sock_path
         env["OPENIDM_IPC_SOCKET"] = sock_path
         nmh_proc = subprocess.Popen(
             [str(NMH_BIN)],
@@ -683,10 +694,12 @@ def main():
         a_streams, a_dur = ffprobe_verify(aes_mp4)
         assert "video" in a_streams and a_dur >= 3.5
 
-        log_file = db_path.parent / "openidm.log"
+        log_file = db_path.parent / "flux.log"
+        if not log_file.exists():
+            log_file = db_path.parent / "openidm.log"
         if log_file.exists():
             log_text = log_file.read_text(encoding="utf-8")
-            assert "authorized_777" not in log_text, "SECURITY VIOLATION: Cookie leaked into openidm.log!"
+            assert "authorized_777" not in log_text, "SECURITY VIOLATION: Cookie leaked into application log!"
 
         nmh_proc.stdin.close()
         nmh_proc.wait(timeout=5)
@@ -788,8 +801,11 @@ def main():
         large_1000_ms = (time.perf_counter() - t_large0) * 1000.0
         assert "[Sidebar Counts] All=1000" in snap_1000.stdout, "Expected 1000 tasks in snapshot"
 
-        # Metric 8: Verify zero leftover .openidm.part temporary files in dl_dir and bench_dir
-        leftover_parts = list(dl_dir.rglob("*.openidm.part")) + list(bench_dir.rglob("*.openidm.part"))
+        # Metric 8: Verify zero leftover .flux.part / .openidm.part temporary files in dl_dir and bench_dir
+        leftover_parts = (
+            list(dl_dir.rglob("*.flux.part")) + list(bench_dir.rglob("*.flux.part")) +
+            list(dl_dir.rglob("*.openidm.part")) + list(bench_dir.rglob("*.openidm.part"))
+        )
         leftover_temp_count = len(leftover_parts)
 
         # Enforce documented performance budgets (fail test if any limit is exceeded!)
@@ -801,13 +817,15 @@ def main():
         assert net_stream_overhead_above_ffmpeg_mb <= 40.0, f"Net Stream overhead above FFmpeg {net_stream_overhead_above_ffmpeg_mb:.2f} MB exceeded 40 MB limit"
         assert large_1000_ms <= 300.0, f"1,000-task UI snapshot {large_1000_ms:.2f} ms exceeded 300 ms limit"
         assert throughput_mbps >= 50.0, f"Loopback throughput {throughput_mbps:.1f} Mbps below 50 Mbps floor"
-        assert leftover_temp_count == 0, f"Found {leftover_temp_count} uncleaned .openidm.part files"
+        assert leftover_temp_count == 0, f"Found {leftover_temp_count} uncleaned temporary part files"
 
         metrics = {
-            "version": "0.2.0",
+            "version": "0.3.0",
+            "product_name": "Flux Download Manager",
+            "short_name": "Flux",
             "host_platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
-            "openidm_binary_bytes": openidm_size,
-            "openidm_nmh_binary_bytes": nmh_size,
+            "flux_binary_bytes": openidm_size,
+            "flux_nmh_binary_bytes": nmh_size,
             "nm3u8dl_re_worker_bytes": worker_size,
             "combined_core_binaries_kb": round((openidm_size + nmh_size) / 1024.0, 1),
             "total_all_three_binaries_kb": round((openidm_size + nmh_size + worker_size) / 1024.0, 1),

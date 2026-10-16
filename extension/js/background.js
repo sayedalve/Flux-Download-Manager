@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/background.js) & Brisk Browser Extension for OpenIDM.
+// Adapted from xifangczy/cat-catch (js/background.js) & Brisk Browser Extension for Flux Download Manager.
 // Handles webRequest header correlation, media detection, ordinary download interception,
-// Manifest V3 service worker state persistence, and Native Messaging RPC handoff + browser fallback.
+// message routing with popup/content scripts, tab badge synchronization, and Native Messaging RPC handoff + browser fallback.
 
 const { G } = (typeof require !== "undefined") ? require("./init.js") : { G: globalThis.G };
 const {
@@ -14,7 +14,7 @@ const {
 
 let rpcRequestCounter = 1;
 
-// Persist & restore tab media candidates across Manifest V3 Service Worker suspension (BUG-013 Fix)
+// Persist & restore tab media candidates across Manifest V3 Service Worker suspension
 async function persistSessionState(storageArea = null) {
   const store = storageArea || ((typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) ? chrome.storage.session : null);
   if (!store || typeof store.set !== "function") return false;
@@ -23,8 +23,8 @@ async function persistSessionState(storageArea = null) {
     serializedTabs[String(tabId)] = list;
   }
   await store.set({
-    openidm_cacheData: serializedTabs,
-    openidm_disabledHosts: Array.from(G.disabledHosts)
+    flux_cacheData: serializedTabs,
+    flux_disabledHosts: Array.from(G.disabledHosts)
   });
   return true;
 }
@@ -32,23 +32,25 @@ async function persistSessionState(storageArea = null) {
 async function restoreSessionState(storageArea = null) {
   const store = storageArea || ((typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) ? chrome.storage.session : null);
   if (!store || typeof store.get !== "function") return false;
-  const data = await store.get(["openidm_cacheData", "openidm_disabledHosts"]);
-  if (data && data.openidm_cacheData) {
-    for (const [k, v] of Object.entries(data.openidm_cacheData)) {
+  const data = await store.get(["flux_cacheData", "flux_disabledHosts"]);
+  const cacheSource = data ? data.flux_cacheData : null;
+  if (cacheSource) {
+    for (const [k, v] of Object.entries(cacheSource)) {
       if (Array.isArray(v)) {
         G.cacheData.set(Number(k), v);
       }
     }
   }
-  if (data && Array.isArray(data.openidm_disabledHosts)) {
-    for (const h of data.openidm_disabledHosts) {
+  const disabledSource = data ? data.flux_disabledHosts : null;
+  if (Array.isArray(disabledSource)) {
+    for (const h of disabledSource) {
       G.disabledHosts.add(h);
     }
   }
   return true;
 }
 
-// Sends a JSON-RPC 2.0 message to openidm-nmh via Native Messaging (or injected transport in tests)
+// Sends a JSON-RPC 2.0 message to flux-nmh via Native Messaging
 async function sendNativeRpc(method, params, customTransport = null) {
   const payload = {
     jsonrpc: "2.0",
@@ -77,6 +79,17 @@ async function sendNativeRpc(method, params, customTransport = null) {
   throw new Error("Native Messaging runtime unavailable");
 }
 
+function updateTabBadge(tabId) {
+  if (typeof chrome === "undefined" || !chrome.action || !chrome.action.setBadgeText) return;
+  const list = G.cacheData.get(tabId) || [];
+  const count = list.length;
+  const text = count > 0 ? String(count) : "";
+  try {
+    chrome.action.setBadgeText({ text, tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
+    chrome.action.setBadgeBackgroundColor({ color: "#2563EB", tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
+  } catch (_) {}
+}
+
 // 1. Record outgoing request headers (Referer, Origin, Cookie, User-Agent) per requestId
 function onBeforeSendHeadersHandler(details) {
   if (!details || !details.requestId) return;
@@ -98,7 +111,7 @@ function onBeforeSendHeadersHandler(details) {
   }
 }
 
-// 2. Inspect incoming response headers to detect MP4/WebM/HLS/DASH resources (Cat Catch findMedia)
+// 2. Inspect incoming response headers to detect MP4/WebM/HLS/DASH resources
 function onHeadersReceivedHandler(details) {
   const classified = classifyNetworkResource(details);
   if (!classified) return null;
@@ -120,11 +133,12 @@ function onHeadersReceivedHandler(details) {
   };
 
   const res = addOrDeduplicateMediaCandidate(tabId, candidate);
+  updateTabBadge(tabId);
   persistSessionState().catch(() => {});
   return res;
 }
 
-// 3. Intercept eligible ordinary file downloads and hand off to OpenIDM (with safe browser fallback)
+// 3. Intercept eligible ordinary file downloads and hand off to Flux (with safe browser fallback)
 async function onDownloadCreatedHandler(downloadItem, customTransport = null, cancelBrowserDownloadFn = null) {
   if (!G.enableCapture || !downloadItem || !downloadItem.url) {
     return { intercepted: false, reason: "CAPTURE_DISABLED" };
@@ -166,13 +180,13 @@ async function onDownloadCreatedHandler(downloadItem, customTransport = null, ca
     }
     return { intercepted: false, reason: (result && result.reason) || "DECLINED_BY_DESKTOP" };
   } catch (err) {
-    // Safe fallback: if OpenIDM desktop app is unreachable, let browser finish downloading natively!
+    // Safe fallback: if Flux desktop app is unreachable, let browser finish downloading natively!
     return { intercepted: false, fallbackToBrowser: true, error: err.message };
   }
 }
 
-// 4. Submit a detected video or stream candidate to OpenIDM's unified queue (with browser fallback for direct media)
-async function submitMediaCandidateToOpenIDM(candidate, options = {}, customTransport = null, browserDownloadFn = null) {
+// 4. Submit a detected video or stream candidate to Flux
+async function submitMediaCandidateToFlux(candidate, options = {}, customTransport = null, browserDownloadFn = null) {
   const params = {
     candidateId: candidate.candidateId || "",
     streamType: candidate.streamType || "HLS",
@@ -191,7 +205,7 @@ async function submitMediaCandidateToOpenIDM(candidate, options = {}, customTran
   };
   try {
     const res = await sendNativeRpc("stream.add", params, customTransport);
-    candidate.handoffStatus = "Queued in OpenIDM";
+    candidate.handoffStatus = "Queued in Flux";
     return res;
   } catch (err) {
     const isDirectFile = candidate.streamType !== "HLS" && candidate.streamType !== "DASH";
@@ -210,21 +224,179 @@ async function submitMediaCandidateToOpenIDM(candidate, options = {}, customTran
   }
 }
 
-if (typeof chrome !== "undefined" && chrome.webRequest) {
-  const extraReqOpts = ["requestHeaders"];
-  if (chrome.webRequest.OnBeforeSendHeadersOptions && chrome.webRequest.OnBeforeSendHeadersOptions.EXTRA_HEADERS) {
-    extraReqOpts.push("extraHeaders");
+const submitMediaCandidateToOpenIDM = submitMediaCandidateToFlux;
+
+// 5. Message listener handling Popup and Content Script RPCs
+function handleRuntimeMessage(msg, sender, sendResponse) {
+  if (!msg || !msg.action) return false;
+
+  const tabId = (msg.tabId !== undefined && msg.tabId !== null)
+    ? msg.tabId
+    : (sender.tab && sender.tab.id ? sender.tab.id : 0);
+
+  if (msg.action === "getMediaList") {
+    sendNativeRpc("system.handshake", { protocolVersion: "1.0" })
+      .then(() => {
+        sendResponse({
+          success: true,
+          desktopConnected: true,
+          captureEnabled: G.enableCapture,
+          siteDisabled: isSiteDisabled(msg.tabUrl || ""),
+          candidates: G.cacheData.get(tabId) || []
+        });
+      })
+      .catch(() => {
+        sendResponse({
+          success: true,
+          desktopConnected: false,
+          captureEnabled: G.enableCapture,
+          siteDisabled: isSiteDisabled(msg.tabUrl || ""),
+          candidates: G.cacheData.get(tabId) || []
+        });
+      });
+    return true; // Keep channel open for async response
   }
-  chrome.webRequest.onBeforeSendHeaders.addListener(
-    onBeforeSendHeadersHandler,
-    { urls: ["*://*/*"] },
-    extraReqOpts
-  );
-  chrome.webRequest.onHeadersReceived.addListener(
-    onHeadersReceivedHandler,
-    { urls: ["*://*/*"] },
-    ["responseHeaders"]
-  );
+
+  if (msg.action === "addMedia") {
+    const candidate = {
+      url: msg.url,
+      ext: msg.ext || extractUrlExtension(msg.url),
+      streamType: msg.streamType || "HLS",
+      mime: msg.mime || "",
+      size: msg.size || 0,
+      tabId,
+      tabUrl: msg.tabUrl || (sender.tab ? sender.tab.url : ""),
+      pageTitle: msg.pageTitle || (sender.tab ? sender.tab.title : "video"),
+      cachedManifestBody: msg.cachedManifestBody || "",
+      headers: (sender.tab && sender.tab.url) ? { Referer: sender.tab.url } : {}
+    };
+    const res = addOrDeduplicateMediaCandidate(tabId, candidate);
+    updateTabBadge(tabId);
+    persistSessionState().catch(() => {});
+    sendResponse({ success: true, added: res.added, count: (G.cacheData.get(tabId) || []).length });
+    return true;
+  }
+
+  if (msg.action === "downloadMedia") {
+    let candidate = null;
+    const tabList = G.cacheData.get(tabId) || [];
+    if (msg.candidateId) {
+      candidate = tabList.find(c => c.candidateId === msg.candidateId);
+    }
+    if (!candidate && msg.url) {
+      candidate = {
+        url: msg.url,
+        ext: extractUrlExtension(msg.url) || "mp4",
+        streamType: (msg.url.includes(".m3u8") ? "HLS" : (msg.url.includes(".mpd") ? "DASH" : "HTTP_FILE")),
+        pageTitle: msg.pageTitle || "",
+        tabUrl: msg.tabUrl || (sender.tab ? sender.tab.url : "")
+      };
+    }
+    if (candidate) {
+      submitMediaCandidateToFlux(candidate)
+        .then(result => sendResponse({ success: true, result }))
+        .catch(err => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+    sendResponse({ success: false, error: "Media candidate not found" });
+    return true;
+  }
+
+  if (msg.action === "clearMedia") {
+    G.cacheData.delete(tabId);
+    updateTabBadge(tabId);
+    persistSessionState().catch(() => {});
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (msg.action === "setSiteCapture") {
+    if (msg.tabUrl) {
+      setSiteDisabled(msg.tabUrl, !msg.enabled);
+      persistSessionState().catch(() => {});
+    }
+    sendResponse({ success: true, enabled: msg.enabled });
+    return true;
+  }
+
+  if (msg.action === "bypassNextDownload") {
+    G.bypassNextDownload = true;
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (msg.action === "linkClicked") {
+    G.lastClickedLink = {
+      url: msg.url,
+      filename: msg.filename,
+      referrer: msg.referrer,
+      time: Date.now()
+    };
+    if (msg.bypass) {
+      G.bypassNextDownload = true;
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (msg.action === "pingDesktop") {
+    sendNativeRpc("system.handshake", { protocolVersion: "1.0" })
+      .then(() => sendResponse({ connected: true }))
+      .catch(() => sendResponse({ connected: false }));
+    return true;
+  }
+
+  return false;
+}
+
+// 6. Register extension runtime listeners
+if (typeof chrome !== "undefined") {
+  // WebRequest Listeners
+  if (chrome.webRequest) {
+    const extraReqOpts = ["requestHeaders"];
+    if (chrome.webRequest.OnBeforeSendHeadersOptions && chrome.webRequest.OnBeforeSendHeadersOptions.EXTRA_HEADERS) {
+      extraReqOpts.push("extraHeaders");
+    }
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      onBeforeSendHeadersHandler,
+      { urls: ["*://*/*"] },
+      extraReqOpts
+    );
+    chrome.webRequest.onHeadersReceived.addListener(
+      onHeadersReceivedHandler,
+      { urls: ["*://*/*"] },
+      ["responseHeaders"]
+    );
+  }
+
+  // Runtime Message Listener
+  if (chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+  }
+
+  // Downloads API Listener
+  if (chrome.downloads && chrome.downloads.onCreated) {
+    chrome.downloads.onCreated.addListener((downloadItem) => {
+      onDownloadCreatedHandler(downloadItem).catch(() => {});
+    });
+  }
+
+  // Tab Lifecycle Listeners
+  if (chrome.tabs) {
+    if (chrome.tabs.onActivated) {
+      chrome.tabs.onActivated.addListener((activeInfo) => {
+        updateTabBadge(activeInfo.tabId);
+      });
+    }
+    if (chrome.tabs.onRemoved) {
+      chrome.tabs.onRemoved.addListener((tabId) => {
+        G.cacheData.delete(tabId);
+      });
+    }
+  }
+
+  // Restore state on service worker startup
+  restoreSessionState().catch(() => {});
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -232,9 +404,12 @@ if (typeof module !== "undefined" && module.exports) {
     persistSessionState,
     restoreSessionState,
     sendNativeRpc,
+    updateTabBadge,
     onBeforeSendHeadersHandler,
     onHeadersReceivedHandler,
     onDownloadCreatedHandler,
-    submitMediaCandidateToOpenIDM
+    submitMediaCandidateToFlux,
+    submitMediaCandidateToOpenIDM,
+    handleRuntimeMessage
   };
 }

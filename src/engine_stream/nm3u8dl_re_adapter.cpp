@@ -376,7 +376,7 @@ Result<StreamProbeResult> Nm3u8dlReAdapter::ParseMetaJson(const std::filesystem:
     if (out.drm_protected) {
         return Result<StreamProbeResult>::Err(
             "ERR_STREAM_DRM_PROTECTED",
-            "Stream uses unsupported DRM protection (" + out.drm_system + "). OpenIDM does not circumvent DRM.");
+            "Stream uses unsupported DRM protection (" + out.drm_system + "). Flux does not circumvent DRM.");
     }
     if (out.tracks.empty()) {
         return Result<StreamProbeResult>::Err("ERR_STREAM_INVALID_MANIFEST", "No downloadable tracks found in manifest");
@@ -559,7 +559,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     if (dot != std::string::npos) {
         base_stem = base_stem.substr(0, dot);
     }
-    std::string temp_save_name = base_stem + ".openidm_mux";
+    std::string temp_save_name = base_stem + ".flux_mux";
 
     std::vector<std::string> rsp_lines;
     rsp_lines.push_back("\"" + EscapeRspArg(input_target) + "\"");

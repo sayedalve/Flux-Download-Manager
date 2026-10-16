@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--version" || arg == "-v") {
-            std::cout << "OpenIDM v0.2.0 (Brisk Engine + Cat Catch Integration + N_m3u8DL-RE Stream Pipeline)\n";
+            std::cout << "Flux Download Manager v0.3.0 (Flux) [Brisk Engine + Cat Catch Media Detection + N_m3u8DL-RE Pipeline]\n";
             return 0;
         } else if (arg == "--db" && i + 1 < argc) {
             cfg.state_db_path = argv[++i];
@@ -96,11 +96,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    openidm::Logger::Instance().SetLogFile(cfg.state_db_path.parent_path() / "openidm.log");
+    openidm::Logger::Instance().SetLogFile(cfg.state_db_path.parent_path() / "flux.log");
     openidm::DownloadController controller(cfg);
     auto init_res = controller.Initialize();
     if (!init_res.ok()) {
-        std::cerr << "ERROR: Failed to initialize OpenIDM controller: " << init_res.error->message << "\n";
+        std::cerr << "ERROR: Failed to initialize Flux controller: " << init_res.error->message << "\n";
         return 1;
     }
 

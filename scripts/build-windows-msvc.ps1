@@ -18,7 +18,7 @@ $ToolsWinDir = Join-Path $RepoRoot "tools\win-x64"
 $DistDir = Join-Path $RepoRoot "dist"
 
 Write-Host "================================================================="
-Write-Host "     OpenIDM v0.2.0 Windows 11 x64 Release Build Pipeline       "
+Write-Host "     Flux Download Manager v0.3.0 Windows 11 x64 Build Pipeline  "
 Write-Host "================================================================="
 
 # -----------------------------------------------------------------------------
@@ -98,22 +98,26 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed with exit code $LAS
 # -----------------------------------------------------------------------------
 # 3. Compile Windows x64 Targets
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [3/8] Compiling Windows x64 targets (openidm, openidm-nmh, openidm_unit_tests)..."
-& $CMakeCmd --build $BuildDir --config Release --target openidm openidm-nmh openidm_unit_tests sqlite3
+Write-Host "`n==> [3/8] Compiling Windows x64 targets (flux, flux-nmh, flux_unit_tests)..."
+& $CMakeCmd --build $BuildDir --config Release --target flux flux-nmh flux_unit_tests sqlite3
 if ($LASTEXITCODE -ne 0) { throw "CMake compilation failed with exit code $LASTEXITCODE" }
 
 $BuiltDir = $BuildDir
-if (Test-Path (Join-Path $BuildDir "Release\openidm.exe")) {
+if (Test-Path (Join-Path $BuildDir "Release\flux.exe")) {
     $BuiltDir = Join-Path $BuildDir "Release"
 }
 
 # Copy targets to canonical locations expected by installer and test suites
-$Targets = @("openidm.exe", "openidm-nmh.exe", "openidm_unit_tests.exe")
+$Targets = @("flux.exe", "flux-nmh.exe", "flux_unit_tests.exe")
 foreach ($t in $Targets) {
     $srcPath = Join-Path $BuiltDir $t
     Copy-Item -Force $srcPath (Join-Path $BuildDir $t)
     Copy-Item -Force $srcPath (Join-Path $RepoRoot "build\$t")
 }
+# Also create backwards-compatibility aliases if needed
+Copy-Item -Force (Join-Path $BuiltDir "flux.exe") (Join-Path $BuildDir "openidm.exe")
+Copy-Item -Force (Join-Path $BuiltDir "flux-nmh.exe") (Join-Path $BuildDir "openidm-nmh.exe")
+Copy-Item -Force (Join-Path $BuiltDir "flux_unit_tests.exe") (Join-Path $BuildDir "openidm_unit_tests.exe")
 
 # -----------------------------------------------------------------------------
 # 4. Verify PE32+ Headers and Subsystems
@@ -150,9 +154,9 @@ function Verify-PeBinary([string]$FilePath, [int]$ExpectedSubsystem, [string]$Su
     Write-Host "  [+] Verified $FilePath -> AMD64 PE32+ Subsystem=$subsystem ($SubsystemName), Size=${sizeKb} KB"
 }
 
-Verify-PeBinary (Join-Path $BuildDir "openidm.exe") 2 "IMAGE_SUBSYSTEM_WINDOWS_GUI"
-Verify-PeBinary (Join-Path $BuildDir "openidm-nmh.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
-Verify-PeBinary (Join-Path $BuildDir "openidm_unit_tests.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+Verify-PeBinary (Join-Path $BuildDir "flux.exe") 2 "IMAGE_SUBSYSTEM_WINDOWS_GUI"
+Verify-PeBinary (Join-Path $BuildDir "flux-nmh.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+Verify-PeBinary (Join-Path $BuildDir "flux_unit_tests.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 
 # -----------------------------------------------------------------------------
 # 5. Provision and Verify Upstream Stream Workers
@@ -189,8 +193,8 @@ if (-not $SkipTests) {
     Write-Host "`n==> [6/8] Executing Test Suites..."
 
     # 6.1 C++ Unit Tests
-    Write-Host "  --> [A] C++20 Unit and Regression Tests (12 Suites)..."
-    & (Join-Path $BuildDir "openidm_unit_tests.exe")
+    Write-Host "  --> [A] C++20 Unit and Regression Tests (13 Suites)..."
+    & (Join-Path $BuildDir "flux_unit_tests.exe")
     if ($LASTEXITCODE -ne 0) { throw "C++20 unit test suite failed!" }
 
     # 6.2 Browser Extension Tests
@@ -223,10 +227,10 @@ if (-not $SkipInstaller) {
         throw "ISCC.exe (Inno Setup 6) is required to build the release installer."
     }
     New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-    & $IsccCmd (Join-Path $RepoRoot "installer\openidm.iss")
+    & $IsccCmd (Join-Path $RepoRoot "installer\flux.iss")
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup installer compilation failed!" }
 
-    $InstallerPath = Join-Path $DistDir "OpenIDM-Setup-x64-0.2.0.exe"
+    $InstallerPath = Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe"
     if (-not (Test-Path $InstallerPath)) {
         throw "Installer output not found at $InstallerPath"
     }
@@ -240,16 +244,24 @@ if (-not $SkipInstaller) {
 # -----------------------------------------------------------------------------
 # 8. Checksum Generation and Final Verification
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [8/8] Generating Release Checksums..."
+Write-Host "`n==> [8/8] Staging Portable Distribution & Generating Release Checksums..."
+New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools\win-x64") | Out-Null
+Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "Flux.exe")
+Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe")
+Copy-Item -Force (Join-Path $BuildDir "flux-nmh.exe") (Join-Path $DistDir "flux-nmh.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
+
 $CheckFiles = @(
-    (Join-Path $BuildDir "openidm.exe"),
-    (Join-Path $BuildDir "openidm-nmh.exe"),
-    (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe"),
-    (Join-Path $ToolsWinDir "ffmpeg.exe")
+    (Join-Path $DistDir "Flux.exe"),
+    (Join-Path $DistDir "flux-nmh.exe"),
+    (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe"),
+    (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
 )
-if (Test-Path (Join-Path $DistDir "OpenIDM-Setup-x64-0.2.0.exe")) {
-    $CheckFiles += (Join-Path $DistDir "OpenIDM-Setup-x64-0.2.0.exe")
+if (Test-Path (Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe")) {
+    $CheckFiles += (Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe")
 }
+
 
 $ChecksumReport = Join-Path $DistDir "SHA256SUMS.txt"
 $hashLines = @()

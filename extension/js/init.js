@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/init.js) for OpenIDM Browser Integration.
+// Adapted from xifangczy/cat-catch (js/init.js) for Flux Browser Integration.
 // Preserves Cat Catch's G configuration model, Ext/Type/Regex rule tables, and header cache.
 
 const G = {
-  version: "0.1.0",
-  nativeHostName: "org.openidm.native",
+  version: "0.3.0",
+  nativeHostName: "com.flux.downloadmanager",
+  fallbackNativeHostNames: ["org.flux.native", "org.openidm.native"],
   enableCapture: true,
   enableVideoOverlay: true,
   minFileSizeBytes: 1048576, // 1 MiB minimum for automatic ordinary file interception

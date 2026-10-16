@@ -109,16 +109,24 @@ int main(int argc, char* argv[]) {
 #endif
 
     std::string sock_path = openidm::ipc::IpcServer::DefaultSocketPath();
-    if (const char* env_sock = std::getenv("OPENIDM_IPC_SOCKET")) {
-        sock_path = env_sock;
+    if (const char* env_flux = std::getenv("FLUX_IPC_SOCKET")) {
+        sock_path = env_flux;
+    } else if (const char* env_old = std::getenv("OPENIDM_IPC_SOCKET")) {
+        sock_path = env_old;
     }
     std::filesystem::path daemon_bin;
     if (argc > 0 && argv[0]) {
         std::filesystem::path self_path = std::filesystem::path(argv[0]);
 #ifdef _WIN32
-        std::filesystem::path candidate = self_path.parent_path() / "openidm.exe";
+        std::filesystem::path candidate = self_path.parent_path() / "flux.exe";
+        if (!std::filesystem::exists(candidate)) {
+            candidate = self_path.parent_path() / "openidm.exe";
+        }
 #else
-        std::filesystem::path candidate = self_path.parent_path() / "openidm";
+        std::filesystem::path candidate = self_path.parent_path() / "flux";
+        if (!std::filesystem::exists(candidate)) {
+            candidate = self_path.parent_path() / "openidm";
+        }
 #endif
         if (std::filesystem::exists(candidate)) {
             daemon_bin = candidate;

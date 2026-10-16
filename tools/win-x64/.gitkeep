@@ -1,0 +1,2 @@
+# Placeholder to preserve tools/win-x64 directory structure in git.
+# Binaries are fetched via scripts/fetch-workers.ps1

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenIDM Media &amp; Download Capture</title>
+  <link rel="stylesheet" href="css/popup.css">
+</head>
+<body>
+  <header class="header">
+    <div class="brand">
+      <h1>OpenIDM Capture</h1>
+      <span id="connectionBadge" class="conn-badge conn-connected">Desktop Connected</span>
+    </div>
+    <label class="toggle" title="Enable automatic download &amp; media capture on this site">
+      <input type="checkbox" id="siteToggle" checked>
+      <span>Capture on site</span>
+    </label>
+  </header>
+
+  <section class="toolbar" aria-label="Media Filter Controls">
+    <div class="filter-tabs" role="tablist">
+      <button type="button" class="tab-btn active" data-filter="all" role="tab" aria-selected="true">All</button>
+      <button type="button" class="tab-btn" data-filter="stream" role="tab" aria-selected="false">Streams (HLS/DASH)</button>
+      <button type="button" class="tab-btn" data-filter="direct" role="tab" aria-selected="false">Direct Files</button>
+    </div>
+    <input type="search" id="searchInput" class="search-input" placeholder="Filter by title, resolution, or format..." aria-label="Search detected media">
+  </section>
+
+  <main id="mediaList" class="media-list" role="region" aria-live="polite">
+    <p class="empty">No media detected on this tab yet. Play a video or start a download to capture streams.</p>
+  </main>
+
+  <footer class="footer">
+    <button id="clearListBtn" type="button" class="btn-secondary">Clear List</button>
+    <button id="batchDownloadBtn" type="button" class="btn-primary">Download All in OpenIDM</button>
+  </footer>
+  <script src="js/popup.js"></script>
+</body>
+</html>

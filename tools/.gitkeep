@@ -1,0 +1,2 @@
+# This directory contains stream worker tools (N_m3u8DL-RE & ffmpeg).
+# Executables are fetched via scripts/fetch-workers.ps1

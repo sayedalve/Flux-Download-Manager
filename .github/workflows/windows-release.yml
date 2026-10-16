@@ -1,0 +1,149 @@
+name: Windows 11 Release Build & Verification
+
+on:
+  push:
+    branches: [ "main", "master", "v0.2.x" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test:
+    name: Build & Verify Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+
+      - name: Provision Upstream Stream Workers (N_m3u8DL-RE & FFmpeg)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Windows Targets
+        run: |
+          cmake --build build --config Release --target openidm openidm-nmh openidm_unit_tests
+
+      - name: Verify PE32+ Binaries & Subsystems
+        shell: powershell
+        run: |
+          $bins = @(
+            @{ Path = "build/Release/openidm.exe"; ExpectedSubsystem = 2 },
+            @{ Path = "build/Release/openidm-nmh.exe"; ExpectedSubsystem = 3 },
+            @{ Path = "build/Release/openidm_unit_tests.exe"; ExpectedSubsystem = 3 }
+          )
+          foreach ($b in $bins) {
+            if (-not (Test-Path $b.Path)) {
+              throw "Binary missing: $($b.Path)"
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($b.Path)
+            if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "Invalid MZ header: $($b.Path)"
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x8664) {
+              throw "Expected AMD64 (0x8664) machine type: $($b.Path)"
+            }
+            $optOffset = $peOffset + 24
+            $magic = [BitConverter]::ToUInt16($bytes, $optOffset)
+            if ($magic -ne 0x20B) {
+              throw "Expected PE32+ (0x20B) magic: $($b.Path)"
+            }
+            $subsystem = [BitConverter]::ToUInt16($bytes, $optOffset + 68)
+            if ($subsystem -ne $b.ExpectedSubsystem) {
+              throw "Expected subsystem $($b.ExpectedSubsystem), got $subsystem for $($b.Path)"
+            }
+            Write-Host "Verified $($b.Path): AMD64 PE32+ Subsystem=$subsystem"
+          }
+
+      - name: Run C++ Unit Tests (12 Suites)
+        shell: powershell
+        run: |
+          .\build\Release\openidm_unit_tests.exe
+
+      - name: Run Browser Extension Detection Tests
+        shell: powershell
+        run: |
+          node tests/test_extension_detection.js
+
+      - name: Run End-to-End Integration & Benchmark Suite
+        shell: powershell
+        run: |
+          python tests/run_all_integration_tests.py
+
+      - name: Run Automated Performance Benchmarks
+        shell: powershell
+        run: |
+          python scripts/run-benchmarks.py
+
+      - name: Compile Inno Setup Installer
+        shell: powershell
+        run: |
+          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/openidm.iss
+          } elseif (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
+            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer/openidm.iss
+          } else {
+            choco install innosetup -y
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/openidm.iss
+          }
+
+      - name: Package Standalone Portable Release
+        shell: powershell
+        run: |
+          $distDir = "dist/portable/OpenIDM-v0.2.0-win-x64"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          Copy-Item "build/Release/openidm.exe" "$distDir/"
+          Copy-Item "build/Release/openidm-nmh.exe" "$distDir/"
+          Copy-Item "tools/win-x64/N_m3u8DL-RE.exe" "$distDir/"
+          Copy-Item "tools/win-x64/ffmpeg.exe" "$distDir/"
+          Copy-Item -Recurse "extension" "$distDir/extension"
+          Copy-Item "README.md" "$distDir/"
+          Copy-Item "LICENSE" "$distDir/"
+          Copy-Item "THIRD_PARTY_NOTICES.md" "$distDir/"
+          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/OpenIDM-v0.2.0-win-x64-portable.zip" -Force
+          Get-FileHash -Algorithm SHA256 "dist/OpenIDM-v0.2.0-win-x64-portable.zip", "dist/OpenIDM-Setup-x64-0.2.0.exe" | Out-File -Encoding utf8 "dist/SHA256SUMS.txt"
+          Get-Content "dist/SHA256SUMS.txt"
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openidm-v0.2.0-windows-x64
+          path: |
+            dist/OpenIDM-Setup-x64-0.2.0.exe
+            dist/OpenIDM-v0.2.0-win-x64-portable.zip
+            dist/SHA256SUMS.txt
+            benchmarks/latest_metrics.json
+            docs/BENCHMARK_REPORT.md

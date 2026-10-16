@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+cmake_minimum_required(VERSION 3.24)
+project(OpenIDM VERSION 0.2.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD 11)
+
+if(MSVC)
+    add_compile_options(/W4 /WX /permissive- /utf-8 /EHsc /wd4996 /D_CRT_SECURE_NO_WARNINGS)
+    add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+else()
+    add_compile_options(-Wall -Wextra -Werror -pthread)
+endif()
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# SQLite 3 Amalgamation
+add_library(sqlite3 STATIC src/third_party/sqlite3/sqlite3.c)
+target_include_directories(sqlite3 PUBLIC src/third_party/sqlite3)
+if(MSVC)
+    target_compile_definitions(sqlite3 PRIVATE SQLITE_ENABLE_WAL=1 SQLITE_ENABLE_COLUMN_METADATA=1 _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(sqlite3 PRIVATE /W3 /wd4100 /wd4127 /wd4244 /wd4701 /wd4706)
+else()
+    target_compile_definitions(sqlite3 PRIVATE SQLITE_ENABLE_WAL=1 SQLITE_ENABLE_COLUMN_METADATA=1)
+    target_compile_options(sqlite3 PRIVATE -w)
+endif()
+
+set(OPENIDM_CORE_SOURCES
+    src/common/path_sanitizer.cpp
+    src/common/logger.cpp
+    src/common/crypto_utils.cpp
+    src/storage/sqlite_store.cpp
+    src/brisk_engine/segment_scheduler.cpp
+    src/brisk_engine/http_client.cpp
+    src/brisk_engine/http_download_engine.cpp
+    src/engine_stream/nm3u8dl_re_adapter.cpp
+    src/core/download_controller.cpp
+    src/ipc/ipc_server.cpp
+    src/ui/win32_main_window.cpp
+)
+
+add_executable(openidm ${OPENIDM_CORE_SOURCES} src/app/main.cpp)
+add_executable(openidm-nmh ${OPENIDM_CORE_SOURCES} src/nmh/main.cpp)
+add_executable(N_m3u8DL-RE src/brisk_engine/http_client.cpp src/worker_stream/nm3u8dl_re_worker.cpp)
+add_executable(openidm_unit_tests ${OPENIDM_CORE_SOURCES} tests/cpp/unit_tests.cpp)
+
+if(WIN32)
+    set_target_properties(openidm PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_libraries(openidm PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi)
+    target_link_libraries(openidm-nmh PRIVATE sqlite3 advapi32 user32 winhttp crypt32 bcrypt)
+    target_link_libraries(N_m3u8DL-RE PRIVATE winhttp bcrypt crypt32)
+    target_link_libraries(openidm_unit_tests PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi)
+else()
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(openidm PRIVATE sqlite3 OpenSSL::SSL OpenSSL::Crypto pthread)
+    target_link_libraries(openidm-nmh PRIVATE sqlite3 OpenSSL::SSL OpenSSL::Crypto pthread)
+    target_link_libraries(N_m3u8DL-RE PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+    target_link_libraries(openidm_unit_tests PRIVATE sqlite3 OpenSSL::SSL OpenSSL::Crypto pthread)
+endif()
+
+enable_testing()
+add_test(NAME OpenIdmCppUnitTests COMMAND openidm_unit_tests)

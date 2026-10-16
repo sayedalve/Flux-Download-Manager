@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// OpenIDM — Brisk HTTP Segmented Download Engine
+// Direct integration of Brisk's HttpDownloadEngine & HttpDownloadConnection mechanisms:
+//   - Dynamic Connection Spawning (1 -> max_connections)
+//   - Dynamic Connection Reuse (Work-Stealing Byte-Range Split)
+//   - Automatic Stall Detection & Connection Reset
+//   - Single-Stream Fallback for Non-Range Servers
+//   - Token-Bucket Bandwidth Limiting
+#pragma once
+
+#include <atomic>
+#include <filesystem>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "brisk_engine/segment_scheduler.hpp"
+#include "common/types.hpp"
+
+namespace openidm::brisk {
+
+struct EngineProgress {
+    std::string task_id;
+    TaskState state{TaskState::kDownloading};
+    uint64_t downloaded_bytes{0};
+    uint64_t total_bytes{0};
+    uint64_t speed_bps{0};
+    bool range_supported{false};
+    std::string resolved_filename;
+    std::string etag;
+    std::string last_modified;
+    std::vector<Segment> segments;
+};
+
+struct EngineConfig {
+    int stall_timeout_ms{3000};       // 3s default for fast stall reset; configurable up to 15000ms
+    int max_retries_per_worker{6};
+    uint64_t min_split_bytes{131072}; // 128 KiB minimum split remainder
+    bool allow_loopback_redirect{false};
+};
+
+class HttpDownloadEngine {
+public:
+    explicit HttpDownloadEngine(EngineConfig cfg = {});
+    ~HttpDownloadEngine();
+
+    using ProgressCallback = std::function<void(const EngineProgress&)>;
+
+    // Executes a synchronous or background download for TaskModel, updating task in place
+    // and firing on_progress periodically.
+    Result<std::filesystem::path> ExecuteDownload(
+        TaskModel& task,
+        std::atomic<bool>& pause_requested,
+        std::atomic<bool>& cancel_requested,
+        std::atomic<uint64_t>& speed_limit_bps,
+        ProgressCallback on_progress);
+
+private:
+    EngineConfig m_cfg;
+};
+
+} // namespace openidm::brisk

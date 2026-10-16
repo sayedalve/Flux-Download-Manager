@@ -1,0 +1,8 @@
+﻿{
+    "TargetBinary":  "IDMan.exe",
+    "ExitCode":  0,
+    "DurationSeconds":  752.66,
+    "LogFile":  "C:\\Users\\sayed\\Downloads\\IDM_RE_Investigation\\ghidra\\reports\\IDMan.exe_headless.log",
+    "ReportGenerated":  true,
+    "ReportPath":  "C:\\Users\\sayed\\Downloads\\IDM_RE_Investigation\\ghidra\\reports\\IDMan.exe_ghidra_report.md"
+}

@@ -1,0 +1,46 @@
+﻿[
+    {
+        "PackageName":  "IDMGCExt.crx",
+        "TargetDir":  "C:\\Users\\sayed\\Downloads\\IDM_RE_Investigation\\extensions\\IDMGCExt",
+        "ManifestVersion":  3,
+        "ExtensionVersion":  "6.43.1",
+        "ExtensionName":  "IDM Integration Module",
+        "Permissions":  "scripting, tabs, cookies, contextMenus, webNavigation, webRequest, declarativeNetRequest, downloads, downloads.shelf, downloads.ui, management, storage, proxy, nativeMessaging",
+        "BackgroundScripts":  "{\"service_worker\":\"background.js\"}",
+        "ContentScripts":  "{\"js\":[\"content.js\"],\"matches\":[\"*://*/*\"],\"all_frames\":true,\"run_at\":\"document_start\"}",
+        "FileCount":  36
+    },
+    {
+        "PackageName":  "IDMEdgeExt.crx",
+        "TargetDir":  "C:\\Users\\sayed\\Downloads\\IDM_RE_Investigation\\extensions\\IDMEdgeExt",
+        "ManifestVersion":  2,
+        "ExtensionVersion":  "6.43.1",
+        "ExtensionName":  "IDM Integration Module",
+        "Permissions":  "\u003call_urls\u003e, tabs, cookies, contextMenus, webNavigation, webRequest, webRequestBlocking, downloads, downloads.shelf, management, storage, proxy, nativeMessaging",
+        "BackgroundScripts":  "{\"scripts\":[\"background.js\"],\"persistent\":true}",
+        "ContentScripts":  "{\"js\":[\"content.js\"],\"matches\":[\"http://*/*\",\"https://*/*\",\"ftp://*/*\",\"file:///*\"],\"all_frames\":true,\"run_at\":\"document_start\"}",
+        "FileCount":  35
+    },
+    {
+        "PackageName":  "IDMGCExt59.crx",
+        "TargetDir":  "C:\\Users\\sayed\\Downloads\\IDM_RE_Investigation\\extensions\\IDMGCExt59",
+        "ManifestVersion":  2,
+        "ExtensionVersion":  "6.40.8.2",
+        "ExtensionName":  "IDM Integration Module",
+        "Permissions":  "\u003call_urls\u003e, tabs, cookies, contextMenus, webNavigation, webRequest, webRequestBlocking, downloads, downloads.shelf, management, storage, proxy, nativeMessaging",
+        "BackgroundScripts":  "{\"scripts\":[\"background.js\"],\"persistent\":true}",
+        "ContentScripts":  "{\"js\":[\"content.js\"],\"matches\":[\"http://*/*\",\"https://*/*\",\"ftp://*/*\",\"file:///*\"],\"all_frames\":true,\"run_at\":\"document_start\"}",
+        "FileCount":  34
+    },
+    {
+        "PackageName":  "idmmzcc3.xpi",
+        "TargetDir":  "C:\\Users\\sayed\\Downloads\\IDM_RE_Investigation\\extensions\\idmmzcc3",
+        "ManifestVersion":  2,
+        "ExtensionVersion":  "6.43.1",
+        "ExtensionName":  "IDM Integration Module",
+        "Permissions":  "\u003call_urls\u003e, tabs, cookies, contextMenus, webNavigation, webRequest, webRequestBlocking, management, storage, nativeMessaging, privacy, idle",
+        "BackgroundScripts":  "{\"scripts\":[\"background.js\"]}",
+        "ContentScripts":  "{\"js\":[\"content.js\"],\"matches\":[\"http://*/*\",\"https://*/*\",\"ftp://*/*\",\"file:///*\"],\"all_frames\":true,\"run_at\":\"document_start\"}",
+        "FileCount":  39
+    }
+]

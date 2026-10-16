@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "OpenIDM Browser Integration (Cat Catch + Brisk Engine)",
+  "version": "0.1.0",
+  "description": "Automatic download capture and multi-layered video/stream detection (HLS/DASH/MP4/WebM) for OpenIDM.",
+  "permissions": [
+    "nativeMessaging",
+    "downloads",
+    "webRequest",
+    "storage",
+    "contextMenus",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*/*"
+  ],
+  "background": {
+    "service_worker": "js/background.js"
+  },
+  "action": {
+    "default_title": "OpenIDM Media & Download Capture",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["js/content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["catch-script/catch.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

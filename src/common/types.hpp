@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// OpenIDM — Unified Task Model, Application Settings & Common Types
+// Adapted from Brisk (lib/download_engine/model/download_item_model.dart) & OpenIDM PRS.
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace openidm {
+
+enum class TaskType {
+    kHttpFile,
+    kStreamHls,
+    kStreamDash,
+    kStreamMss
+};
+
+enum class TaskState {
+    kQueued,
+    kProbing,
+    kDownloading,
+    kMuxing,
+    kVerifying,
+    kPaused,
+    kCompleted,
+    kFailed,
+    kCanceled
+};
+
+enum class ConflictPolicy {
+    kAutoRename,
+    kOverwrite,
+    kFailIfExists
+};
+
+struct Error {
+    std::string code;
+    std::string message;
+    bool retryable{false};
+    bool user_action_resumable{false};
+};
+
+template <typename T>
+struct Result {
+    std::optional<T> value;
+    std::optional<Error> error;
+
+    bool ok() const { return !error.has_value(); }
+    static Result<T> Ok(T val) { return Result<T>{std::move(val), std::nullopt}; }
+    static Result<T> Err(std::string code, std::string msg, bool retryable = false, bool resumable = false) {
+        return Result<T>{std::nullopt, Error{std::move(code), std::move(msg), retryable, resumable}};
+    }
+};
+
+template <>
+struct Result<void> {
+    std::optional<Error> error;
+
+    bool ok() const { return !error.has_value(); }
+    static Result<void> Ok() { return Result<void>{std::nullopt}; }
+    static Result<void> Err(std::string code, std::string msg, bool retryable = false, bool resumable = false) {
+        return Result<void>{Error{std::move(code), std::move(msg), retryable, resumable}};
+    }
+};
+
+// Direct structural equivalent of Brisk's ByteRange & Segment
+// Reference: BrisklyDev/brisk lib/download_engine/segment/segment.dart
+struct Segment {
+    uint32_t segment_id{0};
+    uint64_t start_offset{0};
+    uint64_t current_offset{0};
+    uint64_t end_offset{0}; // Inclusive byte index
+    bool completed{false};
+
+    uint64_t total_bytes() const {
+        return (end_offset >= start_offset) ? (end_offset - start_offset + 1) : 0;
+    }
+    uint64_t downloaded_bytes() const {
+        if (completed) return total_bytes();
+        return (current_offset > start_offset) ? (current_offset - start_offset) : 0;
+    }
+    uint64_t remaining_bytes() const {
+        if (completed || current_offset > end_offset) return 0;
+        return end_offset - current_offset + 1;
+    }
+    bool is_valid() const {
+        return start_offset <= end_offset && current_offset >= start_offset;
+    }
+};
+
+struct StreamTrack {
+    std::string id;
+    std::string media_type; // "VIDEO", "AUDIO", "SUBTITLES"
+    std::string group_id;
+    std::string language;
+    std::string name;
+    std::string codecs;
+    std::string resolution; // e.g., "1920x1080"
+    uint64_t bandwidth{0};  // bps
+    double frame_rate{0.0};
+    uint32_t segments_count{0};
+    double duration_sec{0.0};
+    bool encrypted{false};
+    std::string encryption_method; // "NONE", "AES_128", "SAMPLE_AES_CTR", "CENC"
+};
+
+struct StreamSelectionOptions {
+    std::string video_filter{"best"};     // -sv argument
+    std::string audio_filter{"all"};      // -sa argument
+    std::string subtitle_filter{"all"};   // -ss argument
+    std::string output_format{"mp4"};     // "mp4" or "mkv"
+    uint32_t thread_count{8};
+    bool concurrent_download{true};       // -mt
+    std::string custom_hls_key_hex;       // Optional user-supplied AES-128 key
+    std::string cached_manifest_body;     // Optional cached manifest from Cat Catch Deep Search
+};
+
+struct TaskModel {
+    std::string task_id;
+    TaskType task_type{TaskType::kHttpFile};
+    TaskState state{TaskState::kQueued};
+    std::string queue_id{"main"};
+    int32_t queue_order{0};
+    std::string category{"General"};
+    std::string url;
+    std::string page_url;
+    std::string file_name;
+    std::string save_dir;
+    std::string part_path;
+    uint64_t total_bytes{0};
+    uint64_t downloaded_bytes{0};
+    uint64_t speed_bps{0};
+    double stream_percent{0.0};
+    uint32_t completed_segments{0};
+    uint32_t total_segments{0};
+    bool range_supported{false};
+    uint32_t max_connections{8};
+    uint32_t retry_count{0};
+    bool scheduled{false};
+    std::string schedule_time_local;
+    std::string status_detail;                        // Granular stage (e.g., "Downloading video segments (5/10)")
+    std::string etag;
+    std::string last_modified;
+    std::map<std::string, std::string> headers;       // Non-sensitive: Referer, Origin, User-Agent
+    std::map<std::string, std::string> auth_headers;  // Sensitive: Cookie, Authorization (DPAPI/AES encrypted at rest)
+    StreamSelectionOptions stream_options;
+    std::string expected_sha256;
+    std::string error_code;
+    std::string error_message;
+    int64_t created_at_ms{0};
+    int64_t updated_at_ms{0};
+    int64_t completed_at_ms{0};
+    std::vector<Segment> segments;
+};
+
+struct QueueConfig {
+    std::string queue_id{"main"};
+    std::string name{"Main Download Queue"};
+    uint32_t max_concurrent_tasks{3};
+    uint64_t speed_limit_bps{0};
+    bool schedule_enabled{false};
+    std::string start_time_local; // "HH:MM"
+    std::string stop_time_local;  // "HH:MM"
+    std::string post_completion_action{"NONE"};
+};
+
+struct AppSettings {
+    std::string theme{"dark"}; // "dark", "light", "system"
+    uint32_t max_concurrent_tasks{3};
+    uint64_t speed_limit_bps{0};
+    uint32_t default_connections_per_task{8};
+    std::string default_download_dir;
+    bool browser_capture_enabled{true};
+    bool close_to_tray{true};
+    bool start_minimized{false};
+    bool reduced_motion{false};
+};
+
+std::string TaskTypeToString(TaskType t);
+TaskType TaskTypeFromString(const std::string& s);
+std::string TaskStateToString(TaskState s);
+TaskState TaskStateFromString(const std::string& s);
+std::string InferCategoryFromFilename(const std::string& filename);
+int64_t NowEpochMs();
+std::string GenerateUuidV4();
+
+} // namespace openidm

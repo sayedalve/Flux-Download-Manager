@@ -1,0 +1,9 @@
+{
+  "name": "org.openidm.native",
+  "description": "OpenIDM Native Messaging Host Bridge",
+  "path": "C:\\Program Files\\OpenIDM\\openidm-nmh.exe",
+  "type": "stdio",
+  "allowed_extensions": [
+    "extension@openidm.org"
+  ]
+}

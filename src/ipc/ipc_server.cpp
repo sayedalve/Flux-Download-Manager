@@ -139,6 +139,25 @@ Result<void> IpcServer::Start() {
     if (m_running.load()) return Result<void>::Ok();
 
 #ifdef _WIN32
+    std::wstring wpipe(m_socket_path.begin(), m_socket_path.end());
+    HANDLE hFirst = CreateNamedPipeW(
+        wpipe.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_UNLIMITED_INSTANCES,
+        65536,
+        65536,
+        50,
+        nullptr);
+    if (hFirst == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED || err == ERROR_ALREADY_EXISTS || err == ERROR_PIPE_BUSY) {
+            return Result<void>::Err("ERR_IPC_PIPE_EXISTS", "Another IPC server instance is already active on " + m_socket_path);
+        }
+    } else {
+        CloseHandle(hFirst);
+    }
+
     m_running.store(true);
     m_accept_thread = std::thread(&IpcServer::AcceptLoop, this);
     return Result<void>::Ok();

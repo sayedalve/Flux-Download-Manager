@@ -97,6 +97,51 @@ int main(int argc, char* argv[]) {
     }
 
     openidm::Logger::Instance().SetLogFile(cfg.state_db_path.parent_path() / "flux.log");
+
+#ifdef _WIN32
+    std::wstring wpipe(ipc_socket_path.begin(), ipc_socket_path.end());
+
+    // 1. Single-instance check for GUI mode (mode.empty())
+    if (mode.empty()) {
+        HWND existing_hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
+        if (existing_hwnd) {
+            ShowWindow(existing_hwnd, SW_RESTORE);
+            SetForegroundWindow(existing_hwnd);
+            return 0; // Seamless single instance: bring existing GUI window to front and exit
+        }
+
+        // If a background daemon is running, signal it to exit so the user's interactive GUI can take over the pipe & database
+        HANDLE hDaemonShutdown = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, L"Local\\Flux_Daemon_Shutdown_Event");
+        if (hDaemonShutdown) {
+            SetEvent(hDaemonShutdown);
+            CloseHandle(hDaemonShutdown);
+            for (int i = 0; i < 30; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                HANDLE hTest = CreateFileW(wpipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+                if (hTest == INVALID_HANDLE_VALUE) {
+                    break;
+                }
+                CloseHandle(hTest);
+            }
+        }
+    }
+
+    // 2. Single-instance check for background daemon mode
+    if (mode == "daemon") {
+        HWND existing_hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
+        if (existing_hwnd) {
+            // Desktop GUI is already running and providing the IPC server on this pipe
+            return 0;
+        }
+        HANDLE hTest = CreateFileW(wpipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (hTest != INVALID_HANDLE_VALUE) {
+            CloseHandle(hTest);
+            // Another background daemon or host is already actively serving this IPC pipe
+            return 0;
+        }
+    }
+#endif
+
     openidm::DownloadController controller(cfg);
     auto init_res = controller.Initialize();
     if (!init_res.ok()) {
@@ -179,18 +224,39 @@ int main(int argc, char* argv[]) {
     if (mode == "daemon") {
         std::signal(SIGINT, SignalHandler);
         std::signal(SIGTERM, SignalHandler);
+#ifdef _WIN32
+        HANDLE hShutdownEvent = CreateEventW(nullptr, FALSE, FALSE, L"Local\\Flux_Daemon_Shutdown_Event");
+#endif
         openidm::ipc::IpcServer server(controller, ipc_socket_path);
         auto sres = server.Start();
         if (!sres.ok()) {
             std::cerr << "ERROR: Failed to start IPC server: " << sres.error->message << "\n";
             controller.Shutdown();
+#ifdef _WIN32
+            if (hShutdownEvent) CloseHandle(hShutdownEvent);
+#endif
             return 1;
         }
         while (!g_terminate_daemon.load()) {
+#ifdef _WIN32
+            if (hShutdownEvent) {
+                DWORD wr = WaitForSingleObject(hShutdownEvent, 50);
+                if (wr == WAIT_OBJECT_0) {
+                    g_terminate_daemon.store(true);
+                    break;
+                }
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+#else
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+#endif
         }
         server.Stop();
         controller.Shutdown();
+#ifdef _WIN32
+        if (hShutdownEvent) CloseHandle(hShutdownEvent);
+#endif
         return 0;
     }
 

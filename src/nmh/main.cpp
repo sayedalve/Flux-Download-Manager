@@ -49,27 +49,51 @@ HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem:
     if (h != INVALID_HANDLE_VALUE) return h;
 
     if (!daemon_bin_path.empty() && std::filesystem::exists(daemon_bin_path)) {
-        const char* headless_env = std::getenv("FLUX_HEADLESS_DAEMON");
-        bool launch_headless = (headless_env && headless_env[0] == '1');
-        std::wstring cmd = launch_headless
-            ? (L"\"" + daemon_bin_path.wstring() + L"\" --daemon --ipc-socket \"" + wpipe + L"\"")
-            : (L"\"" + daemon_bin_path.wstring() + L"\" --ipc-socket \"" + wpipe + L"\"");
-        STARTUPINFOW si{sizeof(STARTUPINFOW)};
-        if (!launch_headless) {
-            si.dwFlags = STARTF_USESHOWWINDOW;
-            si.wShowWindow = SW_SHOWNORMAL;
+        // Prevent launch storms across concurrent NMH processes:
+        // Use an interprocess named mutex so only one NMH process attempts to launch the background daemon.
+        HANDLE hLaunchMutex = CreateMutexW(nullptr, FALSE, L"Local\\Flux_NMH_Launch_Mutex");
+        DWORD wait_res = WAIT_TIMEOUT;
+        if (hLaunchMutex != nullptr && hLaunchMutex != INVALID_HANDLE_VALUE) {
+            wait_res = WaitForSingleObject(hLaunchMutex, 3000);
         }
-        DWORD creation_flags = launch_headless ? (CREATE_NO_WINDOW | DETACHED_PROCESS) : 0;
+
+        // Inside the mutex, re-check if another instance already started the daemon while we were waiting
+        h = try_connect();
+        if (h != INVALID_HANDLE_VALUE) {
+            if (hLaunchMutex && (wait_res == WAIT_OBJECT_0 || wait_res == WAIT_ABANDONED)) {
+                ReleaseMutex(hLaunchMutex);
+                CloseHandle(hLaunchMutex);
+            } else if (hLaunchMutex) {
+                CloseHandle(hLaunchMutex);
+            }
+            return h;
+        }
+
+        // Always launch the background daemon with --daemon and hidden window (never launch a GUI window!)
+        std::wstring cmd = L"\"" + daemon_bin_path.wstring() + L"\" --daemon --ipc-socket \"" + wpipe + L"\"";
+        STARTUPINFOW si{sizeof(STARTUPINFOW)};
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        DWORD creation_flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
         PROCESS_INFORMATION pi{};
         if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, creation_flags, nullptr, nullptr, &si, &pi)) {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
         }
-        for (int attempt = 0; attempt < 25; ++attempt) {
+
+        for (int attempt = 0; attempt < 50; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
             h = try_connect();
-            if (h != INVALID_HANDLE_VALUE) return h;
+            if (h != INVALID_HANDLE_VALUE) break;
         }
+
+        if (hLaunchMutex && (wait_res == WAIT_OBJECT_0 || wait_res == WAIT_ABANDONED)) {
+            ReleaseMutex(hLaunchMutex);
+            CloseHandle(hLaunchMutex);
+        } else if (hLaunchMutex) {
+            CloseHandle(hLaunchMutex);
+        }
+        return h;
     }
     return INVALID_HANDLE_VALUE;
 }
@@ -147,6 +171,8 @@ int main(int argc, char* argv[]) {
 
 #ifdef _WIN32
     HANDLE hPipe = INVALID_HANDLE_VALUE;
+    auto last_failed_launch = std::chrono::steady_clock::time_point{};
+
     while (true) {
         uint32_t in_len = 0;
         if (std::fread(&in_len, sizeof(in_len), 1, stdin) != 1) break;
@@ -158,7 +184,18 @@ int main(int argc, char* argv[]) {
         if (std::fread(payload.data(), 1, in_len, stdin) != in_len) break;
 
         if (hPipe == INVALID_HANDLE_VALUE) {
-            hPipe = ConnectToDesktopPipe(sock_path, daemon_bin);
+            auto now = std::chrono::steady_clock::now();
+            if (last_failed_launch.time_since_epoch().count() != 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - last_failed_launch).count() < 3000) {
+                // Quickly try connect without re-launching process within 3s of failure
+                std::wstring wpipe(sock_path.begin(), sock_path.end());
+                hPipe = CreateFileW(wpipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            } else {
+                hPipe = ConnectToDesktopPipe(sock_path, daemon_bin);
+                if (hPipe == INVALID_HANDLE_VALUE) {
+                    last_failed_launch = std::chrono::steady_clock::now();
+                }
+            }
         }
         if (hPipe == INVALID_HANDLE_VALUE) {
             WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_DESKTOP_UNAVAILABLE"}})");

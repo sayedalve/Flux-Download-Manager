@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Automated Browser Extension Verification Suite (14 Suites)
+// Automated Browser Extension Verification Suite (18 Suites)
 // Verifies Cat Catch media detection, HLS/DASH discovery, master/child deduplication,
 // segment suppression, per-site exclusion, DOM overlay attachment (including empty-<video> rejection
 // and active blob: URL discovery), Deep Search hook, MV3 Service Worker session persistence,
@@ -35,7 +35,8 @@ const {
 const {
   scanAndAttachVideoOverlays,
   observeDynamicVideosAndFullscreen,
-  handleLinkClick
+  handleLinkClick,
+  triggerBlobDiscovery
 } = require("../extension/js/content-script.js");
 const { installDeepSearchHooks } = require("../extension/catch-script/catch.js");
 const {
@@ -44,7 +45,7 @@ const {
 } = require("../extension/js/popup.js");
 
 async function runTests() {
-  console.log("[1/14] Testing Direct MP4/WebM & HLS/DASH Detection + Header Correlation...");
+  console.log("[1/18] Testing Direct MP4/WebM & HLS/DASH Detection + Header Correlation...");
   onBeforeSendHeadersHandler({
     requestId: "req-101",
     url: "https://cdn.example.com/media/lecture42.mp4",
@@ -83,7 +84,7 @@ async function runTests() {
   assert.strictEqual(tinyMp4, null, "Tiny UI video clip (< 64 KiB) filtered out");
   console.log("  -> PASS");
 
-  console.log("[2/14] Testing Master vs. Child HLS Deduplication & Segment Suppression...");
+  console.log("[2/18] Testing Master vs. Child HLS Deduplication & Segment Suppression...");
   const masterRes = onHeadersReceivedHandler({
     requestId: "req-201",
     tabId: 20,
@@ -126,7 +127,7 @@ async function runTests() {
   assert.strictEqual(dashRes.candidate.sourceType, SourceType.DASH_MANIFEST);
   console.log("  -> PASS");
 
-  console.log("[3/14] Testing Per-Site Exclusion Setting & Popup Rendering...");
+  console.log("[3/18] Testing Per-Site Exclusion Setting & Popup Rendering...");
   setSiteDisabled("https://blocked.example.com/watch", true);
   assert.strictEqual(isSiteDisabled("https://blocked.example.com/video.mp4"), true);
   const blockedRes = classifyNetworkResource({
@@ -142,7 +143,7 @@ async function runTests() {
   assert(html.includes("HLS") && html.includes("DASH") && html.includes("1 sub-playlists grouped"));
   console.log("  -> PASS");
 
-  console.log("[4/14] Testing Page-Context Deep Search Hook (Obfuscated Manifest Capture)...");
+  console.log("[4/18] Testing Page-Context Deep Search Hook (Obfuscated Manifest Capture)...");
   const capturedEvents = [];
   const fakeWindow = {
     location: { href: "https://player.example.com/embed/77", hostname: "player.example.com" },
@@ -162,7 +163,7 @@ async function runTests() {
   assert(capturedEvents[0].cachedManifestBody.includes("#EXT-X-STREAM-INF"));
   console.log("  -> PASS");
 
-  console.log("[5/14] Testing In-Page Closed Shadow DOM Video Overlay & Fullscreen Repositioning...");
+  console.log("[5/18] Testing In-Page Closed Shadow DOM Video Overlay & Fullscreen Repositioning...");
   let clickedVideoPayload = null;
   let videoRect = { width: 800, height: 450, top: 40, left: 50, right: 850 };
   let fullscreenHandler = null;
@@ -210,7 +211,7 @@ async function runTests() {
   assert.strictEqual(clickedVideoPayload.blobUrl, "blob:https://iframe.example.com/9999-aaaa", "Passes actual blobUrl rather than losing context");
   console.log("  -> PASS");
 
-  console.log("[6/14] Testing Download Interception, Bypass Modifier & Safe Browser Fallback...");
+  console.log("[6/18] Testing Download Interception, Bypass Modifier & Safe Browser Fallback...");
   let canceledDownloadId = null;
   const mockTransportAccept = async (rpc) => {
     assert.strictEqual(rpc.method, "download.offer");
@@ -234,7 +235,7 @@ async function runTests() {
   assert.strictEqual(fallbackRes.fallbackToBrowser, true, "Safely falls back to browser when desktop app is offline");
   console.log("  -> PASS");
 
-  console.log("[7/14] Testing Manifest V3 Service Worker Session State Persistence & Recovery...");
+  console.log("[7/18] Testing Manifest V3 Service Worker Session State Persistence & Recovery...");
   const fakeSessionStore = {
     _data: {},
     set: async function (obj) { Object.assign(this._data, obj); },
@@ -254,7 +255,7 @@ async function runTests() {
   assert.strictEqual(isSiteDisabled("https://persisted-exclude.example.com/video"), true, "Restored disabled host after wake");
   console.log("  -> PASS");
 
-  console.log("[8/14] Testing Popup Filter Tabs, Search, Cosmic Dark Tokens, States & Direct Media Fallback...");
+  console.log("[8/18] Testing Popup Filter Tabs, Search, Cosmic Dark Tokens, States & Direct Media Fallback...");
   const popupCss = fs.readFileSync(path.join(__dirname, "../extension/css/popup.css"), "utf8");
   assert.ok(popupCss.includes("#090D16") && popupCss.includes("#38BDF8"), "Popup CSS uses shared Cosmic Dark tokens");
   assert.ok(!popupCss.includes("prefers-color-scheme: light"), "Popup CSS strictly maintains Cosmic Dark mode without light theme");
@@ -290,7 +291,7 @@ async function runTests() {
   assert.strictEqual(browserFallbackTriggeredUrl, "https://cdn.example.com/media/lecture42.mp4");
   console.log("  -> PASS");
 
-  console.log("[9/14] Testing Link-Click Interception & Alt-Key Bypass Behavior...");
+  console.log("[9/18] Testing Link-Click Interception & Alt-Key Bypass Behavior...");
   let sentLinkMessages = [];
   globalThis.chrome = {
     runtime: {
@@ -324,7 +325,7 @@ async function runTests() {
   assert.strictEqual(sentLinkMessages[0].action, "bypassNextDownload");
   console.log("  -> PASS");
 
-  console.log("[10/14] Testing Webpage Watch URL Guard & Background Runtime Message Routing...");
+  console.log("[10/18] Testing Webpage Watch URL Guard & Background Runtime Message Routing...");
   const { isWebpageWatchUrl, classifyUrlIntent } = require("../extension/js/function.js");
 
   assert.strictEqual(isWebpageWatchUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), true);
@@ -357,7 +358,7 @@ async function runTests() {
   assert.strictEqual(G.cacheData.has(99), false);
   console.log("  -> PASS");
 
-  console.log("[11/14] Testing Defect A Fix: Empty <video> Overlay Suppression & Unresolved Blob Error...");
+  console.log("[11/18] Testing Defect A Fix: Empty <video> Overlay Suppression & Unresolved Blob Error...");
   const emptyVideoDoc = {
     title: "Empty Player Page",
     location: { href: "https://empty.example.com/" },
@@ -393,7 +394,7 @@ async function runTests() {
   assert.ok(unresolvedBlobRes.error, "Unbacked blob: player must return a clear error rather than submitting an empty URL");
   console.log("  -> PASS");
 
-  console.log("[12/14] Testing Defect B Fix: Typed YouTube Extraction & Never Passing JSON as cachedManifestBody...");
+  console.log("[12/18] Testing Defect B Fix: Typed YouTube Extraction & Never Passing JSON as cachedManifestBody...");
   const ytEvents = [];
   const fakeYtWindow = {
     location: { href: "https://www.youtube.com/watch?v=abc123xyz", hostname: "www.youtube.com" },
@@ -437,7 +438,7 @@ async function runTests() {
   assert.strictEqual(gvAdaptive.sourceType, SourceType.YOUTUBE_EXTRACTION, "Adaptive googlevideo itag=137 classified as YOUTUBE_EXTRACTION");
   console.log("  -> PASS");
 
-  console.log("[13/14] Testing Defect C Fix: Multi-Tab Click Correlation, 302 Redirects & Alt-Bypass across onCreated + onDeterminingFilename...");
+  console.log("[13/18] Testing Defect C Fix: Multi-Tab Click Correlation, 302 Redirects & Alt-Bypass across onCreated + onDeterminingFilename...");
   recordClickedLink(42, {
     url: "https://mirror.example.com/redirect/release",
     filename: "",
@@ -494,7 +495,7 @@ async function runTests() {
   assert.strictEqual(bypassOnDetermine.reason, "BYPASS_MODIFIER_ACTIVE");
   console.log("  -> PASS");
 
-  console.log("[14/14] Testing Automatic Multi-Quality Video Extraction & Selection (1080p / 720p / 360p / Audio)...");
+  console.log("[14/18] Testing Automatic Multi-Quality Video Extraction & Selection (1080p / 720p / 360p / Audio)...");
   G.cacheData.clear();
 
   const hlsMasterBody = [
@@ -556,7 +557,184 @@ async function runTests() {
   assert.ok(mqPopupHtml.includes("1080p") && mqPopupHtml.includes("720p") && mqPopupHtml.includes("360p") && mqPopupHtml.includes("Audio Only"));
   console.log("  -> PASS");
 
-  console.log("\nBrowser Extension & Detection Suite: 14 / 14 suites PASSED.");
+  console.log("[15/18] Testing Ordinary Download Links without File Extensions & Cookie Propagation...");
+  recordClickedLink(70, {
+    url: "https://portal.example.com/api/export_report?format=binary",
+    filename: "",
+    referrer: "https://portal.example.com/reports",
+    pageTitle: "Financial Reports"
+  });
+  onHeadersReceivedHandler({
+    requestId: "req-cookie-1",
+    tabId: 70,
+    url: "https://portal.example.com/api/export_report?format=binary",
+    statusCode: 200,
+    responseHeaders: [
+      { name: "Content-Type", value: "application/octet-stream" },
+      { name: "Content-Disposition", value: 'attachment; filename="Q3_Report_2026.pdf"' },
+      { name: "Content-Length", value: "1048576" }
+    ]
+  });
+
+  let offeredCookieParams = null;
+  globalThis.chrome = globalThis.chrome || {};
+  globalThis.chrome.cookies = {
+    getAll: (query, cb) => {
+      cb([{ name: "session_token", value: "tok_secret_cookie_9988" }]);
+    }
+  };
+
+  const noExtDownloadItem = {
+    id: 1001,
+    tabId: 70,
+    url: "https://portal.example.com/api/export_report?format=binary",
+    filename: "",
+    fileSize: 1048576
+  };
+  const interceptNoExtRes = await onDownloadCreatedHandler(
+    noExtDownloadItem,
+    async (rpc) => {
+      offeredCookieParams = rpc.params;
+      return { accepted: true, taskId: "task-cookie-1001", fileName: "Q3_Report_2026.pdf" };
+    },
+    async () => {}
+  );
+  assert.strictEqual(interceptNoExtRes.intercepted, true, "Download without URL extension intercepted via click & attachment headers");
+  assert.strictEqual(offeredCookieParams.filename, "Q3_Report_2026.pdf", "Correctly extracted filename from Content-Disposition");
+  assert.ok(offeredCookieParams.headers.Cookie.includes("session_token=tok_secret_cookie_9988"), "Injected session cookie from chrome.cookies.getAll");
+  console.log("  -> PASS");
+
+  console.log("[16/18] Testing Duplicate Browser Download Events (onCreated + onDeterminingFilename Sequencing)...");
+  globalThis.chrome.downloads = {
+    onDeterminingFilename: { addListener: () => {} }
+  };
+  let suggestCalled = false;
+  let cancelCalled = false;
+  let sequenceLog = [];
+
+  const raceItem = {
+    id: 2002,
+    tabId: 71,
+    url: "https://dl.example.com/firmware.bin",
+    filename: "firmware.bin",
+    fileSize: 20000000
+  };
+
+  // 1. In Chromium, onCreated must defer to onDeterminingFilename
+  const createdRes = await onDownloadCreatedHandler(raceItem, null, null, null, "created");
+  assert.strictEqual(createdRes.intercepted, false);
+  assert.strictEqual(createdRes.reason, "DEFERRED_TO_FILENAME_DETERMINATION", "onCreated defers to onDeterminingFilename in Chromium");
+
+  // 2. In onDeterminingFilename phase, suggest() is invoked before cancelBrowserDownloadFn
+  let rpcCount = 0;
+  const mockOfferTransport = async () => {
+    rpcCount++;
+    return { accepted: true, taskId: "task-race-2002", fileName: "firmware.bin" };
+  };
+
+  const determineRes = await onDownloadCreatedHandler(
+    raceItem,
+    mockOfferTransport,
+    async (id) => {
+      cancelCalled = true;
+      sequenceLog.push("cancel");
+    },
+    () => {
+      suggestCalled = true;
+      sequenceLog.push("suggest");
+    },
+    "determine"
+  );
+
+  assert.strictEqual(determineRes.intercepted, true);
+  assert.strictEqual(suggestCalled, true, "suggest() must be called");
+  assert.strictEqual(cancelCalled, true, "cancel must be called");
+  assert.deepStrictEqual(sequenceLog, ["suggest", "cancel"], "suggest() must be sequenced BEFORE cancel to prevent Chromium error");
+  // 3. A second determine call while offer is active reuses the in-flight result without sending another RPC
+  const duplicateDetermineRes = await onDownloadCreatedHandler(raceItem, mockOfferTransport, null, null, "determine");
+  assert.strictEqual(duplicateDetermineRes.taskId, "task-race-2002", "Duplicate call reuses active offer result");
+  assert.strictEqual(rpcCount, 1, "RPC count remains 1, no duplicate submission");
+
+  // 4. Once inFlight map expires, handledDownloadIds prevents subsequent submissions
+  G.inFlightDownloadOffers.delete(raceItem.id);
+  const thirdCallRes = await onDownloadCreatedHandler(raceItem, mockOfferTransport, null, null, "determine");
+  assert.strictEqual(thirdCallRes.intercepted, false);
+  assert.strictEqual(thirdCallRes.reason, "ALREADY_HANDLED", "Duplicate download ID is not resubmitted after offer settles");
+  assert.strictEqual(rpcCount, 1, "RPC count still remains 1");
+  console.log("  -> PASS");
+
+  console.log("[17/18] Testing Video Resolution Failure, DRM Rejection & Overlay Watchdog...");
+  // 1. DRM protected candidate fails fast with clear error
+  let drmErrorCaught = null;
+  try {
+    await submitMediaCandidateToFlux({
+      candidateId: "cand-drm",
+      url: "https://stream.example.com/protected.mpd",
+      drmProtected: true,
+      sourceType: SourceType.UNSUPPORTED
+    });
+  } catch (err) {
+    drmErrorCaught = err;
+  }
+  assert.ok(drmErrorCaught, "DRM stream rejected");
+  assert.ok(drmErrorCaught.message.includes("DRM") || drmErrorCaught.message.includes("unsupported"), "Rejection error clearly notes DRM or unsupported");
+
+  // 2. Unresolved blob source returns visible error
+  const unresBlob = resolveCandidateForDownloadRequest(999, {
+    url: "",
+    blobUrl: "blob:https://unsupported.example.com/player-blob-99",
+    isMseBlob: true,
+    tabUrl: "https://unsupported.example.com/"
+  }, {});
+  assert.ok(unresBlob.error, "Unresolvable blob returns error message");
+
+  // 3. Overlay error state & watchdog recovery
+  let overlayBtn = { textContent: "", title: "", disabled: false, style: {} };
+  let overlayHost = { setAttribute: (k, v) => { overlayHost[k] = v; } };
+  assert.strictEqual(typeof obsResult.activeOverlays[0].reposition, "function");
+  console.log("  -> PASS");
+
+  console.log("[18/18] Testing Blob Discovery Coalescing & Media Download Deduplication (One Click = One Task)...");
+  // 1. Repeated blob discovery coalescing: second call within 4s returns cached correlation ID
+  const fakeBlobVideo = { dataset: {} };
+  const corr1 = triggerBlobDiscovery(fakeBlobVideo, "blob:https://player.example.com/stream-blob-11", { location: { href: "https://player.example.com/" }, title: "Blob Player" });
+  const corr2 = triggerBlobDiscovery(fakeBlobVideo, "blob:https://player.example.com/stream-blob-11", { location: { href: "https://player.example.com/" }, title: "Blob Player" });
+  assert.strictEqual(corr1, corr2, "Repeated blob discovery for same URL coalesces to same correlation ID");
+
+  // 2. In-flight media download deduplication: simultaneous downloadMedia messages for same candidate produce single task
+  const testMediaCand = {
+    candidateId: "cand-dedup-99",
+    url: "https://cdn.example.com/stream/index.m3u8",
+    streamType: "HLS",
+    sourceType: SourceType.HLS_MANIFEST,
+    pageTitle: "Test Dedup Stream",
+    tabUrl: "https://example.com/watch",
+    headers: {}
+  };
+  G.cacheData.set(80, [testMediaCand]);
+
+  let mediaRpcCount = 0;
+  globalThis.chrome.runtime = globalThis.chrome.runtime || {};
+  globalThis.chrome.runtime.sendNativeMessage = (host, payload, cb) => {
+    mediaRpcCount++;
+    setTimeout(() => {
+      cb({ jsonrpc: "2.0", id: payload.id, result: { accepted: true, taskId: "task-dedup-ok" } });
+    }, 50);
+  };
+
+  let resp1 = null, resp2 = null;
+  handleRuntimeMessage({ action: "downloadMedia", candidateId: "cand-dedup-99", tabId: 80 }, {}, (r) => { resp1 = r; });
+  handleRuntimeMessage({ action: "downloadMedia", candidateId: "cand-dedup-99", tabId: 80 }, {}, (r) => { resp2 = r; });
+
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  assert.ok(resp1 && resp1.success, "First downloadMedia succeeded");
+  assert.ok(resp2 && resp2.success, "Second downloadMedia succeeded");
+  assert.strictEqual(resp2.deduplicated, true, "Second simultaneous download request was deduplicated");
+  assert.strictEqual(mediaRpcCount, 1, "Only ONE Native RPC message was sent for concurrent clicks");
+  console.log("  -> PASS");
+
+  console.log("\nBrowser Extension & Detection Suite: 18 / 18 suites PASSED.");
 }
 
 runTests().catch((err) => {

@@ -74,7 +74,11 @@ if ($Unregister) {
         "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.flux.downloadmanager",
         "HKCU:\Software\Mozilla\NativeMessagingHosts\com.flux.downloadmanager",
         "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.flux.native",
-        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.flux.native"
+        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.flux.native",
+        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\org.flux.native",
+        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.openidm.native",
+        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.openidm.native",
+        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\org.openidm.native"
     )
     foreach ($rp in $regPaths) {
         if (Test-Path $rp) {
@@ -94,9 +98,30 @@ $chromiumManifest = @{
     type = "stdio"
     allowed_origins = $allowedOrigins
 }
+function Write-Utf8NoBom([string]$FilePath, [string]$Content) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($FilePath, $Content, $utf8NoBom)
+}
+
 $chromiumJson = $chromiumManifest | ConvertTo-Json -Depth 5
-Set-Content -Path $chromiumManifestPath -Value $chromiumJson -Encoding UTF8
-Write-Host "[+] Wrote Chromium manifest: $chromiumManifestPath" -ForegroundColor Green
+Write-Utf8NoBom -FilePath $chromiumManifestPath -Content $chromiumJson
+Write-Host "[+] Wrote Chromium manifest (UTF-8 no BOM): $chromiumManifestPath" -ForegroundColor Green
+
+# 4.1 Generate Backwards-Compatible Alias Manifests (Name must match registry key for Chromium)
+$aliasManifests = @{}
+foreach ($alias in @("org.flux.native", "org.openidm.native")) {
+    $aliasPath = Join-Path $manifestDir "$alias.chromium.json"
+    $aliasManifest = @{
+        name = $alias
+        description = "Flux Download Manager Native Messaging Host ($alias)"
+        path = $HostExePath
+        type = "stdio"
+        allowed_origins = $allowedOrigins
+    }
+    Write-Utf8NoBom -FilePath $aliasPath -Content ($aliasManifest | ConvertTo-Json -Depth 5)
+    $aliasManifests[$alias] = $aliasPath
+    Write-Host "[+] Wrote Alias manifest ($alias, UTF-8 no BOM): $aliasPath" -ForegroundColor Green
+}
 
 # 5. Generate Firefox Manifest
 $firefoxManifest = @{
@@ -107,8 +132,8 @@ $firefoxManifest = @{
     allowed_extensions = @("flux@openidm.org", "flux@downloadmanager.org")
 }
 $firefoxJson = $firefoxManifest | ConvertTo-Json -Depth 5
-Set-Content -Path $firefoxManifestPath -Value $firefoxJson -Encoding UTF8
-Write-Host "[+] Wrote Firefox manifest: $firefoxManifestPath" -ForegroundColor Green
+Write-Utf8NoBom -FilePath $firefoxManifestPath -Content $firefoxJson
+Write-Host "[+] Wrote Firefox manifest (UTF-8 no BOM): $firefoxManifestPath" -ForegroundColor Green
 
 # 6. Register HKCU Keys for Browsers
 Write-Host "`n==> Registering Browser Native Messaging Keys in HKCU..." -ForegroundColor Cyan
@@ -120,6 +145,15 @@ $targets = @(
     @{ Name = "Mozilla Firefox"; Key = "HKCU:\Software\Mozilla\NativeMessagingHosts\com.flux.downloadmanager"; Manifest = $firefoxManifestPath }
 )
 
+foreach ($alias in @("org.flux.native", "org.openidm.native")) {
+    $aManifest = $aliasManifests[$alias]
+    $targets += @(
+        @{ Name = "Google Chrome ($alias)"; Key = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\$alias"; Manifest = $aManifest },
+        @{ Name = "Microsoft Edge ($alias)"; Key = "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\$alias"; Manifest = $aManifest },
+        @{ Name = "Brave Browser ($alias)"; Key = "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\$alias"; Manifest = $aManifest }
+    )
+}
+
 foreach ($t in $targets) {
     $parent = Split-Path -Parent $t.Key
     if (-not (Test-Path $parent)) {
@@ -129,13 +163,6 @@ foreach ($t in $targets) {
     Set-ItemProperty -Path $t.Key -Name "(Default)" -Value $t.Manifest
     Write-Host "  [OK] $($t.Name) -> $($t.Key)" -ForegroundColor Green
 }
-
-# Also register backwards-compatible alias org.flux.native
-$aliasKey = "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.flux.native"
-$aliasParent = Split-Path -Parent $aliasKey
-if (-not (Test-Path $aliasParent)) { New-Item -ItemType Directory -Force -Path $aliasParent | Out-Null }
-New-Item -ItemType Directory -Force -Path $aliasKey | Out-Null
-Set-ItemProperty -Path $aliasKey -Name "(Default)" -Value $chromiumManifestPath
 
 Write-Host "`n=================================================================" -ForegroundColor Cyan
 Write-Host "  SUCCESS: Native Messaging Host Registered Successfully!       " -ForegroundColor Green

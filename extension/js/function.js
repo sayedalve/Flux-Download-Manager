@@ -1106,12 +1106,17 @@ function findCorrelatedClick(tabId, downloadItem) {
     resolveInitialUrlFromRedirects(downloadItem.finalUrl || "")
   ].filter(Boolean);
 
-  // 1. Direct or redirect-resolved URL match in G.clickedLinksByUrl
+  // 1. Direct or redirect-resolved URL match in G.clickedLinksByUrl (including path without query)
   if (G.clickedLinksByUrl) {
     for (const u of candidateUrls) {
       const rec = G.clickedLinksByUrl.get(u);
       if (rec && (now - rec.time) < maxAgeMs) {
         return rec;
+      }
+      const uNoQuery = u.split("?")[0];
+      const recNoQuery = G.clickedLinksByUrl.get(uNoQuery);
+      if (recNoQuery && (now - recNoQuery.time) < maxAgeMs) {
+        return recNoQuery;
       }
     }
   }
@@ -1123,17 +1128,26 @@ function findCorrelatedClick(tabId, downloadItem) {
     for (const rec of tabClicks) {
       if ((now - rec.time) >= maxAgeMs) continue;
       if (candidateUrls.includes(rec.normalizedUrl)) return rec;
+      if (candidateUrls.some(u => u.split("?")[0] === rec.normalizedUrl.split("?")[0])) return rec;
       if (downloadItem.referrer && rec.referrer && normalizeCorrelationUrl(downloadItem.referrer) === normalizeCorrelationUrl(rec.referrer)) {
+        return rec;
+      }
+    }
+    // If the tab had a recent explicit click within 10 seconds, correlate with that click
+    for (const rec of tabClicks) {
+      if ((now - rec.time) < 10000) {
         return rec;
       }
     }
   }
 
-  // 3. Fallback to G.lastClickedLink if within 15s and matching URL or referrer
+  // 3. Fallback to G.lastClickedLink if within 15s and matching URL, referrer, or recent click
   if (G.lastClickedLink && (now - G.lastClickedLink.time) < 15000) {
     const lastNorm = normalizeCorrelationUrl(G.lastClickedLink.url);
     if (candidateUrls.includes(lastNorm) ||
-        (downloadItem.referrer && G.lastClickedLink.referrer === downloadItem.referrer)) {
+        candidateUrls.some(u => u.split("?")[0] === lastNorm.split("?")[0]) ||
+        (downloadItem.referrer && G.lastClickedLink.referrer === downloadItem.referrer) ||
+        (now - G.lastClickedLink.time < 5000)) {
       return G.lastClickedLink;
     }
   }

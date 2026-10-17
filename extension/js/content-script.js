@@ -98,8 +98,23 @@ function extractVideoElementQualities(video) {
   return qualities;
 }
 
+const g_blobDiscoveryCache = new Map();
+
 function triggerBlobDiscovery(video, blobUrl, doc) {
+  if (!blobUrl || !blobUrl.startsWith("blob:")) return "";
+  const now = Date.now();
+  const cached = g_blobDiscoveryCache.get(blobUrl);
+  if (cached && (now - cached.timestamp < 4000)) {
+    return cached.corrId;
+  }
+
   const corrId = makeContentCorrelationId("blobdisc");
+  g_blobDiscoveryCache.set(blobUrl, { timestamp: now, corrId });
+  if (g_blobDiscoveryCache.size > 100) {
+    const oldestKey = g_blobDiscoveryCache.keys().next().value;
+    g_blobDiscoveryCache.delete(oldestKey);
+  }
+
   const pageUrl = (doc && doc.location) ? doc.location.href : (typeof location !== "undefined" ? location.href : "");
   const pageTitle = (doc && doc.title) ? doc.title : (typeof document !== "undefined" ? document.title : "video");
 
@@ -330,6 +345,7 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
       }
 
       const invokeClick = (ev) => {
+        if (btn.disabled) return;
         if (ev && ev.target === qualitySelect) return;
         if (ev && typeof ev.stopPropagation === "function") ev.stopPropagation();
         if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
@@ -353,13 +369,23 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
           const msg = "No supported download source";
           btn.textContent = msg;
           btn.title = "This video element has no downloadable stream or media URL.";
+          btn.disabled = false;
           if (btn.style) btn.style.cssText = baseBtnStyle + "border-color:#EF4444;color:#FCA5A5;";
           if (hostEl && hostEl.setAttribute) {
             hostEl.setAttribute("data-flux-status", "error");
             hostEl.setAttribute("data-flux-error", msg);
           }
+          if (typeof setTimeout === "function") {
+            setTimeout(() => {
+              btn.textContent = "Download with Flux";
+              btn.disabled = false;
+              if (btn.style && baseBtnStyle) btn.style.cssText = baseBtnStyle;
+            }, 3500);
+          }
           return;
         }
+
+        btn.disabled = true;
 
         if (liveIsBlob) {
           triggerBlobDiscovery(video, liveSrc, doc);
@@ -395,9 +421,6 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
       };
 
       btn.addEventListener("click", invokeClick);
-      if (hostEl && typeof hostEl.addEventListener === "function") {
-        hostEl.addEventListener("click", invokeClick);
-      }
 
       if (typeof shadow.appendChild === "function") {
         shadow.appendChild(qualitySelect);
@@ -441,29 +464,42 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
     refreshPositions();
   };
 
+  let rescanDebounceTimer = null;
+  const debouncedRescan = () => {
+    if (rescanDebounceTimer) return;
+    rescanDebounceTimer = setTimeout(() => {
+      rescanDebounceTimer = null;
+      rescanAndRefresh();
+    }, 150);
+  };
+
   if (win && typeof win.addEventListener === "function") {
     win.addEventListener("scroll", refreshPositions, { passive: true });
     win.addEventListener("resize", refreshPositions, { passive: true });
   }
   if (doc && typeof doc.addEventListener === "function") {
     doc.addEventListener("fullscreenchange", refreshPositions);
-    doc.addEventListener("loadedmetadata", rescanAndRefresh, true);
-    doc.addEventListener("canplay", rescanAndRefresh, true);
+    doc.addEventListener("loadedmetadata", debouncedRescan, true);
+    doc.addEventListener("canplay", debouncedRescan, true);
   }
   if (typeof MutationObserver !== "undefined" && doc && doc.documentElement) {
     const observer = new MutationObserver((mutations) => {
       if (Array.isArray(mutations)) {
-        const onlyOverlayChange = mutations.every(m =>
-          m.target && m.target.getAttribute && m.target.getAttribute("data-flux-shadow-host") === "true"
-        );
+        const onlyOverlayChange = mutations.every(m => {
+          const t = m.target;
+          return t && (
+            (t.getAttribute && t.getAttribute("data-flux-shadow-host") === "true") ||
+            (typeof t.closest === "function" && t.closest("[data-flux-shadow-host]"))
+          );
+        });
         if (onlyOverlayChange) return;
       }
-      rescanAndRefresh();
+      debouncedRescan();
     });
     observer.observe(doc.documentElement, { childList: true, subtree: true });
-    return { activeOverlays, observer, refreshPositions, rescanAndRefresh };
+    return { activeOverlays, observer, refreshPositions, rescanAndRefresh: debouncedRescan };
   }
-  return { activeOverlays, observer: null, refreshPositions, rescanAndRefresh };
+  return { activeOverlays, observer: null, refreshPositions, rescanAndRefresh: debouncedRescan };
 }
 
 function handleLinkClick(ev) {
@@ -498,16 +534,8 @@ function handleLinkClick(ev) {
       "deb", "rpm", "docx", "xlsx", "pptx", "csv", "epub"
     ]);
 
-    const isLikelyDownloadLink = hasDownloadAttr ||
-                                 interceptExts.has(ext) ||
-                                 pathname.includes("/redirect") ||
-                                 pathname.includes("/download") ||
-                                 pathname.includes("/files/") ||
-                                 pathname.includes("/release") ||
-                                 href.includes("download=") ||
-                                 href.includes("attachment");
-
-    if (isLikelyDownloadLink) {
+    const isHttpLink = href.startsWith("http://") || href.startsWith("https://");
+    if (isHttpLink) {
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage({
           action: "linkClicked",
@@ -532,6 +560,12 @@ function handleMediaPlaybackEvent(ev) {
     if (!target) return;
     const tagName = (target.tagName || "").toLowerCase();
     if (tagName !== "video" && tagName !== "audio") return;
+
+    const now = Date.now();
+    if (target.__fluxLastPlaybackEventTime && (now - target.__fluxLastPlaybackEventTime < 600)) {
+      return;
+    }
+    target.__fluxLastPlaybackEventTime = now;
 
     // Trigger MAIN world page media & quality scan immediately when playback starts
     if (typeof window !== "undefined" && typeof window.postMessage === "function") {
@@ -846,6 +880,16 @@ function initContentScript() {
     const baseStyle = mediaMeta.baseBtnStyle || "";
     const corrId = mediaMeta.correlationId || makeContentCorrelationId("dlclick");
 
+    const resetBtnAfterDelay = (delayMs = 3500) => {
+      if (btn && typeof setTimeout === "function") {
+        setTimeout(() => {
+          btn.textContent = "Download with Flux";
+          btn.disabled = false;
+          if (btn.style && baseStyle) btn.style.cssText = baseStyle;
+        }, delayMs);
+      }
+    };
+
     if (!mediaMeta.videoSrc && !mediaMeta.blobUrl && !mediaMeta.isMseBlob && !mediaMeta.candidateId) {
       const errText = "No supported download source found for this video";
       if (btn) {
@@ -858,6 +902,7 @@ function initContentScript() {
         hostEl.setAttribute("data-flux-status", "error");
         hostEl.setAttribute("data-flux-error", errText);
       }
+      resetBtnAfterDelay(3500);
       return;
     }
 
@@ -870,6 +915,28 @@ function initContentScript() {
     if (hostEl && hostEl.setAttribute) {
       hostEl.setAttribute("data-flux-status", "starting");
       hostEl.setAttribute("data-flux-correlation-id", corrId);
+    }
+
+    let responded = false;
+    let safetyTimer = null;
+
+    if (typeof setTimeout === "function") {
+      safetyTimer = setTimeout(() => {
+        if (responded) return;
+        responded = true;
+        const errText = "Timed out resolving media source";
+        if (btn) {
+          btn.textContent = "Error: Timeout";
+          btn.title = errText;
+          btn.disabled = false;
+          if (btn.style) btn.style.cssText = baseStyle + "border-color:#EF4444;color:#FCA5A5;";
+        }
+        if (hostEl && hostEl.setAttribute) {
+          hostEl.setAttribute("data-flux-status", "error");
+          hostEl.setAttribute("data-flux-error", errText);
+        }
+        resetBtnAfterDelay(3500);
+      }, 10000);
     }
 
     if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
@@ -888,6 +955,10 @@ function initContentScript() {
         tabUrl: mediaMeta.tabUrl || location.href,
         frameUrl: mediaMeta.frameUrl || location.href
       }, (resp) => {
+        if (responded) return;
+        responded = true;
+        if (safetyTimer) clearTimeout(safetyTimer);
+
         const lastErr = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError)
           ? chrome.runtime.lastError.message
           : null;
@@ -923,13 +994,15 @@ function initContentScript() {
           }
         }
 
-        if (btn && typeof setTimeout === "function") {
-          setTimeout(() => {
-            btn.textContent = "Download with Flux";
-            if (btn.style && baseStyle) btn.style.cssText = baseStyle;
-          }, 3500);
-        }
+        resetBtnAfterDelay(3500);
       });
+    } else {
+      if (safetyTimer) clearTimeout(safetyTimer);
+      if (btn) {
+        btn.textContent = "Error: No runtime";
+        btn.disabled = false;
+      }
+      resetBtnAfterDelay(3500);
     }
   };
 

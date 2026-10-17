@@ -472,12 +472,14 @@ async function onDownloadCreatedHandler(
   const isAttachment = Boolean(netMeta && netMeta.isAttachment);
   const wasExplicitLinkClick = Boolean(clickedInfo);
 
-  // If invoked from onCreated before Chrome has determined finalUrl/filename (phase === "created"),
-  // and the initial URL has no extension/mime match yet, defer to onDeterminingFilename!
+  // In Chromium, onDeterminingFilename always fires right after onCreated for every download.
+  // When chrome.downloads.onDeterminingFilename is available, defer processing from phase === "created"
+  // to avoid "Cannot cancel download while determining filename" and eliminate duplicate RPC task offers.
+  if (phase === "created" && typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
+    return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
+  }
+
   if (!isEligibleExt && !isEligibleMime && !wasExplicitLinkClick && !isAttachment) {
-    if (phase === "created" && !downloadItem.filename && typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
-      return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
-    }
     if (fileSize === 0 || fileSize < G.minFileSizeBytes) {
       invokeSuggestIfNeeded();
       return { intercepted: false, reason: "BELOW_SIZE_OR_EXT_FILTER" };
@@ -518,6 +520,19 @@ async function onDownloadCreatedHandler(
   if (pageReferrer && !headers.Referer && !headers.referer) {
     headers.Referer = pageReferrer;
   }
+  if (!headers.Cookie && !headers.cookie && typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+    try {
+      const cookieList = await new Promise((resolve) => {
+        chrome.cookies.getAll({ url: targetUrl }, (cList) => {
+          if (chrome.runtime) void chrome.runtime.lastError;
+          resolve(cList || []);
+        });
+      });
+      if (cookieList && cookieList.length > 0) {
+        headers.Cookie = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
+      }
+    } catch (_) {}
+  }
 
   logPipelineStage(correlationId, "DOWNLOAD_OFFER_INITIATED", {
     downloadId: downloadItem.id,
@@ -550,6 +565,7 @@ async function onDownloadCreatedHandler(
           taskId: result.taskId,
           fileName: result.fileName
         });
+        invokeSuggestIfNeeded();
         if (cancelBrowserDownloadFn) {
           await cancelBrowserDownloadFn(downloadItem.id);
         } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
@@ -562,7 +578,6 @@ async function onDownloadCreatedHandler(
             }
           });
         }
-        invokeSuggestIfNeeded();
         return { intercepted: true, taskId: result.taskId, fileName: result.fileName, correlationId };
       }
 
@@ -612,8 +627,11 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   const sourceType = candidate.sourceType || classifyMediaSourceType(candidate, candidate.mime, candidate.cachedManifestBody);
 
   // 5. Unsupported or unresolved media source must fail fast with a clear error
-  if (sourceType === SourceType.UNSUPPORTED) {
-    const err = new Error(candidate.errorMessage || "Unsupported or unresolved media source");
+  if (sourceType === SourceType.UNSUPPORTED || candidate.isDrm || candidate.drmProtected) {
+    const defaultMsg = (candidate.isDrm || candidate.drmProtected)
+      ? "DRM protected streams are unsupported"
+      : "Unsupported or unresolved media source";
+    const err = new Error(candidate.errorMessage || defaultMsg);
     logPipelineStage(correlationId, "MEDIA_SUBMIT_REJECTED", {
       reason: err.message,
       url: candidate.url || ""
@@ -1048,7 +1066,7 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
   }
 
   if (msg.action === "downloadMedia") {
-    ensureSessionRestored().then(() => {
+    ensureSessionRestored().then(async () => {
       const correlationId = msg.correlationId || generateCorrelationId("dlmedia");
       const resolved = resolveCandidateForDownloadRequest(tabId, msg, sender);
       if (resolved.error || !resolved.candidate) {
@@ -1059,7 +1077,22 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
         sendResponse({ success: false, error: resolved.error || "Media candidate not found", correlationId });
         return;
       }
-      submitMediaCandidateToFlux(resolved.candidate, {
+
+      // Prevent duplicate task submissions if a download for this candidate/quality is already in flight
+      const candIdentifier = resolved.candidate.candidateId || resolved.candidate.url || "";
+      const inFlightKey = `${tabId}:${candIdentifier}:${msg.qualityId || ""}`;
+      G.inFlightMediaDownloads = G.inFlightMediaDownloads || new Map();
+      if (G.inFlightMediaDownloads.has(inFlightKey)) {
+        try {
+          const prevResult = await G.inFlightMediaDownloads.get(inFlightKey);
+          sendResponse({ success: true, result: prevResult, correlationId, deduplicated: true });
+        } catch (err) {
+          sendResponse({ success: false, error: err.message || "Failed to submit download to Flux", correlationId });
+        }
+        return;
+      }
+
+      const dlPromise = submitMediaCandidateToFlux(resolved.candidate, {
         pageTitle: msg.pageTitle,
         qualityId: msg.qualityId || "",
         resolution: msg.resolution || "",
@@ -1067,15 +1100,23 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
         selectedQuality: msg.selectedQuality || null,
         outputFormat: msg.outputFormat || "",
         correlationId
-      })
-        .then(result => {
-          persistSessionState().catch(() => {});
-          notifyPopupMediaUpdated(tabId);
-          sendResponse({ success: true, result, correlationId });
-        })
-        .catch(err => {
-          sendResponse({ success: false, error: err.message || "Failed to submit download to Flux", correlationId });
-        });
+      });
+
+      G.inFlightMediaDownloads.set(inFlightKey, dlPromise);
+      dlPromise.finally(() => {
+        setTimeout(() => {
+          if (G.inFlightMediaDownloads) G.inFlightMediaDownloads.delete(inFlightKey);
+        }, 8000);
+      });
+
+      try {
+        const result = await dlPromise;
+        persistSessionState().catch(() => {});
+        notifyPopupMediaUpdated(tabId);
+        sendResponse({ success: true, result, correlationId });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message || "Failed to submit download to Flux", correlationId });
+      }
     });
     return true;
   }

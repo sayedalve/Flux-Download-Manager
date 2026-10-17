@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Flux Download Manager — Automated C++20 Unit & Regression Test Suite (14 Suites)
+// Flux Download Manager — Automated C++20 Unit & Regression Test Suite (15 Suites)
 // Verifies PathSanitizer, Dynamic Worker Discovery, Disk Space Guard, Logger Redaction,
 // CryptoUtils, Brisk SegmentScheduler + Stolen Segment Rollback, SqliteStore + Crash Recovery,
 // Nm3u8dlReAdapter + DRM Rejection, DownloadController Lifecycle + Race Guards,
@@ -25,6 +25,13 @@
 #include <iostream>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 #define ASSERT_TRUE(cond, msg) \
     do { \
@@ -757,11 +764,48 @@ bool TestProfessionalSettingsCenterAndPersistence() {
     return true;
 }
 
+bool TestSingleInstanceAndIpcPipeGuards() {
+#ifdef _WIN32
+    // 1. Mutex-based single instance detection
+    std::wstring test_mutex_name = L"Local\\Flux_Unit_Test_Mutex_" + std::to_wstring(GetCurrentProcessId());
+    HANDLE h1 = CreateMutexW(nullptr, FALSE, test_mutex_name.c_str());
+    ASSERT_TRUE(h1 != nullptr, "First mutex created successfully");
+    ASSERT_TRUE(GetLastError() != ERROR_ALREADY_EXISTS, "First mutex is not already exists");
+
+    HANDLE h2 = CreateMutexW(nullptr, FALSE, test_mutex_name.c_str());
+    ASSERT_TRUE(h2 != nullptr, "Second mutex opened existing handle");
+    ASSERT_TRUE(GetLastError() == ERROR_ALREADY_EXISTS, "Second mutex correctly detects ERROR_ALREADY_EXISTS");
+
+    CloseHandle(h2);
+    CloseHandle(h1);
+
+    // 2. Named pipe first instance guard (FILE_FLAG_FIRST_PIPE_INSTANCE)
+    std::wstring test_pipe_name = L"\\\\.\\pipe\\Flux_Unit_Test_Pipe_" + std::to_wstring(GetCurrentProcessId());
+    HANDLE p1 = CreateNamedPipeW(
+        test_pipe_name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        1, 4096, 4096, 0, nullptr
+    );
+    ASSERT_TRUE(p1 != INVALID_HANDLE_VALUE, "First pipe instance bound");
+
+    HANDLE p2 = CreateNamedPipeW(
+        test_pipe_name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        1, 4096, 4096, 0, nullptr
+    );
+    ASSERT_TRUE(p2 == INVALID_HANDLE_VALUE, "Second pipe instance fails due to FILE_FLAG_FIRST_PIPE_INSTANCE");
+    CloseHandle(p1);
+#endif
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 14;
+    const int total = 15;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -785,6 +829,7 @@ int main() {
     run(12, "TestWorkerLifecycleAndIncompatibleWorkerDetection", TestWorkerLifecycleAndIncompatibleWorkerDetection);
     run(13, "TestFluxBrandingAndLegacyDataMigration", TestFluxBrandingAndLegacyDataMigration);
     run(14, "TestProfessionalSettingsCenterAndPersistence", TestProfessionalSettingsCenterAndPersistence);
+    run(15, "TestSingleInstanceAndIpcPipeGuards", TestSingleInstanceAndIpcPipeGuards);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

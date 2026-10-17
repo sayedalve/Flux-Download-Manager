@@ -11,8 +11,11 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <winhttp.h>
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "ws2_32.lib")
 #else
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -43,9 +46,119 @@ std::string Trim(std::string_view sv) {
     return std::string(sv);
 }
 
+bool IsPrivateOrLoopbackIp(uint32_t ip) {
+    // 0.0.0.0/8
+    if ((ip >> 24) == 0) return true;
+    // 127.0.0.0/8 (Loopback)
+    if ((ip >> 24) == 127) return true;
+    // 10.0.0.0/8 (RFC 1918)
+    if ((ip >> 24) == 10) return true;
+    // 172.16.0.0/12 (RFC 1918: 172.16.0.0 - 172.31.255.255)
+    if (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) return true;
+    // 192.168.0.0/16 (RFC 1918: 192.168.0.0 - 192.168.255.255)
+    if (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) return true;
+    // 169.254.0.0/16 (Link-Local APIPA)
+    if (ip >= 0xA9FE0000 && ip <= 0xA9FEFFFF) return true;
+    // 224.0.0.0/4 (Multicast / Reserved)
+    if ((ip >> 24) >= 224) return true;
+    return false;
+}
+
+bool IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]) {
+    // ::1 (Loopback)
+    bool is_loopback = true;
+    for (int i = 0; i < 15; ++i) {
+        if (bytes[i] != 0) is_loopback = false;
+    }
+    if (is_loopback && bytes[15] == 1) return true;
+
+    // :: (Unspecified)
+    bool is_zero = true;
+    for (int i = 0; i < 16; ++i) {
+        if (bytes[i] != 0) is_zero = false;
+    }
+    if (is_zero) return true;
+
+    // fe80::/10 (Link-Local)
+    if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;
+
+    // fc00::/7 (Unique Local Address ULA)
+    if ((bytes[0] & 0xFE) == 0xFC) return true;
+
+    // IPv4-mapped IPv6 ::ffff:0:0/96
+    bool is_ipv4_mapped = true;
+    for (int i = 0; i < 10; ++i) {
+        if (bytes[i] != 0) is_ipv4_mapped = false;
+    }
+    if (is_ipv4_mapped && bytes[10] == 0xFF && bytes[11] == 0xFF) {
+        uint32_t ip4 = (static_cast<uint32_t>(bytes[12]) << 24) |
+                       (static_cast<uint32_t>(bytes[13]) << 16) |
+                       (static_cast<uint32_t>(bytes[14]) << 8) |
+                       static_cast<uint32_t>(bytes[15]);
+        return IsPrivateOrLoopbackIp(ip4);
+    }
+
+    return false;
+}
+
+bool CheckHostResolvesToPrivate(const std::string& host) {
+#ifdef _WIN32
+    static bool wsa_init = false;
+    if (!wsa_init) {
+        WSADATA wsa;
+        WSAStartup(MAKEWORD(2, 2), &wsa);
+        wsa_init = true;
+    }
+#endif
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = nullptr;
+    int r = getaddrinfo(host.c_str(), nullptr, &hints, &res);
+    if (r != 0 || !res) {
+        return false;
+    }
+    bool is_private = false;
+    for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        if (p->ai_family == AF_INET) {
+            auto* sin = reinterpret_cast<struct sockaddr_in*>(p->ai_addr);
+            uint32_t ip = ntohl(sin->sin_addr.s_addr);
+            if (IsPrivateOrLoopbackIp(ip)) {
+                is_private = true;
+                break;
+            }
+        } else if (p->ai_family == AF_INET6) {
+            auto* sin6 = reinterpret_cast<struct sockaddr_in6*>(p->ai_addr);
+            const uint8_t* b = reinterpret_cast<const uint8_t*>(&sin6->sin6_addr);
+            if (IsPrivateOrLoopbackIpv6(b)) {
+                is_private = true;
+                break;
+            }
+        }
+    }
+    freeaddrinfo(res);
+    return is_private;
+}
+
 bool IsLoopbackHost(std::string_view host) {
     std::string h = ToLower(host);
-    return h == "localhost" || h == "127.0.0.1" || h == "::1" || h.rfind("127.", 0) == 0 || h.rfind("169.254.", 0) == 0;
+    if (h == "localhost" || h == "127.0.0.1" || h == "::1") return true;
+    if (h.rfind("127.", 0) == 0 || h.rfind("169.254.", 0) == 0 ||
+        h.rfind("10.", 0) == 0 || h.rfind("192.168.", 0) == 0 ||
+        h.rfind("fe80:", 0) == 0 || h.rfind("fc", 0) == 0 || h.rfind("fd", 0) == 0) {
+        return true;
+    }
+    // Check 172.16.x.x - 172.31.x.x (RFC 1918)
+    if (h.rfind("172.", 0) == 0) {
+        auto dot2 = h.find('.', 4);
+        if (dot2 != std::string::npos) {
+            try {
+                int oct = std::stoi(h.substr(4, dot2 - 4));
+                if (oct >= 16 && oct <= 31) return true;
+            } catch (...) {}
+        }
+    }
+    return false;
 }
 
 bool ParseContentRange(std::string_view val, uint64_t& start, uint64_t& end, uint64_t& total) {
@@ -80,6 +193,10 @@ void PopulateHeaderField(HttpResponseMeta& meta, const std::string& k, const std
             meta.content_length = std::stoull(v);
             meta.has_content_length = true;
         } catch (...) {}
+    } else if (kl == "transfer-encoding") {
+        if (ToLower(v).find("chunked") != std::string::npos) {
+            meta.is_chunked = true;
+        }
     } else if (kl == "accept-ranges") {
         if (ToLower(v).find("bytes") != std::string::npos) {
             meta.accept_ranges_bytes = true;
@@ -100,6 +217,39 @@ void PopulateHeaderField(HttpResponseMeta& meta, const std::string& k, const std
     } else if (kl == "retry-after") {
         try { meta.retry_after_sec = std::stoi(v); } catch (...) {}
     }
+}
+
+// Normalizes path removing "." and ".." segments according to RFC 3986 Section 5.2.4
+std::string RemoveDotSegments(std::string_view input_path) {
+    std::vector<std::string> segments;
+    std::string s(input_path);
+    std::stringstream ss(s);
+    std::string seg;
+    bool is_absolute = (!input_path.empty() && input_path.front() == '/');
+
+    while (std::getline(ss, seg, '/')) {
+        if (seg.empty() || seg == ".") {
+            continue;
+        }
+        if (seg == "..") {
+            if (!segments.empty()) {
+                segments.pop_back();
+            }
+        } else {
+            segments.push_back(seg);
+        }
+    }
+
+    std::string result;
+    if (is_absolute) result += "/";
+    for (size_t i = 0; i < segments.size(); ++i) {
+        result += segments[i];
+        if (i + 1 < segments.size() || (!input_path.empty() && input_path.back() == '/')) {
+            result += "/";
+        }
+    }
+    if (result.empty()) result = "/";
+    return result;
 }
 
 #ifdef _WIN32
@@ -123,6 +273,114 @@ std::string WideToUtf8(std::wstring_view wv) {
 
 } // namespace
 
+bool ChunkedDecoder::Feed(const char* data, size_t len, const std::function<bool(const uint8_t*, size_t)>& on_chunk) {
+    if (len > 0) {
+        buffer.append(data, len);
+    }
+    while (true) {
+        if (state == State::kComplete || state == State::kError) {
+            return state == State::kComplete;
+        }
+
+        if (state == State::kChunkHeader) {
+            auto crlf = buffer.find("\r\n");
+            if (crlf == std::string::npos) {
+                if (buffer.size() > 65536) {
+                    state = State::kError;
+                    error_message = "Chunk header line exceeded 64 KiB";
+                    return false;
+                }
+                return true; // Need more data
+            }
+            std::string header_line = buffer.substr(0, crlf);
+            buffer.erase(0, crlf + 2);
+
+            auto semi = header_line.find(';');
+            std::string hex_str = (semi != std::string::npos) ? header_line.substr(0, semi) : header_line;
+            size_t start = hex_str.find_first_not_of(" \t");
+            size_t end = hex_str.find_last_not_of(" \t");
+            if (start == std::string::npos) {
+                state = State::kError;
+                error_message = "Empty chunk size in header";
+                return false;
+            }
+            hex_str = hex_str.substr(start, end - start + 1);
+
+            try {
+                size_t idx = 0;
+                current_chunk_size = std::stoull(hex_str, &idx, 16);
+                if (idx != hex_str.size()) {
+                    state = State::kError;
+                    error_message = "Malformed hex chunk size: " + hex_str;
+                    return false;
+                }
+            } catch (...) {
+                state = State::kError;
+                error_message = "Failed to parse chunk size: " + hex_str;
+                return false;
+            }
+
+            current_chunk_remaining = current_chunk_size;
+            if (current_chunk_size == 0) {
+                state = State::kTrailers;
+            } else {
+                state = State::kChunkData;
+            }
+        }
+
+        if (state == State::kChunkData) {
+            if (current_chunk_remaining > 0 && !buffer.empty()) {
+                size_t to_deliver = std::min<size_t>(buffer.size(), static_cast<size_t>(current_chunk_remaining));
+                if (on_chunk && !on_chunk(reinterpret_cast<const uint8_t*>(buffer.data()), to_deliver)) {
+                    state = State::kError;
+                    error_message = "Consumer rejected chunk data";
+                    return false;
+                }
+                buffer.erase(0, to_deliver);
+                current_chunk_remaining -= to_deliver;
+            }
+            if (current_chunk_remaining == 0) {
+                state = State::kChunkCrlf;
+            } else {
+                return true;
+            }
+        }
+
+        if (state == State::kChunkCrlf) {
+            if (buffer.size() < 2) {
+                return true;
+            }
+            if (buffer[0] != '\r' || buffer[1] != '\n') {
+                state = State::kError;
+                error_message = "Missing CRLF after chunk data";
+                return false;
+            }
+            buffer.erase(0, 2);
+            state = State::kChunkHeader;
+        }
+
+        if (state == State::kTrailers) {
+            if (buffer.rfind("\r\n", 0) == 0) {
+                buffer.erase(0, 2);
+                state = State::kComplete;
+                return true;
+            }
+            auto end_trailers = buffer.find("\r\n\r\n");
+            if (end_trailers != std::string::npos) {
+                buffer.erase(0, end_trailers + 4);
+                state = State::kComplete;
+                return true;
+            }
+            if (buffer.size() > 65536) {
+                state = State::kError;
+                error_message = "Trailers exceeded 64 KiB";
+                return false;
+            }
+            return true;
+        }
+    }
+}
+
 std::string HttpClient::ResolveRedirectTarget(const ParsedUrl& base, const std::string& loc) {
     if (loc.empty()) return "";
     // 1. Absolute URI with scheme (e.g. http:// or https://)
@@ -139,7 +397,10 @@ std::string HttpClient::ResolveRedirectTarget(const ParsedUrl& base, const std::
     }
     // 3. Absolute path (e.g. /path/to/resource)
     if (loc.front() == '/') {
-        return authority + loc;
+        auto q_pos = loc.find('?');
+        std::string path_part = (q_pos == std::string::npos) ? loc : loc.substr(0, q_pos);
+        std::string query_part = (q_pos == std::string::npos) ? "" : loc.substr(q_pos);
+        return authority + RemoveDotSegments(path_part) + query_part;
     }
     // 4. Query-only reference (e.g. ?query=val)
     if (loc.front() == '?') {
@@ -161,7 +422,11 @@ std::string HttpClient::ResolveRedirectTarget(const ParsedUrl& base, const std::
     if (last_slash != std::string::npos) {
         base_dir = clean_path.substr(0, last_slash + 1);
     }
-    return authority + base_dir + loc;
+    auto loc_q_pos = loc.find('?');
+    std::string loc_path = (loc_q_pos == std::string::npos) ? loc : loc.substr(0, loc_q_pos);
+    std::string loc_query = (loc_q_pos == std::string::npos) ? "" : loc.substr(loc_q_pos);
+    std::string combined = base_dir + loc_path;
+    return authority + RemoveDotSegments(combined) + loc_query;
 }
 
 Result<ParsedUrl> HttpClient::ParseUrl(std::string_view url) {
@@ -178,9 +443,20 @@ Result<ParsedUrl> HttpClient::ParseUrl(std::string_view url) {
     out.port = (out.scheme == "https") ? 443 : 80;
 
     std::string rest = u.substr(scheme_pos + 3);
-    auto slash_pos = rest.find('/');
-    std::string authority = (slash_pos == std::string::npos) ? rest : rest.substr(0, slash_pos);
-    out.path_and_query = (slash_pos == std::string::npos) ? "/" : rest.substr(slash_pos);
+    size_t auth_end = rest.find_first_of("/?#");
+    std::string authority = (auth_end == std::string::npos) ? rest : rest.substr(0, auth_end);
+    std::string path_and_query_raw = (auth_end == std::string::npos) ? "/" : rest.substr(auth_end);
+
+    // Strip fragment (#) from path_and_query as HTTP clients never send fragments to servers
+    auto frag_pos = path_and_query_raw.find('#');
+    std::string path_and_query = (frag_pos == std::string::npos) ? path_and_query_raw : path_and_query_raw.substr(0, frag_pos);
+
+    if (path_and_query.empty()) {
+        path_and_query = "/";
+    } else if (path_and_query.front() == '?') {
+        path_and_query = "/" + path_and_query;
+    }
+    out.path_and_query = path_and_query;
 
     if (authority.empty()) {
         return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Empty URL host");
@@ -190,16 +466,33 @@ Result<ParsedUrl> HttpClient::ParseUrl(std::string_view url) {
         auto close_b = authority.find(']');
         if (close_b == std::string::npos) return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Invalid IPv6 host");
         out.host = authority.substr(1, close_b - 1);
-        if (close_b + 1 < authority.size() && authority[close_b + 1] == ':') {
-            out.port = static_cast<uint16_t>(std::stoi(authority.substr(close_b + 2)));
+        if (close_b + 1 < authority.size()) {
+            if (authority[close_b + 1] != ':') {
+                return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Invalid character after IPv6 bracket");
+            }
+            std::string port_str = authority.substr(close_b + 2);
+            try {
+                size_t p_idx = 0;
+                int p = std::stoi(port_str, &p_idx);
+                if (p_idx != port_str.size() || p <= 0 || p > 65535) {
+                    return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Port out of range");
+                }
+                out.port = static_cast<uint16_t>(p);
+            } catch (...) {
+                return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Invalid port number");
+            }
         }
     } else {
         auto colon = authority.find(':');
         if (colon != std::string::npos) {
             out.host = authority.substr(0, colon);
+            std::string port_str = authority.substr(colon + 1);
             try {
-                int p = std::stoi(authority.substr(colon + 1));
-                if (p <= 0 || p > 65535) return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Port out of range");
+                size_t p_idx = 0;
+                int p = std::stoi(port_str, &p_idx);
+                if (p_idx != port_str.size() || p <= 0 || p > 65535) {
+                    return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Port out of range");
+                }
                 out.port = static_cast<uint16_t>(p);
             } catch (...) {
                 return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Invalid port number");
@@ -641,6 +934,34 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
                     "HTTP " + std::to_string(meta.status_code) + " Server Error", true, true);
             }
             return Result<HttpResponseMeta>::Err("ERR_HTTP_CLIENT", "HTTP status " + std::to_string(meta.status_code));
+        }
+
+        if (meta.is_chunked) {
+            ChunkedDecoder decoder;
+            if (!leftover_body.empty()) {
+                if (!decoder.Feed(leftover_body.data(), leftover_body.size(), on_chunk)) {
+                    cleanup_conn();
+                    return Result<HttpResponseMeta>::Err("ERR_HTTP_CHUNK_FRAMING", "Malformed chunked transfer: " + decoder.error_message);
+                }
+            }
+            while (!decoder.IsComplete()) {
+                if (cancel_flag.load()) {
+                    cleanup_conn();
+                    return Result<HttpResponseMeta>::Err("ERR_CANCELED", "Transfer canceled");
+                }
+                ssize_t n = read_some(tmp, tmp_vec.size());
+                if (n <= 0) {
+                    cleanup_conn();
+                    if (decoder.IsComplete()) break;
+                    return Result<HttpResponseMeta>::Err("ERR_NET_CONNECTION_RESET", "Premature EOF in chunked body", true, true);
+                }
+                if (!decoder.Feed(tmp, static_cast<size_t>(n), on_chunk)) {
+                    cleanup_conn();
+                    return Result<HttpResponseMeta>::Err("ERR_HTTP_CHUNK_FRAMING", "Malformed chunked transfer: " + decoder.error_message);
+                }
+            }
+            cleanup_conn();
+            return Result<HttpResponseMeta>::Ok(std::move(meta));
         }
 
         uint64_t bytes_delivered = 0;

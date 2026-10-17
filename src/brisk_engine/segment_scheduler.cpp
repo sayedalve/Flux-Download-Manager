@@ -10,12 +10,67 @@ SegmentScheduler::SegmentScheduler(uint64_t total_bytes, uint32_t max_connection
       m_max_connections(std::clamp(max_connections, 1u, 32u)),
       m_min_split_bytes(std::max<uint64_t>(4096, min_split_bytes)) {}
 
+bool SegmentScheduler::ValidateSegmentPartition(const std::vector<Segment>& segments, uint64_t total_bytes) {
+    if (segments.empty()) return false;
+    if (total_bytes == 0) return false;
+
+    // Check for duplicate segment IDs
+    std::vector<uint32_t> ids;
+    ids.reserve(segments.size());
+    for (const auto& s : segments) ids.push_back(s.segment_id);
+    std::sort(ids.begin(), ids.end());
+    if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) {
+        return false;
+    }
+
+    // Sort a copy by start_offset
+    std::vector<Segment> sorted = segments;
+    std::sort(sorted.begin(), sorted.end(), [](const Segment& a, const Segment& b) {
+        return a.start_offset < b.start_offset;
+    });
+
+    if (sorted.front().start_offset != 0) {
+        return false; // Does not start at byte 0
+    }
+    if (sorted.back().end_offset != total_bytes - 1) {
+        return false; // Does not end at total_bytes - 1
+    }
+
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        const auto& s = sorted[i];
+        if (s.start_offset > s.end_offset) return false;
+        if (s.end_offset >= total_bytes) return false;
+
+        // Cursor bounds: start_offset <= current_offset <= end_offset + 1
+        if (s.current_offset < s.start_offset || s.current_offset > (s.end_offset + 1)) {
+            return false;
+        }
+
+        // Completion flag consistency
+        bool is_fully_read = (s.current_offset == s.end_offset + 1);
+        if (s.completed && !is_fully_read) {
+            return false; // Marked completed prematurely without full bytes
+        }
+
+        if (i > 0) {
+            // Guard arithmetic against integer overflow
+            if (sorted[i - 1].end_offset == UINT64_MAX) return false;
+            // No gaps and no overlaps: start must be exactly end_offset + 1
+            if (s.start_offset != sorted[i - 1].end_offset + 1) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 void SegmentScheduler::Initialize(const std::vector<Segment>& existing_segments) {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_segments.clear();
     m_next_segment_id = 0;
 
-    if (!existing_segments.empty()) {
+    if (!existing_segments.empty() && ValidateSegmentPartition(existing_segments, m_total_bytes)) {
         for (const auto& s : existing_segments) {
             auto live = std::make_shared<LiveSegment>(
                 s.segment_id, s.start_offset, s.current_offset, s.end_offset, s.completed);

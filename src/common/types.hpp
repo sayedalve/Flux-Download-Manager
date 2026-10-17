@@ -118,10 +118,18 @@ struct StreamSelectionOptions {
     std::string cached_manifest_body;     // Optional cached manifest from Cat Catch Deep Search
 };
 
+enum class PauseReason {
+    kNone,
+    kUser,
+    kSystemSuspend,
+    kError
+};
+
 struct TaskModel {
     std::string task_id;
     TaskType task_type{TaskType::kHttpFile};
     TaskState state{TaskState::kQueued};
+    PauseReason pause_reason{PauseReason::kNone};
     std::string queue_id{"main"};
     int32_t queue_order{0};
     std::string category{"General"};
@@ -139,6 +147,7 @@ struct TaskModel {
     uint32_t total_segments{0};
     bool range_supported{false};
     uint32_t max_connections{8};
+    ConflictPolicy conflict_policy{ConflictPolicy::kAutoRename};
     uint32_t retry_count{0};
     bool scheduled{false};
     std::string schedule_time_local;

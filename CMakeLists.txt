@@ -53,10 +53,14 @@ add_executable(flux-nmh ${FLUX_CORE_SOURCES} src/nmh/main.cpp ${FLUX_RC_SOURCES}
 add_executable(flux_unit_tests ${FLUX_CORE_SOURCES} tests/cpp/unit_tests.cpp)
 add_executable(N_m3u8DL-RE src/brisk_engine/http_client.cpp src/worker_stream/nm3u8dl_re_worker.cpp)
 
+# Build prerequisite: unit tests expect worker binary to be available
+add_dependencies(flux_unit_tests N_m3u8DL-RE)
+
 # Legacy compatibility aliases for existing harnesses
 add_executable(openidm ${FLUX_CORE_SOURCES} src/app/main.cpp ${FLUX_RC_SOURCES})
 add_executable(openidm-nmh ${FLUX_CORE_SOURCES} src/nmh/main.cpp ${FLUX_RC_SOURCES})
 add_executable(openidm_unit_tests ${FLUX_CORE_SOURCES} tests/cpp/unit_tests.cpp)
+add_dependencies(openidm_unit_tests N_m3u8DL-RE)
 
 if(WIN32)
     set_target_properties(flux PROPERTIES WIN32_EXECUTABLE TRUE)

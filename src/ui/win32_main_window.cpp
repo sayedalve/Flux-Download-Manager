@@ -3362,6 +3362,20 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case WM_POWERBROADCAST: {
+            if (wParam == PBT_APMSUSPEND) {
+                if (ctx && ctx->controller) {
+                    ctx->controller->OnSystemSuspend();
+                }
+                return TRUE;
+            } else if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+                if (ctx && ctx->controller) {
+                    ctx->controller->OnSystemResume();
+                }
+                return TRUE;
+            }
+            break;
+        }
         case WM_CLOSE: {
             if (ctx->controller->GetSettings().close_to_tray && ctx->tray_added) {
                 ShowWindow(hwnd, SW_HIDE);

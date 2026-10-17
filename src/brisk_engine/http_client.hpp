@@ -36,7 +36,33 @@ struct HttpResponseMeta {
     std::string content_disposition;
     std::string content_type;
     int retry_after_sec{0};
+    bool is_chunked{false};
     std::map<std::string, std::string> raw_headers;
+};
+
+// State machine for decoding HTTP/1.1 chunked transfer encoding (RFC 9112 Section 7.1)
+// Removes chunk framing (hex size, extensions, chunk CRLFs, trailers) and delivers
+// pure entity body bytes to the consumer (FDM-003, TG-04).
+class ChunkedDecoder {
+public:
+    enum class State {
+        kChunkHeader,
+        kChunkData,
+        kChunkCrlf,
+        kTrailers,
+        kComplete,
+        kError
+    };
+
+    State state{State::kChunkHeader};
+    uint64_t current_chunk_size{0};
+    uint64_t current_chunk_remaining{0};
+    std::string buffer;
+    std::string error_message;
+
+    bool Feed(const char* data, size_t len, const std::function<bool(const uint8_t*, size_t)>& on_chunk);
+    bool IsComplete() const { return state == State::kComplete; }
+    bool HasError() const { return state == State::kError; }
 };
 
 class HttpClient {

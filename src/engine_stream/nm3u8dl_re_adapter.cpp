@@ -1039,7 +1039,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     task.stream_percent = 100.0;
 
     std::string desired_final_name = base_stem + "." + fmt;
-    auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, ConflictPolicy::kAutoRename);
+    auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, task.conflict_policy);
     std::filesystem::remove_all(task_tmp_dir, ec);
 
     if (!commit_res.ok()) {
@@ -1548,7 +1548,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             task.total_bytes = final_size;
             task.stream_percent = 100.0;
             std::string desired_final_name = base_stem + "." + fmt;
-            auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, ConflictPolicy::kAutoRename);
+            auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, task.conflict_policy);
             std::filesystem::remove_all(task_tmp_dir, ec);
             if (!commit_res.ok()) {
                 task.state = TaskState::kFailed;
@@ -1741,7 +1741,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     task.stream_percent = 100.0;
 
     std::string desired_final_name = base_stem + "." + fmt;
-    auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, ConflictPolicy::kAutoRename);
+    auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, task.conflict_policy);
     std::filesystem::remove_all(task_tmp_dir, ec);
 
     if (!commit_res.ok()) {

@@ -769,6 +769,9 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   try {
     const res = await sendNativeRpc("stream.add", params, customTransport);
     candidate.handoffStatus = "Queued in Flux";
+    if (res && typeof res === "object") {
+      res.taskType = res.taskType || sourceType;
+    }
     return res;
   } catch (err) {
     const isDirectFile = sourceType === SourceType.DIRECT_PROGRESSIVE && !isWebpageWatchUrl(candidate.url);

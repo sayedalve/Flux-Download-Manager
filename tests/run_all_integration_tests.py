@@ -44,6 +44,8 @@ EXE_EXT = ".exe" if IS_WINDOWS else ""
 tools_dir = ROOT / "tools" / ("win-x64" if IS_WINDOWS else "")
 if tools_dir.is_dir():
     os.environ["PATH"] = str(tools_dir.resolve()) + os.pathsep + os.environ.get("PATH", "")
+os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
+os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
 
 def find_binary(name: str) -> Path:

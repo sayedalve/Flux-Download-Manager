@@ -21,6 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 IS_WINDOWS = (os.name == "nt" or platform.system().lower().startswith("win"))
 EXE_EXT = ".exe" if IS_WINDOWS else ""
+os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
+os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
 OPENIDM_BIN = ROOT / "build" / "win-x64" / "Release" / f"flux{EXE_EXT}"
 if not OPENIDM_BIN.exists():

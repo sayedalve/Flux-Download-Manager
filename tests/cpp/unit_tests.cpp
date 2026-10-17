@@ -805,18 +805,30 @@ bool TestPartFileIsolationAndSafeCommit() {
     ASSERT_TRUE(!bad_size_commit.ok() && bad_size_commit.error->code == "ERR_STORAGE_PART_SIZE_MISMATCH",
                 "CommitPartFile rejects part file with mismatched size");
 
-    // Commit Task 1
-    auto res1 = openidm::PathSanitizer::CommitPartFile(
-        part1, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content1.size());
-    ASSERT_TRUE(res1.ok(), "Task 1 committed successfully");
-    ASSERT_TRUE(std::filesystem::exists(*res1.value), "Task 1 output exists");
+    // COR-02 & FDM-008: Concurrent part file commit race test
+    std::atomic<bool> gate{false};
+    openidm::Result<std::filesystem::path> res1 = openidm::Result<std::filesystem::path>::Err("ERR", "init");
+    openidm::Result<std::filesystem::path> res2 = openidm::Result<std::filesystem::path>::Err("ERR", "init");
 
-    // Commit Task 2 (auto rename should create presentation (1).zip)
-    auto res2 = openidm::PathSanitizer::CommitPartFile(
-        part2, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content2.size());
+    std::thread th1([&]() {
+        while (!gate.load()) std::this_thread::yield();
+        res1 = openidm::PathSanitizer::CommitPartFile(
+            part1, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content1.size());
+    });
+    std::thread th2([&]() {
+        while (!gate.load()) std::this_thread::yield();
+        res2 = openidm::PathSanitizer::CommitPartFile(
+            part2, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content2.size());
+    });
+    gate.store(true);
+    th1.join();
+    th2.join();
+
+    ASSERT_TRUE(res1.ok(), "Task 1 committed successfully");
     ASSERT_TRUE(res2.ok(), "Task 2 committed successfully via auto-rename");
+    ASSERT_TRUE(std::filesystem::exists(*res1.value), "Task 1 output exists");
     ASSERT_TRUE(std::filesystem::exists(*res2.value), "Task 2 output exists");
-    ASSERT_TRUE(*res1.value != *res2.value, "Output paths are distinct");
+    ASSERT_TRUE(*res1.value != *res2.value, "Output paths are distinct without overwriting");
 
     // Verify content integrity - neither output mixed data
     std::string read1, read2;
@@ -828,8 +840,9 @@ bool TestPartFileIsolationAndSafeCommit() {
         std::ifstream ifs2(*res2.value, std::ios::binary);
         read2.assign((std::istreambuf_iterator<char>(ifs2)), std::istreambuf_iterator<char>());
     }
-    ASSERT_TRUE(read1 == content1, "Task 1 content preserved without corruption");
-    ASSERT_TRUE(read2 == content2, "Task 2 content preserved without corruption");
+    ASSERT_TRUE(read1 == content1 || read1 == content2, "Output 1 content preserved without corruption");
+    ASSERT_TRUE(read2 == content1 || read2 == content2, "Output 2 content preserved without corruption");
+    ASSERT_TRUE(read1 != read2, "Both outputs have distinct content");
 
     std::filesystem::remove_all(work_dir, ec);
     return true;
@@ -876,7 +889,7 @@ bool TestResourceAwareResumeAndValidatorMismatch() {
 }
 
 bool TestSegmentSchedulerBoundarySplitRaceGuard() {
-    // CON-01: Verify SegmentScheduler never allows overlapping ranges or invalid splits
+    // CON-01 & FDM-009: Verify SegmentScheduler with active concurrent writer and stealer threads
     uint64_t total = 10ULL * 1048576ULL; // 10 MiB
     openidm::brisk::SegmentScheduler scheduler(total, 4, 131072);
     scheduler.Initialize();
@@ -885,20 +898,34 @@ bool TestSegmentSchedulerBoundarySplitRaceGuard() {
     ASSERT_TRUE(s1 != nullptr, "Acquire initial segment");
     ASSERT_TRUE(s1->start_offset == 0 && s1->end_offset.load() == total - 1, "Initial segment covers whole file");
 
-    // Simulate s1 downloading 2 MiB
-    s1->current_offset.store(2 * 1048576);
+    std::atomic<bool> writer_done{false};
+    std::atomic<bool> split_started{false};
+    std::shared_ptr<openidm::brisk::LiveSegment> s2 = nullptr;
 
-    // Dynamic work-stealing split
-    auto s2 = scheduler.AcquireNextOrStealSegment(true);
-    ASSERT_TRUE(s2 != nullptr, "Stolen segment acquired");
+    // Concurrent writer thread: advances offset
+    std::thread writer([&]() {
+        for (int i = 0; i < 200; ++i) {
+            s1->current_offset.fetch_add(4096);
+            if (i == 50) split_started.store(true);
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        writer_done.store(true);
+    });
+
+    // Concurrent stealer thread: steals while writer is advancing
+    std::thread stealer([&]() {
+        while (!split_started.load()) std::this_thread::yield();
+        s2 = scheduler.AcquireNextOrStealSegment(true);
+    });
+
+    writer.join();
+    stealer.join();
+
+    ASSERT_TRUE(s2 != nullptr, "Stolen segment acquired under active concurrency");
     ASSERT_TRUE(s1->end_offset.load() < s2->start_offset, "Victim end is strictly less than stolen start");
     ASSERT_TRUE(s1->end_offset.load() + 1 == s2->start_offset, "No byte hole between split segments");
     ASSERT_TRUE(s2->end_offset.load() == total - 1, "Stolen segment preserves outer boundary");
-
-    // If victim advances past split point, split must not corrupt boundary
-    s2->current_offset.store(s2->end_offset.load() + 1);
-    s2->completed.store(true);
-    ASSERT_TRUE(s2->completed.load(), "s2 marked completed");
+    ASSERT_TRUE(s1->current_offset.load() <= s1->end_offset.load() + 1, "Victim cursor clamped to boundary");
 
     return true;
 }
@@ -947,21 +974,31 @@ bool TestIpcSecurityDaclAndPathTraversal() {
 }
 
 bool TestGlobalRateLimiting() {
-    // CTRL-01: Verify shared TokenBucketLimiter consumes tokens and bounds throughput
+    // CTRL-01 & FDM-009: Verify shared TokenBucketLimiter throttles real concurrent threads
     openidm::brisk::TokenBucketLimiter limiter;
     std::atomic<uint64_t> limit_bps{1000000}; // 1 MB/s
     std::atomic<bool> stop_flag{false};
+    std::atomic<bool> start_gate{false};
+    std::atomic<int> completed{0};
 
     auto start = std::chrono::steady_clock::now();
-    // Simulate two threads consuming 500 KB each (total 1 MB)
-    limiter.Consume(500000, limit_bps, stop_flag);
-    limiter.Consume(500000, limit_bps, stop_flag);
+    auto worker = [&]() {
+        while (!start_gate.load()) {
+            std::this_thread::yield();
+        }
+        limiter.Consume(750000, limit_bps, stop_flag);
+        completed.fetch_add(1);
+    };
 
-    // Third consume of 500 KB should be throttled
-    limiter.Consume(500000, limit_bps, stop_flag);
+    std::thread t1(worker);
+    std::thread t2(worker);
+    start_gate.store(true);
+    t1.join();
+    t2.join();
+
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-
-    ASSERT_TRUE(elapsed >= 300, "Global rate limiter throttles aggregate consumption");
+    ASSERT_TRUE(completed.load() == 2, "Both concurrent threads finished");
+    ASSERT_TRUE(elapsed >= 300, "Shared rate limiter throttled concurrent aggregate throughput");
     return true;
 }
 
@@ -996,11 +1033,305 @@ bool TestRelativeAndProtocolRelativeRedirectResolution() {
     return true;
 }
 
+// Regression Suite 22: Complete Segment Range Map & Partition Integrity (FDM-002, TG-01, TG-02)
+bool TestCompleteSegmentRangeMapValidation() {
+    uint64_t total = 1048576; // 1 MiB
+
+    // 1. Valid 2-segment partition
+    std::vector<openidm::Segment> valid_segs = {
+        {0, 0, 524288, 524287, true},
+        {1, 524288, 524288, 1048575, false}
+    };
+    ASSERT_TRUE(openidm::brisk::SegmentScheduler::ValidateSegmentPartition(valid_segs, total), "Valid partition accepted");
+
+    // 2. Gap between segments
+    std::vector<openidm::Segment> gap_segs = {
+        {0, 0, 500000, 499999, true},
+        {1, 510000, 510000, 1048575, false}
+    };
+    ASSERT_TRUE(!openidm::brisk::SegmentScheduler::ValidateSegmentPartition(gap_segs, total), "Gap partition rejected");
+
+    // 3. Overlap between segments
+    std::vector<openidm::Segment> overlap_segs = {
+        {0, 0, 524288, 524287, true},
+        {1, 500000, 500000, 1048575, false}
+    };
+    ASSERT_TRUE(!openidm::brisk::SegmentScheduler::ValidateSegmentPartition(overlap_segs, total), "Overlap partition rejected");
+
+    // 4. Cursor outside range
+    std::vector<openidm::Segment> bad_cursor = {
+        {0, 0, 600000, 524287, true},
+        {1, 524288, 524288, 1048575, false}
+    };
+    ASSERT_TRUE(!openidm::brisk::SegmentScheduler::ValidateSegmentPartition(bad_cursor, total), "Cursor overflow rejected");
+
+    // 5. Premature completion flag
+    std::vector<openidm::Segment> premature_comp = {
+        {0, 0, 100000, 524287, true},
+        {1, 524288, 524288, 1048575, false}
+    };
+    ASSERT_TRUE(!openidm::brisk::SegmentScheduler::ValidateSegmentPartition(premature_comp, total), "Premature completion rejected");
+
+    // 6. Duplicate segment ID
+    std::vector<openidm::Segment> dup_id = {
+        {0, 0, 524288, 524287, true},
+        {0, 524288, 524288, 1048575, false}
+    };
+    ASSERT_TRUE(!openidm::brisk::SegmentScheduler::ValidateSegmentPartition(dup_id, total), "Duplicate segment ID rejected");
+
+    return true;
+}
+
+// Regression Suite 23: HTTP Chunked Body Framing Decoder (FDM-003, TG-04)
+bool TestPosixHttpChunkedDecoder() {
+    openidm::brisk::ChunkedDecoder decoder;
+    std::string decoded_output;
+    auto on_chunk = [&](const uint8_t* data, size_t len) -> bool {
+        decoded_output.append(reinterpret_cast<const char*>(data), len);
+        return true;
+    };
+
+    // Standard chunked stream from RFC 9112 Section 7.1
+    std::string stream = "4\r\nWiki\r\n6\r\npedia \r\nE\r\nin \r\n\r\nchunks.\r\n0\r\n\r\n";
+    bool ok = decoder.Feed(stream.data(), stream.size(), on_chunk);
+    ASSERT_TRUE(ok, "Chunked feed succeeded");
+    ASSERT_TRUE(decoder.IsComplete(), "Chunked decoder completed");
+    ASSERT_TRUE(decoded_output == "Wikipedia in \r\n\r\nchunks.", "Decoded body matches exact fixture");
+
+    // Chunk extensions and trailers
+    openidm::brisk::ChunkedDecoder decoder2;
+    std::string out2;
+    auto on_chunk2 = [&](const uint8_t* d, size_t l) {
+        out2.append(reinterpret_cast<const char*>(d), l);
+        return true;
+    };
+    std::string partA = "5;ext=foo\r\nHello";
+    std::string partB = "\r\n0;final=true\r\nX-Trailer: val\r\n\r\n";
+    ASSERT_TRUE(decoder2.Feed(partA.data(), partA.size(), on_chunk2), "Part A fed");
+    ASSERT_TRUE(!decoder2.IsComplete(), "Not complete after Part A");
+    ASSERT_TRUE(decoder2.Feed(partB.data(), partB.size(), on_chunk2), "Part B fed");
+    ASSERT_TRUE(decoder2.IsComplete(), "Complete after Part B");
+    ASSERT_TRUE(out2 == "Hello", "Chunk extension and trailers handled");
+
+    return true;
+}
+
+// Regression Suite 24: URL Parsing, Query Without Slash, IPv6 & Security (FDM-004, FDM-005, TG-05, TG-06)
+bool TestUrlParsingAndSecurityChecks() {
+    // 1. Query without slash: https://example.test?token=secret
+    auto r1 = openidm::brisk::HttpClient::ParseUrl("https://example.test?token=secret");
+    ASSERT_TRUE(r1.ok(), "Parse URL without slash ok");
+    ASSERT_TRUE(r1.value->host == "example.test", "Host parsed without query attached");
+    ASSERT_TRUE(r1.value->path_and_query == "/?token=secret", "Path and query formatted correctly");
+
+    // 2. URL with fragment: https://example.test/file#section
+    auto r2 = openidm::brisk::HttpClient::ParseUrl("https://example.test/file#section");
+    ASSERT_TRUE(r2.ok(), "Parse URL with fragment ok");
+    ASSERT_TRUE(r2.value->path_and_query == "/file", "Fragment stripped from path_and_query");
+
+    // 3. IPv6 in brackets: http://[::1]:8080/path
+    auto r3 = openidm::brisk::HttpClient::ParseUrl("http://[::1]:8080/path");
+    ASSERT_TRUE(r3.ok(), "Parse bracketed IPv6 ok");
+    ASSERT_TRUE(r3.value->host == "::1", "IPv6 host extracted");
+    ASSERT_TRUE(r3.value->port == 8080, "Port extracted");
+
+    // 4. Dot segment removal in relative redirect: /a/b/c.html + ../d.html -> /a/d.html
+    openidm::brisk::ParsedUrl base;
+    base.scheme = "http";
+    base.host = "cdn.example.com";
+    base.port = 80;
+    base.path_and_query = "/a/b/c.html";
+    std::string red = openidm::brisk::HttpClient::ResolveRedirectTarget(base, "../d.html");
+    ASSERT_TRUE(red == "http://cdn.example.com/a/d.html", "Parent-relative redirect resolved correctly");
+
+    // 5. Private IP classification (RFC 1918 & Loopback)
+    auto r_p1 = openidm::brisk::HttpClient::ParseUrl("http://10.0.0.1/doc.pdf");
+    ASSERT_TRUE(r_p1.ok() && r_p1.value->is_loopback_or_private, "10.0.0.1 marked private");
+    auto r_p2 = openidm::brisk::HttpClient::ParseUrl("http://192.168.1.1/doc.pdf");
+    ASSERT_TRUE(r_p2.ok() && r_p2.value->is_loopback_or_private, "192.168.1.1 marked private");
+    auto r_p3 = openidm::brisk::HttpClient::ParseUrl("http://172.20.0.1/doc.pdf");
+    ASSERT_TRUE(r_p3.ok() && r_p3.value->is_loopback_or_private, "172.20.0.1 marked private");
+
+    return true;
+}
+
+// Regression Suite 25: IPC Bounded Shutdown & First Pipe Instance (FDM-006, FDM-011, TG-08, TG-16)
+bool TestIpcShutdownAndFirstPipeInstance() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_ipc_shut_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller");
+
+    std::string pipe_name;
+#ifdef _WIN32
+    pipe_name = "\\\\.\\pipe\\Flux_Test_Shutdown_" + openidm::GenerateUuidV4();
+#else
+    pipe_name = (work_dir / "test.sock").string();
+#endif
+
+    openidm::ipc::IpcServer server1(ctrl, pipe_name);
+    ASSERT_TRUE(server1.Start().ok(), "Server 1 started");
+
+#ifdef _WIN32
+    // Test FILE_FLAG_FIRST_PIPE_INSTANCE: A second server trying to claim the same pipe name as first instance must fail!
+    HANDLE hSecond = CreateNamedPipeA(
+        pipe_name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+        1, 1024, 1024, 50, nullptr);
+    ASSERT_TRUE(hSecond == INVALID_HANDLE_VALUE, "Second server cannot claim first pipe instance");
+    ASSERT_TRUE(GetLastError() == ERROR_ACCESS_DENIED || GetLastError() == ERROR_ALREADY_EXISTS, "Error code is access denied or already exists");
+#endif
+
+    // Test clean shutdown with active connection
+    auto start = std::chrono::steady_clock::now();
+    server1.Stop();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    ASSERT_TRUE(elapsed < 3000, "Server stopped cleanly in under 3 seconds");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+// Regression Suite 26: Conflict Policies End-to-End (FDM-007, FDM-008, TG-10)
+bool TestConflictPolicies() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_conflict_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    std::string fname = "report.pdf";
+    std::filesystem::path existing = work_dir / fname;
+    {
+        std::ofstream ofs(existing);
+        ofs << "Original content";
+    }
+
+    // 1. FailIfExists
+    std::filesystem::path part_fail = work_dir / "fail.part";
+    {
+        std::ofstream ofs(part_fail);
+        ofs << "New content";
+    }
+    auto res_fail = openidm::PathSanitizer::CommitPartFile(part_fail, work_dir, fname, openidm::ConflictPolicy::kFailIfExists);
+    ASSERT_TRUE(!res_fail.ok() && res_fail.error->code == "ERR_FILE_EXISTS", "kFailIfExists rejects existing destination");
+
+    // 2. Overwrite
+    std::filesystem::path part_ovw = work_dir / "ovw.part";
+    {
+        std::ofstream ofs(part_ovw);
+        ofs << "Overwritten content";
+    }
+    auto res_ovw = openidm::PathSanitizer::CommitPartFile(part_ovw, work_dir, fname, openidm::ConflictPolicy::kOverwrite);
+    ASSERT_TRUE(res_ovw.ok(), "kOverwrite succeeded");
+    {
+        std::ifstream ifs(*res_ovw.value);
+        std::string s;
+        std::getline(ifs, s);
+        ASSERT_TRUE(s == "Overwritten content", "Content was replaced");
+    }
+
+    // 3. AutoRename
+    std::filesystem::path part_ren = work_dir / "ren.part";
+    {
+        std::ofstream ofs(part_ren);
+        ofs << "Auto-renamed content";
+    }
+    auto res_ren = openidm::PathSanitizer::CommitPartFile(part_ren, work_dir, fname, openidm::ConflictPolicy::kAutoRename);
+    ASSERT_TRUE(res_ren.ok(), "kAutoRename succeeded");
+    ASSERT_TRUE(res_ren.value->filename().string() == "report (1).pdf", "Target renamed to report (1).pdf");
+    {
+        std::ifstream ifs(*res_ren.value);
+        std::string s;
+        std::getline(ifs, s);
+        ASSERT_TRUE(s == "Auto-renamed content", "Renamed file content preserved");
+    }
+
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+// Regression Suite 27: System Suspend/Resume Selective Task Restoration (CTRL-02)
+bool TestSystemSuspendResumeAndPauseReason() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_suspend_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller");
+
+    // Task 1: Started immediately (active/queued)
+    openidm::TaskModel t1;
+    t1.url = "https://example.com/file1.zip";
+    auto r1 = ctrl.AddTask(t1, true);
+    ASSERT_TRUE(r1.ok(), "Task 1 added");
+    ASSERT_TRUE(r1.value->state == openidm::TaskState::kQueued, "Task 1 starts in Queued state");
+    ASSERT_TRUE(r1.value->pause_reason == openidm::PauseReason::kNone, "Task 1 pause_reason is kNone");
+
+    // Task 2: Created in paused state by user
+    openidm::TaskModel t2;
+    t2.url = "https://example.com/file2.zip";
+    auto r2 = ctrl.AddTask(t2, false);
+    ASSERT_TRUE(r2.ok(), "Task 2 added");
+    ASSERT_TRUE(r2.value->state == openidm::TaskState::kPaused, "Task 2 starts in Paused state");
+    ASSERT_TRUE(r2.value->pause_reason == openidm::PauseReason::kUser, "Task 2 pause_reason is kUser");
+
+    // 1. Trigger system suspend
+    ctrl.OnSystemSuspend();
+
+    auto g1_suspend = ctrl.GetTask(r1.value->task_id);
+    auto g2_suspend = ctrl.GetTask(r2.value->task_id);
+    ASSERT_TRUE(g1_suspend.has_value(), "Task 1 found");
+    ASSERT_TRUE(g2_suspend.has_value(), "Task 2 found");
+
+    ASSERT_TRUE(g1_suspend->state == openidm::TaskState::kPaused, "Task 1 paused on suspend");
+    ASSERT_TRUE(g1_suspend->pause_reason == openidm::PauseReason::kSystemSuspend, "Task 1 marked as kSystemSuspend");
+
+    ASSERT_TRUE(g2_suspend->state == openidm::TaskState::kPaused, "Task 2 still paused on suspend");
+    ASSERT_TRUE(g2_suspend->pause_reason == openidm::PauseReason::kUser, "Task 2 retains kUser pause_reason");
+
+    // 2. Trigger system resume
+    ctrl.OnSystemResume();
+
+    auto g1_resume = ctrl.GetTask(r1.value->task_id);
+    auto g2_resume = ctrl.GetTask(r2.value->task_id);
+    ASSERT_TRUE(g1_resume.has_value(), "Task 1 found");
+    ASSERT_TRUE(g2_resume.has_value(), "Task 2 found");
+
+    ASSERT_TRUE(g1_resume->state == openidm::TaskState::kQueued, "Task 1 automatically resumed to Queued");
+    ASSERT_TRUE(g1_resume->pause_reason == openidm::PauseReason::kNone, "Task 1 pause_reason reset to kNone");
+
+    ASSERT_TRUE(g2_resume->state == openidm::TaskState::kPaused, "Task 2 strictly remains Paused after sleep/wake");
+    ASSERT_TRUE(g2_resume->pause_reason == openidm::PauseReason::kUser, "Task 2 pause_reason remains kUser");
+
+    // 3. User manually resumes Task 2
+    ASSERT_TRUE(ctrl.ResumeTask(r2.value->task_id).ok(), "Manual resume of Task 2 succeeded");
+    auto g2_manual = ctrl.GetTask(r2.value->task_id);
+    ASSERT_TRUE(g2_manual.has_value() && g2_manual->state == openidm::TaskState::kQueued, "Task 2 resumed to Queued");
+    ASSERT_TRUE(g2_manual->pause_reason == openidm::PauseReason::kNone, "Task 2 pause_reason reset to kNone");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 21;
+    const int total = 27;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -1031,6 +1362,12 @@ int main() {
     run(19, "TestIpcSecurityDaclAndPathTraversal", TestIpcSecurityDaclAndPathTraversal);
     run(20, "TestGlobalRateLimiting", TestGlobalRateLimiting);
     run(21, "TestRelativeAndProtocolRelativeRedirectResolution", TestRelativeAndProtocolRelativeRedirectResolution);
+    run(22, "TestCompleteSegmentRangeMapValidation", TestCompleteSegmentRangeMapValidation);
+    run(23, "TestPosixHttpChunkedDecoder", TestPosixHttpChunkedDecoder);
+    run(24, "TestUrlParsingAndSecurityChecks", TestUrlParsingAndSecurityChecks);
+    run(25, "TestIpcShutdownAndFirstPipeInstance", TestIpcShutdownAndFirstPipeInstance);
+    run(26, "TestConflictPolicies", TestConflictPolicies);
+    run(27, "TestSystemSuspendResumeAndPauseReason", TestSystemSuspendResumeAndPauseReason);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

@@ -54,7 +54,8 @@ int main(int argc, char* argv[]) {
     cfg.temp_root_dir = app_data_dir / "tmp";
     cfg.nm3u8dl_binary_path = openidm::PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", exe_dir);
     cfg.ffmpeg_binary_path = openidm::PathSanitizer::FindWorkerBinary("ffmpeg", exe_dir);
-    cfg.allow_loopback = true;
+    // SEC-04: Block public-to-loopback/private redirects by default unless explicitly configured
+    cfg.allow_loopback = (std::getenv("FLUX_ALLOW_LOOPBACK") != nullptr || std::getenv("OPENIDM_ALLOW_LOOPBACK") != nullptr);
 
     std::string mode;
     std::string target_url;
@@ -93,6 +94,8 @@ int main(int argc, char* argv[]) {
             cfg.nm3u8dl_binary_path = argv[++i];
         } else if (arg == "--ffmpeg-binary" && i + 1 < argc) {
             cfg.ffmpeg_binary_path = argv[++i];
+        } else if (arg == "--allow-loopback") {
+            cfg.allow_loopback = true;
         }
     }
 

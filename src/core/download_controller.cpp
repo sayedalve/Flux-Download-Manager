@@ -194,11 +194,15 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     if (task.max_connections == 0) {
         task.max_connections = m_settings.default_connections_per_task;
     }
+    task.conflict_policy = m_settings.conflict_policy;
     if (task.created_at_ms <= 0) {
         task.created_at_ms = NowEpochMs();
     }
     task.updated_at_ms = task.created_at_ms;
     task.state = (start_immediately && !task.scheduled) ? TaskState::kQueued : TaskState::kPaused;
+    if (task.state == TaskState::kPaused) {
+        task.pause_reason = PauseReason::kUser;
+    }
     task.status_detail = (task.state == TaskState::kQueued)
                              ? "Queued"
                              : (task.scheduled ? ("Scheduled (" + task.schedule_time_local + ")") : "Paused");
@@ -313,6 +317,18 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
         stall_timeout_ms = m_cfg.stall_timeout_ms;
         min_split_bytes = m_cfg.min_split_bytes;
     }
+
+    std::string task_type_str = TaskTypeToString(local_task.task_type);
+    if (local_task.url.find("youtube.com") != std::string::npos ||
+        local_task.url.find("watch?v=") != std::string::npos ||
+        local_task.page_url.find("youtube.com") != std::string::npos ||
+        local_task.page_url.find("watch?v=") != std::string::npos ||
+        local_task.stream_options.cached_manifest_body.find("YOUTUBE") != std::string::npos) {
+        task_type_str = "YOUTUBE_EXTRACTION";
+    }
+
+    OPENIDM_LOG_INFO("Controller", "Dispatching task=" + task_id + " type=" + task_type_str +
+                     " correlation_id=" + local_task.correlation_id + " url=" + local_task.url);
 
     auto last_db_sync = std::chrono::steady_clock::now();
 
@@ -456,6 +472,7 @@ Result<void> DownloadController::PauseTask(const std::string& task_id) {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_tasks.find(task_id);
         if (it == m_tasks.end()) return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
+        it->second.pause_reason = PauseReason::kUser;
         if (it->second.state == TaskState::kQueued) {
             it->second.state = TaskState::kPaused;
             it->second.status_detail = "Paused";
@@ -472,6 +489,12 @@ Result<void> DownloadController::PauseTask(const std::string& task_id) {
         while (!ctrl->finished.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_tasks.find(task_id);
+        if (it != m_tasks.end() && it->second.state == TaskState::kPaused) {
+            it->second.pause_reason = PauseReason::kUser;
+            m_store.UpsertTask(it->second);
+        }
     }
     return Result<void>::Ok();
 }
@@ -482,6 +505,7 @@ Result<void> DownloadController::ResumeTask(const std::string& task_id) {
     if (it == m_tasks.end()) return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
     if (it->second.state == TaskState::kPaused || it->second.state == TaskState::kFailed) {
         it->second.scheduled = false;
+        it->second.pause_reason = PauseReason::kNone;
         it->second.state = TaskState::kQueued;
         it->second.status_detail = "Queued (Resuming)";
         it->second.error_code.clear();
@@ -646,6 +670,7 @@ void DownloadController::ResumeAllTasks() {
     for (auto& [id, t] : m_tasks) {
         if (t.state == TaskState::kPaused && !t.scheduled) {
             t.state = TaskState::kQueued;
+            t.pause_reason = PauseReason::kNone;
             t.status_detail = "Queued";
             m_store.UpsertTask(t);
         }
@@ -771,11 +796,45 @@ bool DownloadController::AreWorkersAvailable() const {
 }
 
 void DownloadController::OnSystemSuspend() {
-    PauseAllTasks();
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& [id, t] : m_tasks) {
+            if (t.state == TaskState::kQueued || t.state == TaskState::kProbing ||
+                t.state == TaskState::kDownloading || t.state == TaskState::kMuxing) {
+                ids.push_back(id);
+            }
+        }
+    }
+    for (const auto& id : ids) {
+        PauseTask(id);
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (const auto& id : ids) {
+            auto it = m_tasks.find(id);
+            if (it != m_tasks.end() && it->second.state == TaskState::kPaused) {
+                it->second.pause_reason = PauseReason::kSystemSuspend;
+                it->second.status_detail = "Paused (System Suspend)";
+                m_store.UpsertTask(it->second);
+            }
+        }
+    }
 }
 
 void DownloadController::OnSystemResume() {
-    ResumeAllTasks();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& [id, t] : m_tasks) {
+        // Only resume tasks that were automatically paused due to system suspend (CTRL-02)
+        // User-paused tasks (pause_reason == kUser) remain strictly paused!
+        if (t.state == TaskState::kPaused && t.pause_reason == PauseReason::kSystemSuspend && !t.scheduled) {
+            t.state = TaskState::kQueued;
+            t.pause_reason = PauseReason::kNone;
+            t.status_detail = "Queued (Resumed after sleep)";
+            m_store.UpsertTask(t);
+        }
+    }
+    m_cv.notify_all();
 }
 
 std::vector<TaskModel> DownloadController::ListTasks() const {

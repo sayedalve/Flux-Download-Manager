@@ -5,6 +5,7 @@
 #include "common/json_mini.hpp"
 #include "common/logger.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #ifdef _WIN32
@@ -146,6 +147,43 @@ Result<void> IpcServer::Start() {
     if (m_running.load()) return Result<void>::Ok();
 
 #ifdef _WIN32
+    std::wstring wpipe(m_socket_path.begin(), m_socket_path.end());
+
+    PSECURITY_DESCRIPTOR pSD = nullptr;
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = FALSE;
+
+    std::string user_sid = GetCurrentUserSidString();
+    std::wstring sddl;
+    if (!user_sid.empty()) {
+        std::wstring wSid(user_sid.begin(), user_sid.end());
+        sddl = L"D:(A;;GA;;;" + wSid + L")(A;;GA;;;BA)";
+    } else {
+        sddl = L"D:(A;;GA;;;OW)(A;;GA;;;BA)";
+    }
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.c_str(), SDDL_REVISION_1, &pSD, nullptr)) {
+        sa.lpSecurityDescriptor = pSD;
+    }
+
+    HANDLE hFirst = CreateNamedPipeW(
+        wpipe.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        PIPE_UNLIMITED_INSTANCES,
+        65536,
+        65536,
+        50,
+        sa.lpSecurityDescriptor ? &sa : nullptr);
+    if (pSD) LocalFree(pSD);
+
+    if (hFirst == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        return Result<void>::Err("ERR_IPC_PIPE_CLAIM", "Failed to claim first pipe instance for " + m_socket_path + " (error=" + std::to_string(err) + ")");
+    }
+
+    m_first_pipe_handle = hFirst;
     m_running.store(true);
     m_accept_thread = std::thread(&IpcServer::AcceptLoop, this);
     return Result<void>::Ok();
@@ -183,6 +221,10 @@ Result<void> IpcServer::Start() {
 void IpcServer::Stop() {
     if (!m_running.exchange(false)) return;
 #ifdef _WIN32
+    if (m_first_pipe_handle != INVALID_HANDLE_VALUE) {
+        CloseHandle(m_first_pipe_handle);
+        m_first_pipe_handle = INVALID_HANDLE_VALUE;
+    }
     if (m_accept_thread.joinable()) {
         CancelSynchronousIo(m_accept_thread.native_handle());
         std::wstring wpipe(m_socket_path.begin(), m_socket_path.end());
@@ -193,6 +235,22 @@ void IpcServer::Stop() {
         CancelSynchronousIo(m_accept_thread.native_handle());
         m_accept_thread.join();
     }
+
+    {
+        std::lock_guard<std::mutex> lk(m_clients_mutex);
+        for (HANDLE h : m_active_pipe_handles) {
+            CancelIoEx(h, nullptr);
+            DisconnectNamedPipe(h);
+        }
+    }
+
+    for (auto& th : m_client_threads) {
+        if (th.joinable()) {
+            th.join();
+        }
+    }
+    m_client_threads.clear();
+    m_active_pipe_handles.clear();
 #else
     if (m_listen_fd >= 0) {
         ::shutdown(m_listen_fd, SHUT_RDWR);
@@ -203,6 +261,22 @@ void IpcServer::Stop() {
         m_accept_thread.join();
     }
     ::unlink(m_socket_path.c_str());
+
+    {
+        std::lock_guard<std::mutex> lk(m_clients_mutex);
+        for (int fd : m_active_client_fds) {
+            ::shutdown(fd, SHUT_RDWR);
+            ::close(fd);
+        }
+    }
+
+    for (auto& th : m_client_threads) {
+        if (th.joinable()) {
+            th.join();
+        }
+    }
+    m_client_threads.clear();
+    m_active_client_fds.clear();
 #endif
 }
 
@@ -228,49 +302,78 @@ void IpcServer::AcceptLoop() {
         sa.lpSecurityDescriptor = pSD;
     }
 
+    HANDLE hPipe = m_first_pipe_handle;
+    m_first_pipe_handle = INVALID_HANDLE_VALUE;
+
     while (m_running.load()) {
-        HANDLE hPipe = CreateNamedPipeW(
-            wpipe.c_str(),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-            PIPE_UNLIMITED_INSTANCES,
-            65536,
-            65536,
-            50,
-            sa.lpSecurityDescriptor ? &sa : nullptr);
         if (hPipe == INVALID_HANDLE_VALUE) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
+            hPipe = CreateNamedPipeW(
+                wpipe.c_str(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_UNLIMITED_INSTANCES,
+                65536,
+                65536,
+                50,
+                sa.lpSecurityDescriptor ? &sa : nullptr);
+            if (hPipe == INVALID_HANDLE_VALUE) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
         }
+
         BOOL connected = ConnectNamedPipe(hPipe, nullptr) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (!connected || !m_running.load()) {
             CloseHandle(hPipe);
+            hPipe = INVALID_HANDLE_VALUE;
             continue;
         }
-        std::thread([this, hPipe]() {
+
+        {
+            std::lock_guard<std::mutex> lk(m_clients_mutex);
+            m_active_pipe_handles.push_back(hPipe);
+        }
+
+        HANDLE clientPipe = hPipe;
+        hPipe = INVALID_HANDLE_VALUE;
+
+        std::thread t([this, clientPipe]() {
             while (m_running.load()) {
                 uint32_t msg_len = 0;
                 DWORD got = 0;
-                if (!ReadFile(hPipe, &msg_len, sizeof(msg_len), &got, nullptr) || got != sizeof(msg_len)) break;
+                if (!ReadFile(clientPipe, &msg_len, sizeof(msg_len), &got, nullptr) || got != sizeof(msg_len)) break;
                 if (msg_len == 0 || msg_len > 1048576) break;
                 std::string payload(msg_len, '\0');
                 DWORD total_read = 0;
                 while (total_read < msg_len) {
                     DWORD chunk = 0;
-                    if (!ReadFile(hPipe, payload.data() + total_read, msg_len - total_read, &chunk, nullptr) || chunk == 0) break;
+                    if (!ReadFile(clientPipe, payload.data() + total_read, msg_len - total_read, &chunk, nullptr) || chunk == 0) break;
                     total_read += chunk;
                 }
                 if (total_read != msg_len) break;
                 std::string resp = HandleJsonRpcMessage(payload);
                 uint32_t resp_len = static_cast<uint32_t>(resp.size());
                 DWORD written = 0;
-                if (!WriteFile(hPipe, &resp_len, sizeof(resp_len), &written, nullptr)) break;
-                if (!WriteFile(hPipe, resp.data(), resp_len, &written, nullptr)) break;
-                FlushFileBuffers(hPipe);
+                if (!WriteFile(clientPipe, &resp_len, sizeof(resp_len), &written, nullptr)) break;
+                if (!WriteFile(clientPipe, resp.data(), resp_len, &written, nullptr)) break;
+                FlushFileBuffers(clientPipe);
             }
-            DisconnectNamedPipe(hPipe);
-            CloseHandle(hPipe);
-        }).detach();
+            DisconnectNamedPipe(clientPipe);
+            CloseHandle(clientPipe);
+
+            {
+                std::lock_guard<std::mutex> lk(m_clients_mutex);
+                auto it = std::find(m_active_pipe_handles.begin(), m_active_pipe_handles.end(), clientPipe);
+                if (it != m_active_pipe_handles.end()) {
+                    m_active_pipe_handles.erase(it);
+                }
+            }
+        });
+
+        {
+            std::lock_guard<std::mutex> lk(m_clients_mutex);
+            m_client_threads.push_back(std::move(t));
+        }
     }
     if (pSD) {
         LocalFree(pSD);
@@ -290,7 +393,17 @@ void IpcServer::AcceptLoop() {
             if (!m_running.load()) break;
             continue;
         }
-        std::thread(&IpcServer::HandleClientConnection, this, client_fd).detach();
+
+        {
+            std::lock_guard<std::mutex> lk(m_clients_mutex);
+            m_active_client_fds.push_back(client_fd);
+        }
+
+        std::thread t(&IpcServer::HandleClientConnection, this, client_fd);
+        {
+            std::lock_guard<std::mutex> lk(m_clients_mutex);
+            m_client_threads.push_back(std::move(t));
+        }
     }
 #endif
 }
@@ -315,6 +428,14 @@ void IpcServer::HandleClientConnection(int client_fd) {
         if (::send(client_fd, resp.data(), resp.size(), 0) != static_cast<ssize_t>(resp.size())) break;
     }
     ::close(client_fd);
+
+    {
+        std::lock_guard<std::mutex> lk(m_clients_mutex);
+        auto it = std::find(m_active_client_fds.begin(), m_active_client_fds.end(), client_fd);
+        if (it != m_active_client_fds.end()) {
+            m_active_client_fds.erase(it);
+        }
+    }
 #else
     (void)client_fd;
 #endif
@@ -473,6 +594,24 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         if (manifest_url.empty()) manifest_url = params["url"].as_string();
         std::string cached_body = params["cachedManifestBody"].as_string();
 
+        if (stream_type == "HLS" && !cached_body.empty()) {
+            std::string_view trimmed = cached_body;
+            while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t' || trimmed.front() == '\r' || trimmed.front() == '\n')) {
+                trimmed.remove_prefix(1);
+            }
+            if (!trimmed.starts_with("#EXTM3U")) {
+                return MakeRpcError(id, -32602, "ERR_STREAM_INVALID_MANIFEST: Manifest body does not begin with #EXTM3U").dump();
+            }
+        } else if (stream_type == "DASH" && !cached_body.empty()) {
+            std::string_view trimmed = cached_body;
+            while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t' || trimmed.front() == '\r' || trimmed.front() == '\n')) {
+                trimmed.remove_prefix(1);
+            }
+            if (trimmed.find("<MPD") == std::string_view::npos && trimmed.find("<mpd") == std::string_view::npos) {
+                return MakeRpcError(id, -32602, "ERR_STREAM_INVALID_MANIFEST: Manifest body does not contain <MPD> root tag").dump();
+            }
+        }
+
         TaskModel t;
         if (stream_type == "DASH" || manifest_url.find(".mpd") != std::string::npos) {
             t.task_type = TaskType::kStreamDash;
@@ -520,6 +659,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         res["taskId"] = add_res.value->task_id;
         res["fileName"] = add_res.value->file_name;
         res["status"] = TaskStateToString(add_res.value->state);
+        res["taskType"] = params.contains("sourceType") ? params["sourceType"].as_string() : TaskTypeToString(add_res.value->task_type);
         return MakeRpcResult(id, std::move(res)).dump();
     }
 

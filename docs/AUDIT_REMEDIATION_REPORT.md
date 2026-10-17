@@ -5,7 +5,7 @@
 **Remediation Branch:** `fix/audit-remediation` (fast-forwarded and synchronized with `main`)  
 **Commit:** `a3ed953`  
 **Platform:** Windows 11 x64 (MSVC 19.41 / VS 2022 Community) & POSIX Cross-Platform Compatible  
-**Test Status:** 20 / 20 C++20 Unit & Regression Test Suites PASSED  
+**Test Status:** 27 / 27 C++20 Unit & Regression Test Suites PASSED (100% pass rate)  
 
 ---
 
@@ -172,14 +172,28 @@ All changes have been implemented in production C++20 code, accompanied by unit 
 | **Suite 19** | **`TestIpcSecurityDaclAndPathTraversal`** | **SEC-02 Named pipe SDDL & path traversal rejection** | **PASS** |
 | **Suite 20** | **`TestGlobalRateLimiting`** | **CTRL-01 Shared global token bucket rate limiting** | **PASS** |
 | **Suite 21** | **`TestRelativeAndProtocolRelativeRedirectResolution`** | **NET-03 RFC 3986 protocol-relative redirect resolution** | **PASS** |
+| **Suite 22** | **`TestCompleteSegmentRangeMapValidation`** | **COR-02 / COR-03 Multi-segment byte range boundary checks** | **PASS** |
+| **Suite 23** | **`TestPosixHttpChunkedDecoder`** | **NET-04 Streaming chunked transfer-encoding decoder** | **PASS** |
+| **Suite 24** | **`TestUrlParsingAndSecurityChecks`** | **SEC-04 Loopback, CGNAT & private IP resolution checks** | **PASS** |
+| **Suite 25** | **`TestIpcShutdownAndFirstPipeInstance`** | **SEC-02 First pipe instance exclusivity & clean shutdown** | **PASS** |
+| **Suite 26** | **`TestConflictPolicies`** | **File collision policies (auto-rename, overwrite, skip)** | **PASS** |
+| **Suite 27** | **`TestSystemSuspendResumeAndPauseReason`** | **CTRL-02 Selective suspend/resume (preserves user pause)** | **PASS** |
 
-**Summary: 21 / 21 Test Suites Passed (100% pass rate).**
+**Summary: 27 / 27 C++20 Test Suites Passed (100% pass rate).**
+
+### 5.2 End-to-End Integration & Benchmark Suites
+
+| Test Suite | Coverage | Status |
+|---|---|---|
+| `tests/run_all_integration_tests.py` (8 Suites) | Segmented HTTP ranges, non-range fallback, dropped connection recovery, HLS/DASH probing & muxing, Native Messaging RPC, AES-128 decryption, UI snapshot, and enforced 8-metric performance benchmarks | **PASS (8/8)** |
+| `tests/test_repair_pipeline_e2e.py` (10 Fixtures) | Real multi-world Chromium browser session (catch.js + content-script.js + background.js), direct PDF, ZIP with Alt-bypass, 302 redirect correlation, MP4/WebM detection, Closed Shadow DOM overlays, HLS master variant muxing, DASH MPD muxing, backed/unbacked blob discovery, and YouTube adaptive muxing | **PASS (10/10)** |
+| `tests/test_upstream_stream_worker.py` (11 Tests) | N_m3u8DL-RE worker binary verification, response file argument parsing, CLI schema compatibility, bundled FFmpeg discovery, manifest probing, worker sandboxing in Windows Job Object, and incompatible worker error handling | **PASS (11/11)** |
 
 ---
 
 ## 6. Build & Deployment Verification
 
-- **MSVC Build:** Native x64 Release builds of `flux.exe`, `flux-nmh.exe`, and `flux_unit_tests.exe` completed with 0 errors.
+- **MSVC Build:** Native x64 Release builds of `flux.exe`, `flux-nmh.exe`, `flux_unit_tests.exe`, and `N_m3u8DL-RE.exe` completed with 0 errors.
 - **CI Workflow (BUILD-01):** Pinned `runs-on: windows-2022` in `.github/workflows/windows-release.yml` guaranteeing Visual Studio 17 2022 availability on GitHub Actions runners.
 - **Git State:** All remediation commits pushed to remote `origin/fix/audit-remediation` and fast-forward merged to `origin/main`.
 - **UI Design System:** Dark UI matte charcoal theme preserved with zero regressions.

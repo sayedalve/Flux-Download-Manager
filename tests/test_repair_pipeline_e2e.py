@@ -34,6 +34,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 IS_WINDOWS = (os.name == "nt" or platform.system().lower().startswith("win"))
 EXE_EXT = ".exe" if IS_WINDOWS else ""
+os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
+os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
 
 def find_binary(name: str) -> Path:
@@ -71,10 +73,36 @@ def send_nmh_rpc(proc, obj):
     return json.loads(body.decode("utf-8"))
 
 
+def query_task_list_oneshot(env):
+    p = subprocess.Popen(
+        [str(NMH_BIN)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    res = send_nmh_rpc(p, {"jsonrpc": "2.0", "id": "poll", "method": "task.list", "params": {}})
+    p.stdin.close()
+    p.wait(timeout=2)
+    return res
+
+
 def wait_for_task(nmh_proc, task_id: str, timeout_s: float = 25.0) -> dict:
     deadline = time.time() + timeout_s
+    env = getattr(nmh_proc, "_flux_env", None) or os.environ.copy()
     while time.time() < deadline:
-        tlist = send_nmh_rpc(nmh_proc, {"jsonrpc": "2.0", "id": "poll", "method": "task.list", "params": {}})
+        tlist = None
+        if nmh_proc.poll() is None:
+            try:
+                tlist = send_nmh_rpc(nmh_proc, {"jsonrpc": "2.0", "id": "poll", "method": "task.list", "params": {}})
+            except Exception:
+                tlist = None
+        if tlist is None:
+            try:
+                tlist = query_task_list_oneshot(env)
+            except Exception:
+                time.sleep(0.1)
+                continue
         for t in tlist.get("result", {}).get("tasks", []):
             if t.get("taskId") == task_id and t.get("state") in ("COMPLETED", "FAILED", "CANCELED"):
                 return t
@@ -692,7 +720,7 @@ def main():
         meta = create_all_deterministic_fixtures(fixture_dir, base_url)
 
         daemon_proc = subprocess.Popen(
-            [str(FLUX_BIN), "--daemon", "--db", str(db_path), "--out", str(dl_dir), "--ipc-socket", sock_path],
+            [str(FLUX_BIN), "--daemon", "--db", str(db_path), "--out", str(dl_dir), "--ipc-socket", sock_path, "--allow-loopback"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -708,6 +736,7 @@ def main():
             stderr=subprocess.PIPE,
             env=env,
         )
+        nmh_proc._flux_env = env
 
         # Node helper that runs the real extension background/content/catch modules and sends RPCs through flux-nmh
         node_bridge_preamble = """
@@ -1074,7 +1103,7 @@ function callNativeHost(payload) {
         log_path = db_path.parent / "flux.log"
         assert log_path.exists(), "flux.log should exist"
         log_text = log_path.read_text(encoding="utf-8")
-        assert "Dispatching task=" in log_text and "YOUTUBE_EXTRACTION" in log_text, "Expected correlation & dispatch logs in flux.log"
+        assert "Dispatching task=" in log_text and "YOUTUBE_EXTRACTION" in log_text, f"Expected correlation & dispatch logs in flux.log. Actual log contents:\n{log_text}"
 
         print("\n=================================================================")
         print("  ALL 10 DETERMINISTIC FIXTURES & REAL CHROMIUM TESTS PASSED!    ")

@@ -47,21 +47,46 @@ jobs:
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1
 
-      - name: Configure CMake
+      - name: Preflight Toolchain & CMake Inspection
+        shell: powershell
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+          Write-Host "=== CMake Version ==="
+          cmake --version
+          Write-Host "`n=== MSVC Compiler (cl.exe) ==="
+          Get-Command cl.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          cl.exe 2>&1 | Select-Object -First 1
+          Write-Host "`n=== Available CMake Generators ==="
+          cmake --help
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          $helpText = (cmake --help | Out-String)
+          $gen = $null
+          if ($helpText -match '\*\s+(Visual Studio \d+ \d+)') {
+              $gen = $Matches[1]
+          } elseif ($helpText -match 'Visual Studio 17 2022') {
+              $gen = 'Visual Studio 17 2022'
+          } elseif ($helpText -match 'Visual Studio 18') {
+              $gen = 'Visual Studio 18'
+          }
+          if (-not $gen) {
+              throw "No compatible Visual Studio CMake generator found on runner!"
+          }
+          Write-Host "Configuring CMake with generator: $gen (x64)"
+          cmake -B build -G "$gen" -A x64 -DCMAKE_BUILD_TYPE=Release
 
       - name: Build Windows Targets
         run: |
-          cmake --build build --config Release --target openidm openidm-nmh openidm_unit_tests
+          cmake --build build --config Release --target flux flux-nmh flux_unit_tests openidm openidm-nmh openidm_unit_tests
 
       - name: Verify PE32+ Binaries & Subsystems
         shell: powershell
         run: |
           $bins = @(
-            @{ Path = "build/Release/openidm.exe"; ExpectedSubsystem = 2 },
-            @{ Path = "build/Release/openidm-nmh.exe"; ExpectedSubsystem = 3 },
-            @{ Path = "build/Release/openidm_unit_tests.exe"; ExpectedSubsystem = 3 }
+            @{ Path = "build/Release/flux.exe"; ExpectedSubsystem = 2 },
+            @{ Path = "build/Release/flux-nmh.exe"; ExpectedSubsystem = 3 },
+            @{ Path = "build/Release/flux_unit_tests.exe"; ExpectedSubsystem = 3 }
           )
           foreach ($b in $bins) {
             if (-not (Test-Path $b.Path)) {
@@ -88,10 +113,10 @@ jobs:
             Write-Host "Verified $($b.Path): AMD64 PE32+ Subsystem=$subsystem"
           }
 
-      - name: Run C++ Unit Tests (12 Suites)
+      - name: Run C++ Unit & Regression Tests
         shell: powershell
         run: |
-          .\build\Release\openidm_unit_tests.exe
+          .\build\Release\flux_unit_tests.exe
 
       - name: Run Browser Extension Detection Tests
         shell: powershell
@@ -111,39 +136,47 @@ jobs:
       - name: Compile Inno Setup Installer
         shell: powershell
         run: |
+          if (Test-Path "installer/flux.iss") {
+            $issPath = "installer/flux.iss"
+          } else {
+            $issPath = "installer/openidm.iss"
+          }
           if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/openidm.iss
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
           } elseif (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
-            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer/openidm.iss
+            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" $issPath
           } else {
             choco install innosetup -y
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/openidm.iss
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
           }
 
       - name: Package Standalone Portable Release
         shell: powershell
         run: |
-          $distDir = "dist/portable/OpenIDM-v0.2.0-win-x64"
+          $distDir = "dist/portable/Flux-v0.3.0-win-x64"
           New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-          Copy-Item "build/Release/openidm.exe" "$distDir/"
-          Copy-Item "build/Release/openidm-nmh.exe" "$distDir/"
+          Copy-Item "build/Release/flux.exe" "$distDir/Flux.exe"
+          Copy-Item "build/Release/flux-nmh.exe" "$distDir/"
           Copy-Item "tools/win-x64/N_m3u8DL-RE.exe" "$distDir/"
           Copy-Item "tools/win-x64/ffmpeg.exe" "$distDir/"
           Copy-Item -Recurse "extension" "$distDir/extension"
           Copy-Item "README.md" "$distDir/"
           Copy-Item "LICENSE" "$distDir/"
           Copy-Item "THIRD_PARTY_NOTICES.md" "$distDir/"
-          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/OpenIDM-v0.2.0-win-x64-portable.zip" -Force
-          Get-FileHash -Algorithm SHA256 "dist/OpenIDM-v0.2.0-win-x64-portable.zip", "dist/OpenIDM-Setup-x64-0.2.0.exe" | Out-File -Encoding utf8 "dist/SHA256SUMS.txt"
+          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/Flux-v0.3.0-win-x64-portable.zip" -Force
+          $setupExe = if (Test-Path "dist/Flux-Setup-x64-0.3.0.exe") { "dist/Flux-Setup-x64-0.3.0.exe" } elseif (Test-Path "dist/OpenIDM-Setup-x64-0.2.0.exe") { "dist/OpenIDM-Setup-x64-0.2.0.exe" } else { $null }
+          $hashFiles = @("dist/Flux-v0.3.0-win-x64-portable.zip")
+          if ($setupExe) { $hashFiles += $setupExe }
+          Get-FileHash -Algorithm SHA256 $hashFiles | Out-File -Encoding utf8 "dist/SHA256SUMS.txt"
           Get-Content "dist/SHA256SUMS.txt"
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: openidm-v0.2.0-windows-x64
+          name: flux-v0.3.0-windows-x64
           path: |
-            dist/OpenIDM-Setup-x64-0.2.0.exe
-            dist/OpenIDM-v0.2.0-win-x64-portable.zip
+            dist/*-Setup-*.exe
+            dist/Flux-v0.3.0-win-x64-portable.zip
             dist/SHA256SUMS.txt
             benchmarks/latest_metrics.json
             docs/BENCHMARK_REPORT.md

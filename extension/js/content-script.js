@@ -80,6 +80,9 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
     }
 
     const src = extractVideoElementSrc(video);
+    if (!src) {
+      continue;
+    }
     const isBlob = src.startsWith("blob:");
     const isDrm = Boolean(video.mediaKeys);
 

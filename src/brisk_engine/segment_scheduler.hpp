@@ -44,6 +44,10 @@ public:
     // Initialize either from fresh start (1 initial segment [0, total_bytes-1]) or saved resume segments
     void Initialize(const std::vector<Segment>& existing_segments = {});
 
+    // Validates that existing_segments forms a complete, non-overlapping partition of [0, total_bytes - 1]
+    // with valid cursors, no gaps, no overlaps, and consistent completion flags (FDM-002, TG-01).
+    static bool ValidateSegmentPartition(const std::vector<Segment>& segments, uint64_t total_bytes);
+
     // Claims an existing unassigned incomplete segment, OR dynamically splits the largest active segment
     // (Brisk's Dynamic Connection Spawn & Dynamic Connection Reuse / Work-Stealing).
     std::shared_ptr<LiveSegment> AcquireNextOrStealSegment(bool allow_split);

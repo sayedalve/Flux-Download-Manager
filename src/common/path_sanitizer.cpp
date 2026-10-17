@@ -361,19 +361,112 @@ Result<std::filesystem::path> PathSanitizer::CommitPartFile(
         }
     }
 
-    auto resolved = ResolveSafeOutputPath(save_dir, final_filename, policy);
-    if (!resolved.ok()) return resolved;
+    std::filesystem::path canonical_dir = std::filesystem::weakly_canonical(save_dir, ec);
+    std::filesystem::create_directories(canonical_dir, ec);
 
-    std::filesystem::path final_path = *resolved.value;
-    std::filesystem::rename(part_file, final_path, ec);
-    if (ec) {
-        std::filesystem::copy_file(part_file, final_path, std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) {
-            return Result<std::filesystem::path>::Err("ERR_STORAGE_COMMIT_FAILED", "Atomic rename failed: " + ec.message());
+    std::string safe_name = SanitizeFileName(final_filename);
+    std::filesystem::path initial_target = canonical_dir / safe_name;
+
+    // Helper for attempting an atomic non-replacing move
+    auto try_atomic_move_no_replace = [](const std::filesystem::path& src, const std::filesystem::path& dst) -> int {
+        // Return 0 on success, 1 on destination already exists, -1 on other failure
+#ifdef _WIN32
+        std::wstring wsrc = src.wstring();
+        std::wstring wdst = dst.wstring();
+        // MoveFileExW with flag 0 does NOT overwrite existing destination
+        if (MoveFileExW(wsrc.c_str(), wdst.c_str(), 0)) {
+            return 0;
         }
-        std::filesystem::remove(part_file, ec);
+        DWORD err = GetLastError();
+        if (err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS) {
+            return 1;
+        }
+        // If failed due to cross-volume, try CopyFileW with bFailIfExists = TRUE
+        if (err == ERROR_NOT_SAME_DEVICE) {
+            if (CopyFileW(wsrc.c_str(), wdst.c_str(), TRUE)) {
+                DeleteFileW(wsrc.c_str());
+                return 0;
+            }
+            DWORD copy_err = GetLastError();
+            if (copy_err == ERROR_ALREADY_EXISTS || copy_err == ERROR_FILE_EXISTS) {
+                return 1;
+            }
+        }
+        return -1;
+#else
+        std::error_code sec;
+        if (std::filesystem::exists(dst, sec)) {
+            return 1;
+        }
+        std::filesystem::rename(src, dst, sec);
+        if (!sec) return 0;
+        if (std::filesystem::exists(dst, sec)) return 1;
+        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::none, sec);
+        if (!sec) {
+            std::filesystem::remove(src, sec);
+            return 0;
+        }
+        if (sec.value() == EEXIST) return 1;
+        return -1;
+#endif
+    };
+
+    if (policy == ConflictPolicy::kFailIfExists) {
+        int mv = try_atomic_move_no_replace(part_file, initial_target);
+        if (mv == 0) {
+            return Result<std::filesystem::path>::Ok(initial_target);
+        }
+        if (mv == 1) {
+            return Result<std::filesystem::path>::Err("ERR_FILE_EXISTS", "Destination file already exists: " + initial_target.string());
+        }
+        return Result<std::filesystem::path>::Err("ERR_STORAGE_COMMIT_FAILED", "Failed to commit part file to: " + initial_target.string());
     }
-    return Result<std::filesystem::path>::Ok(final_path);
+
+    if (policy == ConflictPolicy::kOverwrite) {
+#ifdef _WIN32
+        std::wstring wsrc = part_file.wstring();
+        std::wstring wdst = initial_target.wstring();
+        if (MoveFileExW(wsrc.c_str(), wdst.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+            return Result<std::filesystem::path>::Ok(initial_target);
+        }
+        if (CopyFileW(wsrc.c_str(), wdst.c_str(), FALSE)) {
+            DeleteFileW(wsrc.c_str());
+            return Result<std::filesystem::path>::Ok(initial_target);
+        }
+        return Result<std::filesystem::path>::Err("ERR_STORAGE_COMMIT_FAILED", "Overwrite commit failed: " + std::to_string(GetLastError()));
+#else
+        std::filesystem::rename(part_file, initial_target, ec);
+        if (!ec) return Result<std::filesystem::path>::Ok(initial_target);
+        std::filesystem::copy_file(part_file, initial_target, std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec) {
+            std::filesystem::remove(part_file, ec);
+            return Result<std::filesystem::path>::Ok(initial_target);
+        }
+        return Result<std::filesystem::path>::Err("ERR_STORAGE_COMMIT_FAILED", "Overwrite commit failed: " + ec.message());
+#endif
+    }
+
+    // AutoRename policy:
+    int initial_mv = try_atomic_move_no_replace(part_file, initial_target);
+    if (initial_mv == 0) {
+        return Result<std::filesystem::path>::Ok(initial_target);
+    }
+
+    std::string stem = initial_target.stem().string();
+    std::string ext = initial_target.extension().string();
+    for (int i = 1; i <= 9999; ++i) {
+        std::filesystem::path candidate = canonical_dir / (stem + " (" + std::to_string(i) + ")" + ext);
+        int cand_mv = try_atomic_move_no_replace(part_file, candidate);
+        if (cand_mv == 0) {
+            return Result<std::filesystem::path>::Ok(candidate);
+        }
+        if (cand_mv == 1) {
+            continue; // Candidate already exists; try next slot
+        }
+        return Result<std::filesystem::path>::Err("ERR_STORAGE_COMMIT_FAILED", "Failed to commit candidate: " + candidate.string());
+    }
+
+    return Result<std::filesystem::path>::Err("ERR_FILE_RENAME_EXHAUSTED", "Could not find free auto-rename slot");
 }
 
 std::filesystem::path PathSanitizer::GetExecutableDir(const char* argv0) {

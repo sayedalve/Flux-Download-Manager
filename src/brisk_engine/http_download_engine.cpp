@@ -277,22 +277,19 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             task.downloaded_bytes = 0;
         } else {
             uint64_t actual_part_sz = std::filesystem::file_size(part_path, ec);
-            bool segments_consistent = !task.segments.empty();
+            bool segments_consistent = SegmentScheduler::ValidateSegmentPartition(task.segments, total_bytes);
             uint64_t verified_dl_bytes = 0;
-            for (const auto& s : task.segments) {
-                if (s.start_offset > s.end_offset || (total_bytes > 0 && s.end_offset >= total_bytes) ||
-                    s.current_offset < s.start_offset || s.current_offset > (s.end_offset + 1)) {
-                    segments_consistent = false;
-                    break;
+            if (segments_consistent) {
+                for (const auto& s : task.segments) {
+                    if (s.current_offset > s.start_offset && s.current_offset > actual_part_sz) {
+                        segments_consistent = false;
+                        break;
+                    }
+                    verified_dl_bytes += (s.current_offset - s.start_offset);
                 }
-                if (s.current_offset > s.start_offset && s.current_offset > actual_part_sz) {
-                    segments_consistent = false;
-                    break;
-                }
-                verified_dl_bytes += (s.current_offset - s.start_offset);
             }
             if (!segments_consistent) {
-                OPENIDM_LOG_WARN("HttpEngine", "Segment metadata inconsistent with partial file on disk; resetting segments");
+                OPENIDM_LOG_WARN("HttpEngine", "Segment metadata invalid or inconsistent with partial file on disk; resetting segments");
                 is_resume = false;
                 task.segments.clear();
                 task.downloaded_bytes = 0;
@@ -646,7 +643,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         }
     }
 
-    auto commit_res = PathSanitizer::CommitPartFile(part_path, task.save_dir, task.file_name, ConflictPolicy::kAutoRename, task.total_bytes);
+    auto commit_res = PathSanitizer::CommitPartFile(part_path, task.save_dir, task.file_name, task.conflict_policy, task.total_bytes);
     if (!commit_res.ok()) {
         task.state = TaskState::kFailed;
         task.error_code = commit_res.error->code;

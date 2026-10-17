@@ -179,6 +179,8 @@ Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe"
 Copy-Item -Force (Join-Path $BuildDir "flux-nmh.exe") (Join-Path $DistDir "flux-nmh.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
+New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "extension") | Out-Null
+Copy-Item -Recurse -Force (Join-Path $RepoRoot "extension\*") (Join-Path $DistDir "extension\")
 
 $CheckFiles = @(
     (Join-Path $DistDir "Flux.exe"),

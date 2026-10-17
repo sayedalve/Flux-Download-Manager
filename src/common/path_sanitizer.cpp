@@ -15,6 +15,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 

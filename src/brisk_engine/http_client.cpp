@@ -780,6 +780,20 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
 
         int sock = -1;
         for (struct addrinfo* rp = res; rp != nullptr; rp = rp->ai_next) {
+            if (started_on_public_host && !allow_loopback_redirect) {
+                if (rp->ai_family == AF_INET) {
+                    auto* sin = reinterpret_cast<struct sockaddr_in*>(rp->ai_addr);
+                    if (HttpClient::IsPrivateOrLoopbackIp(ntohl(sin->sin_addr.s_addr))) {
+                        continue;
+                    }
+                } else if (rp->ai_family == AF_INET6) {
+                    auto* sin6 = reinterpret_cast<struct sockaddr_in6*>(rp->ai_addr);
+                    if (HttpClient::IsPrivateOrLoopbackIpv6(reinterpret_cast<const uint8_t*>(&sin6->sin6_addr))) {
+                        continue;
+                    }
+                }
+            }
+
             sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
             if (sock < 0) continue;
 

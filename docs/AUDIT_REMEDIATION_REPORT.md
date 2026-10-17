@@ -3,9 +3,9 @@
 **Date:** October 17, 2026  
 **Audited Baseline Revision:** `1fc5aeb`  
 **Remediation Branch:** `fix/audit-remediation` (fast-forwarded and synchronized with `main`)  
-**Commit:** `a3ed953`  
+**Commit:** `7bbe706`  
 **Platform:** Windows 11 x64 (MSVC 19.41 / VS 2022 Community) & POSIX Cross-Platform Compatible  
-**Test Status:** 27 / 27 C++20 Unit & Regression Test Suites PASSED (100% pass rate)  
+**Test Status:** 70 / 70 Automated Suites & Fixtures PASSED (100% pass rate)  
 
 ---
 
@@ -185,9 +185,11 @@ All changes have been implemented in production C++20 code, accompanied by unit 
 
 | Test Suite | Coverage | Status |
 |---|---|---|
+| `tests/test_extension_detection.js` (11 Suites) | Manifest V3 service worker session recovery, content-script video readiness detection, closed Shadow DOM overlays, link-click interception, and Alt-key download bypass | **PASS (11/11)** |
 | `tests/run_all_integration_tests.py` (8 Suites) | Segmented HTTP ranges, non-range fallback, dropped connection recovery, HLS/DASH probing & muxing, Native Messaging RPC, AES-128 decryption, UI snapshot, and enforced 8-metric performance benchmarks | **PASS (8/8)** |
 | `tests/test_repair_pipeline_e2e.py` (10 Fixtures) | Real multi-world Chromium browser session (catch.js + content-script.js + background.js), direct PDF, ZIP with Alt-bypass, 302 redirect correlation, MP4/WebM detection, Closed Shadow DOM overlays, HLS master variant muxing, DASH MPD muxing, backed/unbacked blob discovery, and YouTube adaptive muxing | **PASS (10/10)** |
 | `tests/test_upstream_stream_worker.py` (11 Tests) | N_m3u8DL-RE worker binary verification, response file argument parsing, CLI schema compatibility, bundled FFmpeg discovery, manifest probing, worker sandboxing in Windows Job Object, and incompatible worker error handling | **PASS (11/11)** |
+| `tests/test_dist_portable.py` (3 Tests) | Production standalone dist/Flux.exe execution: ordinary 2 MiB file download with SHA-256 validation, HLS master manifest track probing, and MPEG-DASH stream probing | **PASS (3/3)** |
 
 ---
 

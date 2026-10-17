@@ -393,23 +393,61 @@ Result<std::filesystem::path> PathSanitizer::CommitPartFile(
             if (copy_err == ERROR_ALREADY_EXISTS || copy_err == ERROR_FILE_EXISTS) {
                 return 1;
             }
+            // Clean up potentially incomplete destination file on failure
+            DeleteFileW(wdst.c_str());
         }
         return -1;
 #else
-        std::error_code sec;
-        if (std::filesystem::exists(dst, sec)) {
-            return 1;
-        }
-        std::filesystem::rename(src, dst, sec);
-        if (!sec) return 0;
-        if (std::filesystem::exists(dst, sec)) return 1;
-        std::filesystem::copy_file(src, dst, std::filesystem::copy_options::none, sec);
-        if (!sec) {
-            std::filesystem::remove(src, sec);
+        // POSIX Atomic non-replacing move:
+        // 1. Try link(src, dst) which is atomic in POSIX kernel and fails with EEXIST if dst exists.
+        //    Crucially, it never silently overwrites dst.
+        if (::link(src.c_str(), dst.c_str()) == 0) {
+            ::unlink(src.c_str());
             return 0;
         }
-        if (sec.value() == EEXIST) return 1;
-        return -1;
+        if (errno == EEXIST) {
+            return 1;
+        }
+
+        // 2. Cross-device (EXDEV) or filesystem where link() is rejected (e.g., FAT/exFAT):
+        //    Atomically create dst exclusively with O_CREAT | O_EXCL to prevent concurrent races.
+        int dst_fd = ::open(dst.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (dst_fd < 0) {
+            if (errno == EEXIST) return 1;
+            return -1;
+        }
+
+        int src_fd = ::open(src.c_str(), O_RDONLY);
+        if (src_fd < 0) {
+            ::close(dst_fd);
+            ::unlink(dst.c_str());
+            return -1;
+        }
+
+        char buf[65536];
+        bool copy_ok = true;
+        while (true) {
+            ssize_t n = ::read(src_fd, buf, sizeof(buf));
+            if (n < 0) { copy_ok = false; break; }
+            if (n == 0) break;
+            ssize_t written = 0;
+            while (written < n) {
+                ssize_t w = ::write(dst_fd, buf + written, n - written);
+                if (w <= 0) { copy_ok = false; break; }
+                written += w;
+            }
+            if (!copy_ok) break;
+        }
+        ::close(src_fd);
+        ::close(dst_fd);
+
+        if (copy_ok) {
+            ::unlink(src.c_str());
+            return 0;
+        } else {
+            ::unlink(dst.c_str()); // Clean up partial output on failure!
+            return -1;
+        }
 #endif
     };
 

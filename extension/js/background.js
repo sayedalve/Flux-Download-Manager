@@ -781,6 +781,27 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     baseTitle = `${baseTitle} [${effectiveResolution}]`.trim();
   }
 
+  const headers = Object.assign({}, candidate.headers || {});
+  if (!headers.Referer && !headers.referer && candidate.tabUrl) {
+    headers.Referer = candidate.tabUrl;
+  }
+  if (!headers.Cookie && !headers.cookie && typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+    try {
+      const cookieUrl = candidate.tabUrl || candidate.url || targetManifestUrl || "";
+      if (cookieUrl && (cookieUrl.startsWith("http://") || cookieUrl.startsWith("https://"))) {
+        const cookieList = await new Promise((resolve) => {
+          chrome.cookies.getAll({ url: cookieUrl }, (cList) => {
+            if (chrome.runtime) void chrome.runtime.lastError;
+            resolve(cList || []);
+          });
+        });
+        if (cookieList && cookieList.length > 0) {
+          headers.Cookie = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
+        }
+      }
+    } catch (_) {}
+  }
+
   const params = {
     candidateId: candidate.candidateId || "",
     correlationId,
@@ -804,7 +825,7 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     subtitleFilter: options.subtitleFilter || "all",
     customKeyHex: options.customKeyHex || "",
     cachedManifestBody: validCachedManifest || (sourceType === SourceType.YOUTUBE_EXTRACTION ? extractorJson : "") || "",
-    headers: candidate.headers || {}
+    headers
   };
 
   logPipelineStage(correlationId, "MEDIA_SUBMIT_INITIATED", {
@@ -843,13 +864,21 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
 var submitMediaCandidateToOpenIDM = submitMediaCandidateToFlux;
 
 function resolveCandidateForDownloadRequest(tabId, msg, sender) {
-  const tabList = G.cacheData.get(tabId) || [];
+  let tabList = G.cacheData.get(tabId) || [];
   const effectiveTabUrl = msg.tabUrl || (sender && sender.tab && sender.tab.url) || G.tabUrlMap.get(tabId) || "";
   const effectiveTitle = (msg.pageTitle || (sender && sender.tab && sender.tab.title) || "video").replace(/\s*-\s*YouTube$/i, "").trim();
 
   // 1. Explicit candidateId match (e.g. from Popup UI or resolved video overlay)
   if (msg.candidateId) {
-    const byId = tabList.find(c => c.candidateId === msg.candidateId);
+    let byId = tabList.find(c => c.candidateId === msg.candidateId);
+    if (!byId) {
+      for (const [tId, cList] of G.cacheData.entries()) {
+        if (Array.isArray(cList)) {
+          byId = cList.find(c => c.candidateId === msg.candidateId);
+          if (byId) break;
+        }
+      }
+    }
     if (byId) return { candidate: byId };
   }
 
@@ -878,21 +907,37 @@ function resolveCandidateForDownloadRequest(tabId, msg, sender) {
     };
   }
 
-  // 3. Highest-confidence detected candidate on this tab (for MSE blob: videos like YouTube, HLS.js, dash.js)
+  // 3. Fallback candidate search across all cached tabs if current tabList is empty
+  if (tabList.length === 0 && effectiveTabUrl) {
+    for (const [tId, cList] of G.cacheData.entries()) {
+      if (tId !== tabId && Array.isArray(cList)) {
+        const matching = cList.filter(c => c.tabUrl === effectiveTabUrl);
+        if (matching.length > 0) {
+          tabList = matching;
+          break;
+        }
+      }
+    }
+  }
+
+  // 4. Highest-confidence detected candidate on this tab (prioritizing video / streams over stray audio)
   if (tabList.length > 0) {
-    const best = tabList[0];
+    const nonAudio = tabList.filter(c => !c.isAudioOnly);
+    const pool = nonAudio.length > 0 ? nonAudio : tabList;
+    const streams = pool.filter(c => c.sourceType === SourceType.YOUTUBE_EXTRACTION || c.streamType === "YOUTUBE" || c.streamType === "HLS" || c.streamType === "DASH");
+    const best = (streams.length > 0 ? streams[0] : pool[0]);
     if (effectiveTitle && (!best.pageTitle || best.pageTitle === "video")) {
       best.pageTitle = effectiveTitle;
     }
     return { candidate: best };
   }
 
-  // 4. Check if the page reported a specific player error (e.g. YouTube unplayable / private / DRM video)
+  // 5. Check if the page reported a specific player error (e.g. YouTube unplayable / private / DRM video)
   if (G.playerErrors && G.playerErrors.has(tabId)) {
     return { error: G.playerErrors.get(tabId) };
   }
 
-  // 5. If on a valid YouTube watch/shorts/embed URL, route via YOUTUBE_EXTRACTION worker
+  // 6. If on a valid YouTube watch/shorts/embed URL, route via YOUTUBE_EXTRACTION worker
   const targetPageUrl = effectiveTabUrl || msg.frameUrl || msg.url || "";
   if (isYouTubeWatchOrShortsUrl(targetPageUrl)) {
     const videoId = extractYouTubeVideoId(targetPageUrl);
@@ -912,7 +957,7 @@ function resolveCandidateForDownloadRequest(tabId, msg, sender) {
     return { candidate: ytCand };
   }
 
-  // 6. Unresolved blob: video with no manifest or network stream
+  // 7. Unresolved blob: video with no manifest or network stream
   if (msg.isMseBlob || (msg.blobUrl && msg.blobUrl.startsWith("blob:"))) {
     return {
       error: "No supported download source found for this blob: video player."

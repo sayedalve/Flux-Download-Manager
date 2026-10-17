@@ -33,6 +33,14 @@ set(FLUX_CORE_SOURCES
     src/common/logger.cpp
     src/common/crypto_utils.cpp
     src/storage/sqlite_store.cpp
+    src/storage/import_export.cpp
+    src/archive/zip_preview.cpp
+    src/security/antivirus_scanner.cpp
+    src/crawler/site_grabber.cpp
+    src/engine_ftp/ftp_client.cpp
+    src/engine_torrent/torrent_parser.cpp
+    src/engine_torrent/torrent_engine.cpp
+    src/engine_stream/rtsp_mms_adapter.cpp
     src/brisk_engine/segment_scheduler.cpp
     src/brisk_engine/http_client.cpp
     src/brisk_engine/http_download_engine.cpp
@@ -49,7 +57,7 @@ endif()
 
 # Primary Flux Targets
 add_executable(flux ${FLUX_CORE_SOURCES} src/app/main.cpp ${FLUX_RC_SOURCES})
-add_executable(flux-nmh ${FLUX_CORE_SOURCES} src/nmh/main.cpp ${FLUX_RC_SOURCES})
+add_executable(flux-nmh src/nmh/main.cpp ${FLUX_RC_SOURCES})
 add_executable(flux_unit_tests ${FLUX_CORE_SOURCES} tests/cpp/unit_tests.cpp)
 add_executable(N_m3u8DL-RE src/brisk_engine/http_client.cpp src/worker_stream/nm3u8dl_re_worker.cpp)
 
@@ -58,21 +66,21 @@ add_dependencies(flux_unit_tests N_m3u8DL-RE)
 
 # Legacy compatibility aliases for existing harnesses
 add_executable(openidm ${FLUX_CORE_SOURCES} src/app/main.cpp ${FLUX_RC_SOURCES})
-add_executable(openidm-nmh ${FLUX_CORE_SOURCES} src/nmh/main.cpp ${FLUX_RC_SOURCES})
+add_executable(openidm-nmh src/nmh/main.cpp ${FLUX_RC_SOURCES})
 add_executable(openidm_unit_tests ${FLUX_CORE_SOURCES} tests/cpp/unit_tests.cpp)
 add_dependencies(openidm_unit_tests N_m3u8DL-RE)
 
 if(WIN32)
     set_target_properties(flux PROPERTIES WIN32_EXECUTABLE TRUE)
     set_target_properties(openidm PROPERTIES WIN32_EXECUTABLE TRUE)
-    target_link_libraries(flux PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi)
-    target_link_libraries(flux-nmh PRIVATE sqlite3 advapi32 user32 winhttp crypt32 bcrypt)
-    target_link_libraries(flux_unit_tests PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi)
+    target_link_libraries(flux PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi ws2_32)
+    target_link_libraries(flux-nmh PRIVATE advapi32)
+    target_link_libraries(flux_unit_tests PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi ws2_32)
     target_link_libraries(N_m3u8DL-RE PRIVATE winhttp bcrypt crypt32)
 
-    target_link_libraries(openidm PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi)
-    target_link_libraries(openidm-nmh PRIVATE sqlite3 advapi32 user32 winhttp crypt32 bcrypt)
-    target_link_libraries(openidm_unit_tests PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi)
+    target_link_libraries(openidm PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi ws2_32)
+    target_link_libraries(openidm-nmh PRIVATE advapi32)
+    target_link_libraries(openidm_unit_tests PRIVATE sqlite3 winhttp comctl32 crypt32 bcrypt shell32 ole32 user32 gdi32 dwmapi ws2_32)
 else()
     find_package(OpenSSL REQUIRED)
     target_link_libraries(flux PRIVATE sqlite3 OpenSSL::SSL OpenSSL::Crypto pthread)

@@ -14,6 +14,15 @@
 #include "common/path_sanitizer.hpp"
 #include "core/download_controller.hpp"
 #include "engine_stream/nm3u8dl_re_adapter.hpp"
+#include "archive/zip_preview.hpp"
+#include "crawler/site_grabber.hpp"
+#include "engine_ftp/ftp_client.hpp"
+#include "engine_stream/rtsp_mms_adapter.hpp"
+#include "engine_torrent/bencode.hpp"
+#include "engine_torrent/torrent_engine.hpp"
+#include "engine_torrent/torrent_parser.hpp"
+#include "security/antivirus_scanner.hpp"
+#include "storage/import_export.hpp"
 #include "storage/sqlite_store.hpp"
 #include "ui/design_system.hpp"
 #include "ui/win32_main_window.hpp"
@@ -1554,11 +1563,243 @@ bool TestStreamContainerValidation() {
     return true;
 }
 
+bool TestFtpClientParsingAndCommands() {
+    using namespace openidm::ftp;
+
+    auto res1 = FtpUrl::Parse("ftp://ftp.example.com/pub/files/archive.tar.gz");
+    ASSERT_TRUE(res1.ok(), "Parse standard FTP URL");
+    ASSERT_TRUE(res1.value->scheme == "ftp", "FTP scheme");
+    ASSERT_TRUE(res1.value->host == "ftp.example.com", "FTP host");
+    ASSERT_TRUE(res1.value->port == 21, "Default FTP port 21");
+    ASSERT_TRUE(res1.value->remote_path == "/pub/files/archive.tar.gz", "Remote path");
+    ASSERT_TRUE(res1.value->file_name == "archive.tar.gz", "Filename");
+    ASSERT_TRUE(res1.value->user == "anonymous", "Default user anonymous");
+
+    auto res2 = FtpUrl::Parse("ftps://alice:secret123@secure.ftp.org:990/data/report.pdf");
+    ASSERT_TRUE(res2.ok(), "Parse FTPS URL with user/pass and port");
+    ASSERT_TRUE(res2.value->scheme == "ftps", "FTPS scheme");
+    ASSERT_TRUE(res2.value->host == "secure.ftp.org", "FTPS host");
+    ASSERT_TRUE(res2.value->port == 990, "FTPS port 990");
+    ASSERT_TRUE(res2.value->user == "alice", "Custom user");
+    ASSERT_TRUE(res2.value->password == "secret123", "Custom password");
+    ASSERT_TRUE(res2.value->file_name == "report.pdf", "Filename");
+
+    auto res_invalid = FtpUrl::Parse("http://not-ftp.com/test.bin");
+    ASSERT_TRUE(!res_invalid.ok(), "Reject non-FTP URL");
+    return true;
+}
+
+bool TestBencodeAndTorrentParser() {
+    using namespace openidm::torrent;
+
+    // 1. Bencode integer, string, list, dict
+    auto int_res = BencodeParser::Decode("i42e");
+    ASSERT_TRUE(int_res.ok() && int_res.value->as_int() == 42, "Bencode int 42");
+
+    auto str_res = BencodeParser::Decode("4:flux");
+    ASSERT_TRUE(str_res.ok() && str_res.value->as_string() == "flux", "Bencode string 'flux'");
+
+    auto list_res = BencodeParser::Decode("li1ei2e3:abce");
+    ASSERT_TRUE(list_res.ok() && list_res.value->as_list().size() == 3, "Bencode list [1, 2, 'abc']");
+
+    auto dict_res = BencodeParser::Decode("d4:name4:flux4:porti6881ee");
+    ASSERT_TRUE(dict_res.ok() && dict_res.value->as_dict().size() == 2, "Bencode dict");
+    ASSERT_TRUE(dict_res.value->contains("name") && (*dict_res.value)["name"].as_string() == "flux", "Dict 'name'");
+    ASSERT_TRUE(dict_res.value->contains("port") && (*dict_res.value)["port"].as_int() == 6881, "Dict 'port'");
+
+    // Re-encode
+    std::string encoded = BencodeParser::Encode(dict_res.value.value());
+    ASSERT_TRUE(encoded == "d4:name4:flux4:porti6881ee", "Bencode re-encode matches input");
+
+    // 2. Magnet Link Parsing
+    std::string magnet = "magnet:?xt=urn:btih:4a7d65b7f9a838528990c76892e85a6a2360a7e0&dn=Ubuntu_24.04_LTS&tr=http%3A%2F%2Ftracker.example.com%2Fannounce";
+    auto mag_res = TorrentParser::ParseMagnetUri(magnet);
+    ASSERT_TRUE(mag_res.ok(), "Parse magnet link");
+    ASSERT_TRUE(mag_res.value->info_hash_hex == "4a7d65b7f9a838528990c76892e85a6a2360a7e0", "Magnet info_hash hex");
+    ASSERT_TRUE(mag_res.value->name == "Ubuntu_24.04_LTS", "Magnet display name");
+    ASSERT_TRUE(mag_res.value->announce == "http://tracker.example.com/announce", "Magnet tracker announce URL");
+
+    // Base32 Magnet
+    std::string mag_b32 = "magnet:?xt=urn:btih:JJOWLN7ZVIOFFCKQY5UJFYU2NIRQBJ7A&dn=TestBase32";
+    auto mag_b32_res = TorrentParser::ParseMagnetUri(mag_b32);
+    ASSERT_TRUE(mag_b32_res.ok(), "Parse Base32 magnet link");
+    ASSERT_TRUE(mag_b32_res.value->info_hash_hex.size() == 40, "Base32 converted to 40 hex chars");
+
+    // 3. Piece SHA-1 Verification
+    const char test_data[] = "BitTorrent Piece Validation Test Block";
+    std::string expected_sha1 = openidm::CryptoUtils::ComputeBufferSha1Hex(std::string_view(test_data, sizeof(test_data) - 1));
+    ASSERT_TRUE(TorrentParser::VerifyPieceHex(reinterpret_cast<const uint8_t*>(test_data), sizeof(test_data) - 1, expected_sha1), "VerifyPieceHex matches");
+    ASSERT_TRUE(!TorrentParser::VerifyPieceHex(reinterpret_cast<const uint8_t*>("corrupt data"), 12, expected_sha1), "Corrupt piece rejected");
+    return true;
+}
+
+bool TestRtspMmsStreamDetection() {
+    using namespace openidm::stream;
+
+    ASSERT_TRUE(RtspMmsAdapter::IsStreamUrl("rtsp://media.example.com/live/ch1"), "rtsp:// is stream");
+    ASSERT_TRUE(RtspMmsAdapter::IsStreamUrl("rtsps://media.example.com:443/live"), "rtsps:// is stream");
+    ASSERT_TRUE(RtspMmsAdapter::IsStreamUrl("mms://stream.example.com/broadcast"), "mms:// is stream");
+    ASSERT_TRUE(RtspMmsAdapter::IsStreamUrl("rtmp://live.twitch.tv/app/streamkey"), "rtmp:// is stream");
+    ASSERT_TRUE(!RtspMmsAdapter::IsStreamUrl("https://example.com/video.mp4"), "https MP4 is not raw rtsp/mms stream");
+    ASSERT_TRUE(!RtspMmsAdapter::IsStreamUrl("ftp://ftp.example.com/file.bin"), "ftp is not rtsp/mms stream");
+    return true;
+}
+
+bool TestSiteGrabberCrawlerAndSsrf() {
+    using namespace openidm::crawler;
+
+    // 1. URL Resolution
+    ASSERT_TRUE(SiteGrabber::ResolveUrl("https://example.com/docs/page.html", "sub.html") == "https://example.com/docs/sub.html", "Relative path resolution");
+    ASSERT_TRUE(SiteGrabber::ResolveUrl("https://example.com/docs/page.html", "/images/logo.png") == "https://example.com/images/logo.png", "Root-relative path resolution");
+    ASSERT_TRUE(SiteGrabber::ResolveUrl("https://example.com/docs/page.html", "//cdn.example.com/asset.js") == "https://cdn.example.com/asset.js", "Protocol-relative URL");
+    ASSERT_TRUE(SiteGrabber::ResolveUrl("https://example.com/page.html", "file.pdf#section2") == "https://example.com/file.pdf", "Strip fragment");
+    ASSERT_TRUE(SiteGrabber::ResolveUrl("https://example.com/", "javascript:void(0)").empty(), "Ignore javascript: pseudo-protocol");
+
+    // 2. HTML link extraction
+    std::string html = R"(
+        <html>
+        <body>
+            <a href="/downloads/setup.exe">Download Installer</a>
+            <img src="banner.jpg" alt="Banner"/>
+            <a href="https://example.com/manual.pdf">PDF Manual</a>
+            <video src="/videos/intro.mp4"></video>
+        </body>
+        </html>
+    )";
+    auto urls = SiteGrabber::ExtractUrlsFromHtml(html, "https://example.com/main/");
+    ASSERT_TRUE(urls.size() == 4, "Extracted 4 links/media from HTML");
+
+    // 3. Category & Extension Filter Matching
+    SiteGrabberConfig cfg;
+    cfg.filter_categories = {"Documents", "Images"};
+    std::string cat;
+    ASSERT_TRUE(SiteGrabber::MatchesFilter("https://example.com/manual.pdf", cfg, &cat) && cat == "Documents", "Matches Documents category");
+    ASSERT_TRUE(SiteGrabber::MatchesFilter("https://example.com/photo.png", cfg, &cat) && cat == "Images", "Matches Images category");
+    ASSERT_TRUE(!SiteGrabber::MatchesFilter("https://example.com/setup.exe", cfg, &cat), "Rejects Programs when not in filter");
+
+    // 4. SSRF Guard on Crawler Start URL
+    SiteGrabberConfig ssrf_cfg;
+    ssrf_cfg.start_url = "http://127.0.0.1:8080/admin";
+    ssrf_cfg.allow_loopback = false;
+    std::atomic<bool> cancel{false};
+    auto crawl_res = SiteGrabber::Crawl(ssrf_cfg, cancel);
+    ASSERT_TRUE(!crawl_res.ok() && crawl_res.error->code == "ERR_SSRF_BLOCKED", "Crawler blocks SSRF to loopback");
+    return true;
+}
+
+bool TestZipArchivePreviewAndSecurity() {
+    using namespace openidm::archive;
+
+    // 1. Zip Slip Path Traversal Guard
+    ASSERT_TRUE(ZipPreviewer::IsZipSlipPath("../../etc/shadow"), "Detect ../ traversal");
+    ASSERT_TRUE(ZipPreviewer::IsZipSlipPath("..\\..\\Windows\\System32\\calc.exe"), "Detect ..\\ traversal");
+    ASSERT_TRUE(ZipPreviewer::IsZipSlipPath("/etc/passwd"), "Detect leading slash");
+    ASSERT_TRUE(ZipPreviewer::IsZipSlipPath("C:\\autoexec.bat"), "Detect drive letter");
+    ASSERT_TRUE(ZipPreviewer::IsZipSlipPath("report.pdf:Zone.Identifier"), "Detect NTFS ADS colon");
+    ASSERT_TRUE(!ZipPreviewer::IsZipSlipPath("docs/readme.txt"), "Safe relative path allowed");
+    ASSERT_TRUE(!ZipPreviewer::IsZipSlipPath("images/photo.png"), "Safe nested path allowed");
+
+    // 2. Synthetic Valid ZIP Archive in Memory
+    // Construct Central Directory Header + EOCD record
+    std::vector<uint8_t> zip_buf;
+    uint8_t cd_hdr[] = {
+        0x50, 0x4b, 0x01, 0x02, // signature
+        0x14, 0x00,             // version made by (2.0)
+        0x14, 0x00,             // version needed (2.0)
+        0x00, 0x00,             // flags (no encryption)
+        0x08, 0x00,             // compression (8 = deflated)
+        0x00, 0x00, 0x00, 0x00, // mod time/date
+        0x12, 0x34, 0x56, 0x78, // crc-32
+        0x20, 0x00, 0x00, 0x00, // compressed size (32 bytes)
+        0x64, 0x00, 0x00, 0x00, // uncompressed size (100 bytes)
+        0x08, 0x00,             // filename length (8)
+        0x00, 0x00,             // extra length (0)
+        0x00, 0x00,             // comment length (0)
+        0x00, 0x00,             // disk start (0)
+        0x00, 0x00,             // internal attrs
+        0x00, 0x00, 0x00, 0x00, // external attrs
+        0x00, 0x00, 0x00, 0x00  // local header offset
+    };
+    zip_buf.insert(zip_buf.end(), cd_hdr, cd_hdr + sizeof(cd_hdr));
+    const char fn[] = "test.txt";
+    zip_buf.insert(zip_buf.end(), fn, fn + 8);
+
+    auto summary_res = ZipPreviewer::InspectBuffer(zip_buf.data(), zip_buf.size());
+    ASSERT_TRUE(summary_res.ok(), "InspectBuffer parses Central Directory header");
+    ASSERT_TRUE(summary_res.value->total_files == 1, "Total files is 1");
+    ASSERT_TRUE(summary_res.value->entries[0].file_path == "test.txt", "Entry filename");
+    ASSERT_TRUE(summary_res.value->entries[0].uncompressed_size == 100, "Uncompressed size 100");
+    ASSERT_TRUE(summary_res.value->entries[0].compressed_size == 32, "Compressed size 32");
+    ASSERT_TRUE(summary_res.value->entries[0].compression_method == 8, "Compression method 8 (Deflated)");
+    ASSERT_TRUE(!summary_res.value->entries[0].is_encrypted, "Not encrypted");
+    return true;
+}
+
+bool TestTaskImportExportAndMultiQueue() {
+    using namespace openidm::storage;
+
+    // 1. Task Export & Credential Redaction
+    openidm::TaskModel t1;
+    t1.task_id = "test-uuid-1";
+    t1.url = "https://user:SuperSecretPassword@cdn.example.com/download.zip?token=xyz123";
+    t1.file_name = "download.zip";
+    t1.category = "Compressed";
+    t1.queue_id = "main";
+    t1.total_bytes = 1048576;
+    t1.auth_headers["Authorization"] = "Bearer secret-token-999";
+    t1.auth_headers["Cookie"] = "session=secret-session-abc";
+
+    std::vector<openidm::TaskModel> tasks = {t1};
+
+    auto json_exp = TaskImportExport::ExportTasksToString(tasks, ExportFormat::kJson, false);
+    ASSERT_TRUE(json_exp.ok(), "Export to JSON succeeds");
+    ASSERT_TRUE(json_exp.value->find("SuperSecretPassword") == std::string::npos, "Password scrubbed from URL");
+    ASSERT_TRUE(json_exp.value->find("secret-token-999") == std::string::npos, "Auth headers excluded from export");
+    ASSERT_TRUE(json_exp.value->find("download.zip") != std::string::npos, "Filename present");
+
+    auto csv_exp = TaskImportExport::ExportTasksToString(tasks, ExportFormat::kCsv, false);
+    ASSERT_TRUE(csv_exp.ok(), "Export to CSV succeeds");
+    ASSERT_TRUE(csv_exp.value->find("SuperSecretPassword") == std::string::npos, "Password scrubbed from CSV URL");
+
+    // 2. Task Import from URL list
+    std::string url_list = "# Comment line\nhttps://example.com/file1.pdf\nftp://ftp.example.com/file2.zip\nmagnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Linux\n";
+    auto imported = TaskImportExport::ImportFromUrlList(url_list);
+    ASSERT_TRUE(imported.ok(), "Import from URL list succeeds");
+    ASSERT_TRUE(imported.value->size() == 3, "Imported 3 tasks");
+    ASSERT_TRUE((*imported.value)[0].category == "Documents", "Auto-inferred Documents category for PDF");
+    ASSERT_TRUE((*imported.value)[1].task_type == openidm::TaskType::kFtp, "Auto-inferred FTP task type");
+    ASSERT_TRUE((*imported.value)[2].task_type == openidm::TaskType::kTorrent, "Auto-inferred Torrent task type");
+
+    // 3. Multi-Queue Management in SqliteStore
+    std::filesystem::path db_p = "/tmp/test_queue_" + openidm::GenerateUuidV4() + ".db";
+    openidm::SqliteStore store;
+    ASSERT_TRUE(store.Open(db_p).ok(), "Open test DB for queues");
+
+    openidm::QueueConfig q2;
+    q2.queue_id = "sync_queue";
+    q2.name = "Synchronization Queue";
+    q2.max_concurrent_tasks = 5;
+    q2.speed_limit_bps = 5242880;
+    q2.schedule_enabled = true;
+    q2.start_time_local = "02:00";
+    q2.stop_time_local = "06:00";
+    q2.post_completion_action = "EXIT_APP";
+
+    ASSERT_TRUE(store.UpsertQueue(q2).ok(), "UpsertQueue succeeds");
+    auto q_list = store.ListQueues();
+    ASSERT_TRUE(q_list.ok(), "ListQueues succeeds");
+    ASSERT_TRUE(q_list.value->size() >= 2, "Contains default 'main' and 'sync_queue'");
+
+    std::error_code ec;
+    std::filesystem::remove(db_p, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 30;
+    const int total = 36;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -1598,6 +1839,12 @@ int main() {
     run(28, "TestConcurrentAtomicCommitsAndSha256", TestConcurrentAtomicCommitsAndSha256);
     run(29, "TestDnsRebindingAndDestinationSecurity", TestDnsRebindingAndDestinationSecurity);
     run(30, "TestStreamContainerValidation", TestStreamContainerValidation);
+    run(31, "TestFtpClientParsingAndCommands", TestFtpClientParsingAndCommands);
+    run(32, "TestBencodeAndTorrentParser", TestBencodeAndTorrentParser);
+    run(33, "TestRtspMmsStreamDetection", TestRtspMmsStreamDetection);
+    run(34, "TestSiteGrabberCrawlerAndSsrf", TestSiteGrabberCrawlerAndSsrf);
+    run(35, "TestZipArchivePreviewAndSecurity", TestZipArchivePreviewAndSecurity);
+    run(36, "TestTaskImportExportAndMultiQueue", TestTaskImportExportAndMultiQueue);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

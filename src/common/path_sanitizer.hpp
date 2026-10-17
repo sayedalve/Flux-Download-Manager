@@ -21,6 +21,9 @@ public:
     // Extracts basename from a URL path
     static std::string ExtractFromUrl(std::string_view url, std::string_view fallback_ext = "");
 
+    // URL percent-decoding helper
+    static std::string UrlDecode(std::string_view in);
+
     // Resolves a target path strictly inside save_dir, applying ConflictPolicy (Auto-Rename (1), Overwrite, etc.)
     static Result<std::filesystem::path> ResolveSafeOutputPath(
         const std::filesystem::path& save_dir,
@@ -46,6 +49,7 @@ public:
 
     // Resolves platform-appropriate default downloads directory (%USERPROFILE%\Downloads\Flux on Windows 11)
     static std::filesystem::path GetDefaultDownloadsDir(const std::filesystem::path& exe_dir);
+    static std::filesystem::path GetDefaultDownloadDir() { return GetDefaultDownloadsDir(GetExecutableDir()); }
 
     // Dynamically discovers a worker executable (e.g., "N_m3u8DL-RE" or "ffmpeg") across:
     //   1. <exe_dir>/tools/<name>(.exe)

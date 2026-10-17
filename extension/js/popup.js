@@ -70,6 +70,37 @@ function renderDetectedMediaList(candidates, options = {}) {
     return `<div class="error-banner" data-state="error">${escapeHtml(errorMessage)}</div>`;
   }
 
+  if (filterMode === "links") {
+    const pageLinks = options.pageLinks || [];
+    const q = (searchQuery || "").trim().toLowerCase();
+    const filteredLinks = pageLinks.filter(l => !q || (l.filename && l.filename.toLowerCase().includes(q)) || (l.url && l.url.toLowerCase().includes(q)) || (l.category && l.category.toLowerCase().includes(q)));
+    if (filteredLinks.length === 0) {
+      return '<p class="empty" data-state="empty">No downloadable links found on this page.</p>';
+    }
+    const linksHtml = filteredLinks.map(l => {
+      const catBadge = escapeHtml(l.category || "File");
+      const safeName = escapeHtml(l.filename || "file");
+      const safeUrl = escapeHtml(l.url);
+      const extStr = escapeHtml(String(l.ext || "file").toUpperCase());
+      return `<div class="media-item link-item" data-url="${safeUrl}" data-stream="false">
+        <div class="media-meta">
+          <div class="media-title-row">
+            <span class="badge badge-stream">${catBadge}</span>
+            <strong class="title" title="${safeName}">${safeName}</strong>
+          </div>
+          <div class="media-sub-row">
+            <span class="meta-mono">${extStr}</span>
+            <span class="item-variants" title="${safeUrl}">${safeUrl.length > 50 ? safeUrl.slice(0, 48) + "..." : safeUrl}</span>
+          </div>
+        </div>
+        <div class="media-actions">
+          <button class="dl-btn dl-link-btn" data-url="${safeUrl}" data-name="${safeName}">${desktopConnected ? "Download in Flux" : "Browser Download"}</button>
+        </div>
+      </div>`;
+    }).join("\n");
+    return connBanner + linksHtml;
+  }
+
   const filtered = filterPopupCandidates(candidates, filterMode, searchQuery);
   if (filtered.length === 0) {
     return '<p class="empty" data-state="empty">No media detected on this tab yet. Play a video or start a download to capture streams.</p>';
@@ -92,7 +123,7 @@ function renderDetectedMediaList(candidates, options = {}) {
       ? `<span class="meta-mono">${escapeHtml(item.resolution)}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
       : `<span class="meta-mono">${formatMediaSize(item.size)}</span>`;
     const variantNote = (item.variants && item.variants.length > 0)
-      ? `<small>(+${item.variants.length} sub-playlists grouped)</small>`
+      ? `<span class="item-variants">(+${item.variants.length} sub-playlists grouped)</span>`
       : "";
     const statusText = escapeHtml(item.handoffStatus || "Ready");
     const isAlreadyQueued = (item.handoffStatus === "Queued in Flux");
@@ -100,6 +131,18 @@ function renderDetectedMediaList(candidates, options = {}) {
       ? "Queued in Flux"
       : ((!desktopConnected && !isStream) ? "Browser Download" : "Download in Flux");
     const btnClass = isAlreadyQueued ? "dl-btn dl-queued" : "dl-btn";
+
+    let qualityDropdownHtml = "";
+    if (Array.isArray(item.qualities) && item.qualities.length > 1) {
+      const optsHtml = item.qualities.map(q => {
+        const qid = escapeHtml(q.id || q.resolution || "");
+        const qlbl = escapeHtml(q.label || q.resolution || qid);
+        const isSelected = (String(q.id || "").toLowerCase() === String(item.resolution || "").toLowerCase() ||
+                            String(q.resolution || "").toLowerCase() === String(item.resolution || "").toLowerCase());
+        return `<option value="${qid}" ${isSelected ? "selected" : ""}>${qlbl}</option>`;
+      }).join("");
+      qualityDropdownHtml = `<select class="quality-select" data-id="${escapeHtml(item.candidateId)}" aria-label="Select stream quality">${optsHtml}</select>`;
+    }
 
     return `<div class="media-item" data-id="${escapeHtml(item.candidateId)}" data-stream="${isStream}">
       <div class="media-meta">
@@ -114,7 +157,10 @@ function renderDetectedMediaList(candidates, options = {}) {
           ${variantNote}
         </div>
       </div>
-      <button class="${btnClass}" data-url="${escapeHtml(item.url)}" data-id="${escapeHtml(item.candidateId)}">${actionLabel}</button>
+      <div class="media-actions">
+        ${qualityDropdownHtml}
+        <button class="${btnClass}" data-url="${escapeHtml(item.url)}" data-id="${escapeHtml(item.candidateId)}">${actionLabel}</button>
+      </div>
     </div>`;
   }).join("\n");
 
@@ -128,6 +174,7 @@ function initPopupUI() {
   let currentTabId = 0;
   let currentTabUrl = "";
   let currentCandidates = [];
+  let currentTabLinks = [];
   let activeFilterMode = "all";
   let activeSearchQuery = "";
   let isDesktopConnected = false;
@@ -143,17 +190,42 @@ function initPopupUI() {
   const countAllEl = document.getElementById("countAll");
   const countStreamEl = document.getElementById("countStream");
   const countDirectEl = document.getElementById("countDirect");
+  const countLinksEl = document.getElementById("countLinks");
   const filterTabs = document.querySelectorAll(".tab-btn");
+
+  function fetchPageLinks() {
+    if (typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.sendMessage === "function" && currentTabId > 0) {
+      try {
+        chrome.tabs.sendMessage(currentTabId, { action: "extractPageLinks" }, (resp) => {
+          if (typeof chrome !== "undefined" && chrome.runtime) void chrome.runtime.lastError;
+          if (resp && Array.isArray(resp.links)) {
+            currentTabLinks = resp.links;
+            if (countLinksEl) countLinksEl.textContent = String(currentTabLinks.length);
+            if (activeFilterMode === "links") refreshListDisplay();
+          }
+        });
+      } catch (_) {}
+    }
+  }
 
   function updateCounters() {
     const allCount = Array.isArray(currentCandidates) ? currentCandidates.length : 0;
     const streamCount = filterPopupCandidates(currentCandidates, "stream", "").length;
     const directCount = filterPopupCandidates(currentCandidates, "direct", "").length;
-    const filteredCount = filterPopupCandidates(currentCandidates, activeFilterMode, activeSearchQuery).length;
+    const linksCount = currentTabLinks.length;
+
+    let filteredCount = 0;
+    if (activeFilterMode === "links") {
+      const q = (activeSearchQuery || "").trim().toLowerCase();
+      filteredCount = currentTabLinks.filter(l => !q || (l.filename && l.filename.toLowerCase().includes(q)) || (l.url && l.url.toLowerCase().includes(q)) || (l.category && l.category.toLowerCase().includes(q))).length;
+    } else {
+      filteredCount = filterPopupCandidates(currentCandidates, activeFilterMode, activeSearchQuery).length;
+    }
 
     if (countAllEl) countAllEl.textContent = String(allCount);
     if (countStreamEl) countStreamEl.textContent = String(streamCount);
     if (countDirectEl) countDirectEl.textContent = String(directCount);
+    if (countLinksEl) countLinksEl.textContent = String(linksCount);
     if (footerSummary) {
       footerSummary.textContent = filteredCount === 1 ? "1 item" : `${filteredCount} items`;
     }
@@ -161,7 +233,7 @@ function initPopupUI() {
       batchDownloadBtn.disabled = (filteredCount === 0);
     }
     if (clearListBtn) {
-      clearListBtn.disabled = (allCount === 0);
+      clearListBtn.disabled = (allCount === 0 && linksCount === 0);
     }
   }
 
@@ -172,7 +244,8 @@ function initPopupUI() {
       filterMode: activeFilterMode,
       searchQuery: activeSearchQuery,
       desktopConnected: isDesktopConnected,
-      errorMessage: activeErrorMessage
+      errorMessage: activeErrorMessage,
+      pageLinks: currentTabLinks
     });
     attachItemClickListeners();
   }
@@ -185,6 +258,11 @@ function initPopupUI() {
         const targetBtn = ev.currentTarget || ev.target;
         const candidateId = targetBtn.getAttribute("data-id");
         const url = targetBtn.getAttribute("data-url");
+
+        const itemContainer = targetBtn.closest ? targetBtn.closest(".media-item") : null;
+        const qualitySelect = itemContainer ? itemContainer.querySelector(".quality-select") : null;
+        const selectedQualityId = qualitySelect ? qualitySelect.value : "";
+
         targetBtn.textContent = "Connecting...";
         targetBtn.disabled = true;
 
@@ -192,6 +270,7 @@ function initPopupUI() {
           chrome.runtime.sendMessage({
             action: "downloadMedia",
             candidateId,
+            qualityId: selectedQualityId,
             url,
             tabId: currentTabId,
             tabUrl: currentTabUrl
@@ -209,6 +288,38 @@ function initPopupUI() {
               const errMsg = lastErr || (resp && resp.error) || "Failed";
               targetBtn.textContent = "Failed";
               targetBtn.title = errMsg;
+              targetBtn.disabled = false;
+            }
+          });
+        }
+      });
+    });
+
+    const linkBtns = mediaListEl.querySelectorAll(".dl-link-btn");
+    linkBtns.forEach(btn => {
+      btn.addEventListener("click", (ev) => {
+        const targetBtn = ev.currentTarget || ev.target;
+        const linkUrl = targetBtn.getAttribute("data-url");
+        const linkName = targetBtn.getAttribute("data-name");
+        targetBtn.textContent = "Connecting...";
+        targetBtn.disabled = true;
+
+        if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          chrome.runtime.sendMessage({
+            action: "downloadMedia",
+            url: linkUrl,
+            pageTitle: linkName,
+            isMseBlob: false,
+            tabId: currentTabId,
+            tabUrl: currentTabUrl
+          }, (resp) => {
+            const lastErr = chrome.runtime.lastError ? chrome.runtime.lastError.message : null;
+            if (!lastErr && resp && resp.success) {
+              const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
+              targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Flux";
+              targetBtn.classList.add("dl-queued");
+            } else {
+              targetBtn.textContent = "Failed";
               targetBtn.disabled = false;
             }
           });
@@ -253,6 +364,7 @@ function initPopupUI() {
         }
         currentCandidates = res.candidates || [];
         activeErrorMessage = (currentCandidates.length === 0 && res.playerError) ? res.playerError : "";
+        fetchPageLinks();
         refreshListDisplay();
       });
     };
@@ -303,6 +415,9 @@ function initPopupUI() {
       tab.classList.add("active");
       tab.setAttribute("aria-selected", "true");
       activeFilterMode = tab.getAttribute("data-filter") || "all";
+      if (activeFilterMode === "links" && currentTabLinks.length === 0) {
+        fetchPageLinks();
+      }
       refreshListDisplay();
     });
   });
@@ -332,6 +447,9 @@ function initPopupUI() {
   if (clearListBtn) {
     clearListBtn.addEventListener("click", () => {
       currentCandidates = [];
+      if (activeFilterMode === "links") {
+        currentTabLinks = [];
+      }
       activeErrorMessage = "";
       refreshListDisplay();
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
@@ -346,6 +464,31 @@ function initPopupUI() {
   // Download all in Flux button
   if (batchDownloadBtn) {
     batchDownloadBtn.addEventListener("click", () => {
+      if (activeFilterMode === "links") {
+        const q = (activeSearchQuery || "").trim().toLowerCase();
+        const toDl = currentTabLinks.filter(l => !q || (l.filename && l.filename.toLowerCase().includes(q)) || (l.url && l.url.toLowerCase().includes(q)));
+        if (toDl.length === 0) return;
+        batchDownloadBtn.textContent = "Submitting " + toDl.length + "...";
+        batchDownloadBtn.disabled = true;
+        toDl.forEach(l => {
+          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({
+              action: "downloadMedia",
+              url: l.url,
+              pageTitle: l.filename,
+              isMseBlob: false,
+              tabId: currentTabId,
+              tabUrl: currentTabUrl
+            });
+          }
+        });
+        setTimeout(() => {
+          batchDownloadBtn.textContent = "Queued " + toDl.length + " links";
+          refreshListDisplay();
+        }, 600);
+        return;
+      }
+
       const filtered = filterPopupCandidates(currentCandidates, activeFilterMode, activeSearchQuery);
       if (filtered.length === 0) return;
       batchDownloadBtn.textContent = "Submitting " + filtered.length + "...";
@@ -353,9 +496,13 @@ function initPopupUI() {
 
       filtered.forEach(item => {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+          const itemEl = mediaListEl ? mediaListEl.querySelector(`.media-item[data-id="${item.candidateId}"]`) : null;
+          const qSelect = itemEl ? itemEl.querySelector(".quality-select") : null;
+          const qId = qSelect ? qSelect.value : "";
           chrome.runtime.sendMessage({
             action: "downloadMedia",
             candidateId: item.candidateId,
+            qualityId: qId,
             url: item.url,
             tabId: currentTabId,
             tabUrl: currentTabUrl

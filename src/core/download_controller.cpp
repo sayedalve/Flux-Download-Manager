@@ -9,6 +9,13 @@
 #include <algorithm>
 #include <chrono>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace openidm {
 
 DownloadController::DownloadController(ControllerConfig cfg)
@@ -151,16 +158,31 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     if (task.url.empty()) {
         return Result<TaskModel>::Err("ERR_INVALID_URL", "Task URL cannot be empty");
     }
-    if (task.task_type == TaskType::kHttpFile && PathSanitizer::IsWebpageWatchUrl(task.url)) {
-        return Result<TaskModel>::Err(
-            "ERR_URL_IS_WEBPAGE",
-            "The specified URL is an HTML webpage, not a direct media file or stream. "
-            "To download video from this site, play it in your web browser with the Flux extension enabled."
-        );
-    }
-    auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
-    if (!parsed_u.ok()) {
-        return Result<TaskModel>::Err(parsed_u.error->code, parsed_u.error->message);
+    if (task.url.find("ftp://") == 0 || task.url.find("ftps://") == 0) {
+        task.task_type = TaskType::kFtp;
+        auto ftp_res = ftp::FtpUrl::Parse(task.url);
+        if (!ftp_res.ok()) return Result<TaskModel>::Err(ftp_res.error->code, ftp_res.error->message);
+        if (task.file_name.empty()) task.file_name = ftp_res.value->file_name;
+    } else if (task.url.find("magnet:?") == 0) {
+        task.task_type = TaskType::kTorrent;
+        auto mag_res = torrent::TorrentParser::ParseMagnetUri(task.url);
+        if (!mag_res.ok()) return Result<TaskModel>::Err(mag_res.error->code, mag_res.error->message);
+        if (task.file_name.empty()) task.file_name = mag_res.value->name;
+    } else if (stream::RtspMmsAdapter::IsStreamUrl(task.url)) {
+        task.task_type = TaskType::kRtsp;
+        if (task.file_name.empty()) task.file_name = "stream_" + GenerateUuidV4().substr(0, 8) + ".mp4";
+    } else {
+        if (task.task_type == TaskType::kHttpFile && PathSanitizer::IsWebpageWatchUrl(task.url)) {
+            return Result<TaskModel>::Err(
+                "ERR_URL_IS_WEBPAGE",
+                "The specified URL is an HTML webpage, not a direct media file or stream. "
+                "To download video from this site, play it in your web browser with the Flux extension enabled."
+            );
+        }
+        auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
+        if (!parsed_u.ok()) {
+            return Result<TaskModel>::Err(parsed_u.error->code, parsed_u.error->message);
+        }
     }
 
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -357,7 +379,105 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
 
     auto last_db_sync = std::chrono::steady_clock::now();
 
-    if (local_task.task_type == TaskType::kHttpFile) {
+    if (local_task.task_type == TaskType::kFtp) {
+        auto ftp_url_res = ftp::FtpUrl::Parse(local_task.url);
+        if (ftp_url_res.ok()) {
+            std::filesystem::path part_p = std::filesystem::path(local_task.save_dir) / (local_task.file_name + "." + local_task.task_id + ".part");
+            local_task.part_path = part_p.string();
+            local_task.state = TaskState::kDownloading;
+
+            auto dl_res = ftp::FtpClient::DownloadFile(
+                ftp_url_res.value.value(),
+                part_p,
+                local_task.downloaded_bytes,
+                ctrl->pause_requested,
+                ctrl->cancel_requested,
+                ctrl->task_speed_limit_bps,
+                [&](const ftp::FtpProgress& fp) {
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        auto it = m_tasks.find(task_id);
+                        if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                            it->second.state = fp.state;
+                            it->second.downloaded_bytes = fp.downloaded_bytes;
+                            it->second.total_bytes = fp.total_bytes;
+                            it->second.speed_bps = fp.speed_bps;
+                            it->second.status_detail = fp.status_detail;
+                        }
+                    }
+                },
+                m_global_limiter,
+                10000,
+                m_cfg.allow_loopback);
+
+            if (dl_res.ok()) {
+                std::error_code ec;
+                std::filesystem::path final_p = std::filesystem::path(local_task.save_dir) / local_task.file_name;
+                std::filesystem::rename(part_p, final_p, ec);
+                local_task.state = TaskState::kCompleted;
+                local_task.downloaded_bytes = dl_res.value.value();
+                local_task.total_bytes = dl_res.value.value();
+                local_task.status_detail = "Completed (FTP)";
+            } else {
+                if (ctrl->cancel_requested.load()) {
+                    local_task.state = TaskState::kCanceled;
+                } else if (ctrl->pause_requested.load()) {
+                    local_task.state = TaskState::kPaused;
+                } else {
+                    local_task.state = TaskState::kFailed;
+                    local_task.error_code = dl_res.error->code;
+                    local_task.error_message = dl_res.error->message;
+                }
+            }
+        }
+    } else if (local_task.task_type == TaskType::kTorrent) {
+        torrent::TorrentInfo tinfo;
+        if (local_task.url.find("magnet:?") == 0) {
+            auto mag_res = torrent::TorrentParser::ParseMagnetUri(local_task.url);
+            if (mag_res.ok()) tinfo = mag_res.value.value();
+        } else {
+            auto tor_res = torrent::TorrentParser::ParseTorrentFile(local_task.url);
+            if (tor_res.ok()) tinfo = tor_res.value.value();
+        }
+        auto tor_dl = torrent::TorrentEngine::ExecuteTorrentDownload(
+            local_task,
+            tinfo,
+            ctrl->pause_requested,
+            ctrl->cancel_requested,
+            ctrl->task_speed_limit_bps,
+            [&](const torrent::TorrentProgress& tp) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_tasks.find(task_id);
+                if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                    it->second.state = tp.state;
+                    it->second.downloaded_bytes = tp.downloaded_bytes;
+                    it->second.total_bytes = tp.total_bytes;
+                    it->second.speed_bps = tp.speed_bps;
+                    it->second.completed_segments = tp.completed_pieces;
+                    it->second.total_segments = tp.total_pieces;
+                    it->second.status_detail = tp.status_detail;
+                }
+            },
+            m_global_limiter);
+        (void)tor_dl;
+    } else if (local_task.task_type == TaskType::kRtsp) {
+        stream::RtspMmsAdapter rtsp_ad(m_cfg.ffmpeg_binary_path, m_cfg.allow_loopback);
+        auto rtsp_res = rtsp_ad.ExecuteStreamCapture(
+            local_task,
+            ctrl->pause_requested,
+            ctrl->cancel_requested,
+            [&](const stream::RtspProgress& rp) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_tasks.find(task_id);
+                if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                    it->second.state = rp.state;
+                    it->second.downloaded_bytes = rp.downloaded_bytes;
+                    it->second.speed_bps = rp.speed_bps;
+                    it->second.status_detail = rp.status_detail;
+                }
+            });
+        (void)rtsp_res;
+    } else if (local_task.task_type == TaskType::kHttpFile) {
         brisk::EngineConfig ecfg;
         ecfg.stall_timeout_ms = stall_timeout_ms;
         ecfg.min_split_bytes = min_split_bytes;
@@ -481,6 +601,29 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 t.completed_at_ms = local_task.completed_at_ms;
                 if (t.state == TaskState::kCompleted || t.state == TaskState::kCanceled) {
                     t.auth_headers.clear();
+                }
+                if (t.state == TaskState::kCompleted) {
+                    // Post-Download Antivirus Scan
+                    if (security::AntivirusScanner::IsWindowsDefenderAvailable()) {
+                        std::filesystem::path final_p = std::filesystem::path(t.save_dir) / t.file_name;
+                        std::error_code ec;
+                        if (std::filesystem::exists(final_p, ec)) {
+                            auto scan_res = security::AntivirusScanner::ScanWithDefender(final_p);
+                            if (scan_res.ok()) {
+                                if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
+                                    t.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
+                                    OPENIDM_LOG_WARN("Controller", "Antivirus threat detected: " + final_p.string());
+                                } else if (scan_res.value->status == security::ScanStatus::kClean) {
+                                    t.status_detail = "Completed (Antivirus Clean)";
+                                }
+                            }
+                        }
+                    }
+#ifdef _WIN32
+                    if (m_settings.show_completion_notification) {
+                        MessageBeep(MB_ICONASTERISK);
+                    }
+#endif
                 }
                 to_save = t;
                 should_persist = true;
@@ -927,6 +1070,68 @@ Result<TaskModel> DownloadController::WaitForTaskCompletion(const std::string& t
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
+}
+
+Result<void> DownloadController::UpsertQueue(const QueueConfig& queue) {
+    return m_store.UpsertQueue(queue);
+}
+
+std::vector<QueueConfig> DownloadController::ListQueues() {
+    auto res = m_store.ListQueues();
+    return res.ok() ? res.value.value() : std::vector<QueueConfig>{};
+}
+
+Result<void> DownloadController::MoveTaskToQueue(const std::string& task_id, const std::string& new_queue_id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task_id);
+    if (it == m_tasks.end()) return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
+    it->second.queue_id = new_queue_id;
+    m_store.UpsertTask(it->second);
+    return Result<void>::Ok();
+}
+
+Result<std::vector<crawler::GrabbedItem>> DownloadController::CrawlSite(
+    const crawler::SiteGrabberConfig& cfg,
+    std::atomic<bool>& cancel_requested,
+    crawler::GrabbedItemCallback on_item_found) {
+    return crawler::SiteGrabber::Crawl(cfg, cancel_requested, on_item_found);
+}
+
+Result<security::ScanReport> DownloadController::ScanTaskFile(const std::string& task_id) {
+    std::filesystem::path file_p;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_tasks.find(task_id);
+        if (it == m_tasks.end()) return Result<security::ScanReport>::Err("ERR_NOT_FOUND", "Task not found");
+        file_p = std::filesystem::path(it->second.save_dir) / it->second.file_name;
+    }
+    return security::AntivirusScanner::ScanWithDefender(file_p);
+}
+
+Result<archive::ZipArchiveSummary> DownloadController::PreviewZipArchive(const std::filesystem::path& zip_path) {
+    return archive::ZipPreviewer::InspectArchive(zip_path);
+}
+
+Result<std::string> DownloadController::ExportTasksData(storage::ExportFormat format, bool include_credentials) {
+    std::vector<TaskModel> task_list = ListTasks();
+    return storage::TaskImportExport::ExportTasksToString(task_list, format, include_credentials);
+}
+
+Result<int> DownloadController::ImportTasksData(const std::string& data, storage::ExportFormat format) {
+    Result<std::vector<TaskModel>> imported;
+    if (format == storage::ExportFormat::kJson) {
+        imported = storage::TaskImportExport::ImportFromJson(data);
+    } else {
+        imported = storage::TaskImportExport::ImportFromCsv(data);
+    }
+    if (!imported.ok()) return Result<int>::Err(imported.error->code, imported.error->message);
+
+    int count = 0;
+    for (auto& t : imported.value.value()) {
+        auto add_res = AddTask(std::move(t), true, false);
+        if (add_res.ok()) count++;
+    }
+    return Result<int>::Ok(count);
 }
 
 } // namespace openidm

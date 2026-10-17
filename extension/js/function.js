@@ -810,11 +810,41 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
     }
   }
 
-  // If this is a video googlevideo stream and an audio-only stream was already observed, pair it
-  if (candidate.isGoogleVideo && !candidate.isAudioOnly && !candidate.pairedAudioUrl) {
-    const audioCand = list.find(item => item.isGoogleVideo && item.isAudioOnly);
-    if (audioCand && (audioCand.pairedAudioUrl || audioCand.url)) {
-      candidate.pairedAudioUrl = audioCand.pairedAudioUrl || audioCand.url;
+  // If this is a video googlevideo stream and an audio-only stream was already observed, pair it and prune standalone audio
+  if (candidate.isGoogleVideo && !candidate.isAudioOnly) {
+    const audioIdx = list.findIndex(item => item.isGoogleVideo && item.isAudioOnly);
+    if (audioIdx !== -1) {
+      const audioCand = list[audioIdx];
+      if (!candidate.pairedAudioUrl) {
+        candidate.pairedAudioUrl = audioCand.pairedAudioUrl || audioCand.url;
+      }
+      if (candidate.pairedAudioUrl) {
+        candidate.qualities = mergeQualityLists(candidate.qualities || [], [{
+          id: "audio-only",
+          label: "Audio Only (M4A)",
+          resolution: "Audio",
+          height: 0,
+          size: Number(audioCand.size || 0),
+          isAudioOnly: true,
+          ext: "m4a",
+          videoUrl: candidate.pairedAudioUrl,
+          pairedAudioUrl: "",
+          videoFilter: "audio"
+        }]);
+      }
+      list.splice(audioIdx, 1);
+    }
+  }
+
+  // If this is a YouTube extraction stream, prune any standalone googlevideo audio-only items
+  if (candidate.streamType === "YOUTUBE" || candidate.sourceType === SourceType.YOUTUBE_EXTRACTION) {
+    for (let i = list.length - 1; i >= 0; --i) {
+      if (list[i].isGoogleVideo && list[i].isAudioOnly) {
+        if (!candidate.pairedAudioUrl) {
+          candidate.pairedAudioUrl = list[i].pairedAudioUrl || list[i].url;
+        }
+        list.splice(i, 1);
+      }
     }
   }
 
@@ -929,6 +959,8 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
   } else if (candidate.streamType === "YOUTUBE" || candidate.streamType === "SITE_EXTRACTION" || candidate.sourceType === SourceType.YOUTUBE_EXTRACTION) {
     candidate.isMaster = true;
     candidate.confidence = 96;
+  } else if (candidate.isGoogleVideo && candidate.isAudioOnly) {
+    candidate.confidence = 50;
   } else {
     candidate.confidence = 90;
   }

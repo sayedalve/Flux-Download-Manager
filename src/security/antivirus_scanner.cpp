@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// OpenIDM / Flux — Post-Download Antivirus Scanner Integration
+#include "security/antivirus_scanner.hpp"
+
+#include <chrono>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shlobj.h>
+#endif
+
+#include "common/logger.hpp"
+#include "common/path_sanitizer.hpp"
+
+namespace openidm::security {
+
+namespace {
+
+#ifdef _WIN32
+Result<std::pair<int, std::string>> RunProcessCaptureOutput(
+    const std::wstring& application_name,
+    const std::wstring& command_line,
+    int timeout_ms) {
+
+    HANDLE hStdOutRead = nullptr, hStdOutWrite = nullptr;
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+
+    if (!CreatePipe(&hStdOutRead, &hStdOutWrite, &sa, 0)) {
+        return Result<std::pair<int, std::string>>::Err("ERR_PIPE", "Failed to create pipe for antivirus stdout");
+    }
+    SetHandleInformation(hStdOutRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = hStdOutWrite;
+    si.hStdError = hStdOutWrite;
+
+    PROCESS_INFORMATION pi = {0};
+    std::vector<wchar_t> cmd_buf(command_line.begin(), command_line.end());
+    cmd_buf.push_back(L'\0');
+
+    LPCWSTR app = application_name.empty() ? nullptr : application_name.c_str();
+
+    BOOL ok = CreateProcessW(
+        app, cmd_buf.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+
+    CloseHandle(hStdOutWrite);
+
+    if (!ok) {
+        CloseHandle(hStdOutRead);
+        return Result<std::pair<int, std::string>>::Err("ERR_PROCESS_START", "Failed to start scanner process");
+    }
+
+    std::string output;
+    char buffer[1024];
+    DWORD bytesRead = 0;
+
+    DWORD wait_res = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
+    if (wait_res == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 99);
+        CloseHandle(hStdOutRead);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return Result<std::pair<int, std::string>>::Err("ERR_TIMEOUT", "Antivirus scan timed out");
+    }
+
+    while (ReadFile(hStdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        output += buffer;
+    }
+
+    DWORD exit_code = 0;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+
+    CloseHandle(hStdOutRead);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return Result<std::pair<int, std::string>>::Ok({static_cast<int>(exit_code), output});
+}
+#endif
+
+} // namespace
+
+bool AntivirusScanner::IsWindowsDefenderAvailable() {
+    return std::filesystem::exists(GetDefenderPath());
+}
+
+std::filesystem::path AntivirusScanner::GetDefenderPath() {
+    std::error_code ec;
+#ifdef _WIN32
+    // Check %ProgramFiles%\Windows Defender\MpCmdRun.exe
+    wchar_t pf[MAX_PATH];
+    if (SHGetFolderPathW(nullptr, CSIDL_PROGRAM_FILES, nullptr, 0, pf) == S_OK) {
+        std::filesystem::path p1 = std::filesystem::path(pf) / "Windows Defender" / "MpCmdRun.exe";
+        if (std::filesystem::exists(p1, ec)) return p1;
+    }
+
+    // Check %ProgramData%\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe
+    wchar_t pd[MAX_PATH];
+    if (SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, pd) == S_OK) {
+        std::filesystem::path platform_dir = std::filesystem::path(pd) / "Microsoft" / "Windows Defender" / "Platform";
+        if (std::filesystem::exists(platform_dir, ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(platform_dir, ec)) {
+                if (entry.is_directory()) {
+                    std::filesystem::path candidate = entry.path() / "MpCmdRun.exe";
+                    if (std::filesystem::exists(candidate, ec)) return candidate;
+                }
+            }
+        }
+    }
+#endif
+    return "C:\\Program Files\\Windows Defender\\MpCmdRun.exe";
+}
+
+Result<ScanReport> AntivirusScanner::ScanWithDefender(
+    const std::filesystem::path& target_file,
+    int timeout_ms) {
+
+    std::error_code ec;
+    if (!std::filesystem::exists(target_file, ec)) {
+        return Result<ScanReport>::Err("ERR_FILE_NOT_FOUND", "Target file does not exist: " + target_file.string());
+    }
+
+    auto defender_path = GetDefenderPath();
+    if (!std::filesystem::exists(defender_path, ec)) {
+        return Result<ScanReport>::Err("ERR_DEFENDER_NOT_FOUND", "Windows Defender (MpCmdRun.exe) not found");
+    }
+
+#ifdef _WIN32
+    auto start_tp = std::chrono::steady_clock::now();
+
+    std::wstring cmd = L"\"" + defender_path.wstring() + L"\" -Scan -ScanType 3 -File \"" + target_file.wstring() + L"\"";
+    auto proc_res = RunProcessCaptureOutput(defender_path.wstring(), cmd, timeout_ms);
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_tp).count();
+
+    if (!proc_res.ok()) {
+        return Result<ScanReport>::Err(proc_res.error->code, proc_res.error->message);
+    }
+
+    ScanReport rep;
+    rep.scanner_name = "Microsoft Defender Antivirus";
+    rep.exit_code = proc_res.value->first;
+    rep.output_message = proc_res.value->second;
+    rep.scan_duration_ms = elapsed;
+
+    if (rep.exit_code == 0) {
+        rep.status = ScanStatus::kClean;
+    } else if (rep.exit_code == 2) {
+        rep.status = ScanStatus::kThreatDetected;
+    } else {
+        rep.status = ScanStatus::kScannerError;
+    }
+    return Result<ScanReport>::Ok(std::move(rep));
+#else
+    ScanReport rep;
+    rep.status = ScanStatus::kClean;
+    rep.scanner_name = "Mock Defender (POSIX)";
+    return Result<ScanReport>::Ok(rep);
+#endif
+}
+
+Result<ScanReport> AntivirusScanner::ScanWithCustomExecutable(
+    const std::filesystem::path& custom_exe,
+    std::string_view args_template,
+    const std::filesystem::path& target_file,
+    int timeout_ms) {
+
+    std::error_code ec;
+    if (!std::filesystem::exists(custom_exe, ec)) {
+        return Result<ScanReport>::Err("ERR_SCANNER_NOT_FOUND", "Custom scanner not found: " + custom_exe.string());
+    }
+    if (!std::filesystem::exists(target_file, ec)) {
+        return Result<ScanReport>::Err("ERR_FILE_NOT_FOUND", "Target file does not exist: " + target_file.string());
+    }
+
+#ifdef _WIN32
+    std::string templ(args_template);
+    std::string placeholder = "{file}";
+    size_t ph_pos = templ.find(placeholder);
+    if (ph_pos != std::string::npos) {
+        templ.replace(ph_pos, placeholder.size(), "\"" + target_file.string() + "\"");
+    } else {
+        templ += " \"" + target_file.string() + "\"";
+    }
+
+    std::wstring wargs(templ.begin(), templ.end());
+    std::wstring cmd = L"\"" + custom_exe.wstring() + L"\" " + wargs;
+
+    auto start_tp = std::chrono::steady_clock::now();
+    auto proc_res = RunProcessCaptureOutput(custom_exe.wstring(), cmd, timeout_ms);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_tp).count();
+
+    if (!proc_res.ok()) {
+        return Result<ScanReport>::Err(proc_res.error->code, proc_res.error->message);
+    }
+
+    ScanReport rep;
+    rep.scanner_name = custom_exe.filename().string();
+    rep.exit_code = proc_res.value->first;
+    rep.output_message = proc_res.value->second;
+    rep.scan_duration_ms = elapsed;
+    rep.status = (rep.exit_code == 0) ? ScanStatus::kClean : ScanStatus::kThreatDetected;
+
+    return Result<ScanReport>::Ok(std::move(rep));
+#else
+    ScanReport rep;
+    rep.status = ScanStatus::kClean;
+    rep.scanner_name = custom_exe.filename().string();
+    return Result<ScanReport>::Ok(rep);
+#endif
+}
+
+} // namespace openidm::security

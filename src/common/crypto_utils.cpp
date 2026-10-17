@@ -69,6 +69,37 @@ std::string CryptoUtils::ComputeBufferSha256Hex(std::string_view data) {
 #endif
 }
 
+std::string CryptoUtils::ComputeBufferSha1Hex(std::string_view data) {
+    auto raw = ComputeBufferSha1Raw(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+    return BytesToHex(raw.data(), raw.size());
+}
+
+std::vector<uint8_t> CryptoUtils::ComputeBufferSha1Raw(const uint8_t* data, size_t len) {
+    std::vector<uint8_t> out(20, 0);
+#ifdef _WIN32
+    BCRYPT_ALG_HANDLE hAlg = nullptr;
+    BCRYPT_HASH_HANDLE hHash = nullptr;
+    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA1_ALGORITHM, nullptr, 0) == 0) {
+        if (BCryptCreateHash(hAlg, &hHash, nullptr, 0, nullptr, 0, 0) == 0) {
+            BCryptHashData(hHash, reinterpret_cast<PUCHAR>(const_cast<uint8_t*>(data)), static_cast<ULONG>(len), 0);
+            BCryptFinishHash(hHash, out.data(), static_cast<ULONG>(out.size()), 0);
+            BCryptDestroyHash(hHash);
+        }
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+    }
+#else
+    unsigned int out_len = 0;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx) {
+        EVP_DigestInit_ex(ctx, EVP_sha1(), nullptr);
+        EVP_DigestUpdate(ctx, data, len);
+        EVP_DigestFinal_ex(ctx, out.data(), &out_len);
+        EVP_MD_CTX_free(ctx);
+    }
+#endif
+    return out;
+}
+
 Result<std::string> CryptoUtils::ComputeFileSha256Hex(const std::filesystem::path& file_path) {
     std::ifstream ifs(file_path, std::ios::binary);
     if (!ifs) {

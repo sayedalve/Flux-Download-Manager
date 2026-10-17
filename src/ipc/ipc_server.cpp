@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ipc/ipc_server.hpp"
 #include "common/path_sanitizer.hpp"
+#include "common/ipc_path.hpp"
 
 #include "common/json_mini.hpp"
 #include "common/logger.hpp"
@@ -23,29 +24,7 @@ namespace openidm::ipc {
 
 namespace {
 
-#ifdef _WIN32
-std::string GetCurrentUserSidString() {
-    std::string sid_str;
-    HANDLE hToken = NULL;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        DWORD len = 0;
-        GetTokenInformation(hToken, TokenUser, NULL, 0, &len);
-        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && len > 0) {
-            std::vector<BYTE> buf(len);
-            if (GetTokenInformation(hToken, TokenUser, buf.data(), len, &len)) {
-                TOKEN_USER* pUser = reinterpret_cast<TOKEN_USER*>(buf.data());
-                LPSTR str = nullptr;
-                if (ConvertSidToStringSidA(pUser->User.Sid, &str) && str) {
-                    sid_str = str;
-                    LocalFree(str);
-                }
-            }
-        }
-        CloseHandle(hToken);
-    }
-    return sid_str;
-}
-#endif
+
 
 json::Value TaskToJson(const TaskModel& t) {
     json::Value obj = json::Object{};
@@ -111,26 +90,7 @@ void ExtractHeadersMap(
 } // namespace
 
 std::string IpcServer::DefaultSocketPath() {
-    if (const char* env_flux = std::getenv("FLUX_IPC_SOCKET")) {
-        if (env_flux[0] != '\0') return env_flux;
-    }
-    if (const char* env_old = std::getenv("OPENIDM_IPC_SOCKET")) {
-        if (env_old[0] != '\0') return env_old;
-    }
-#ifdef _WIN32
-    std::string user_sid = GetCurrentUserSidString();
-    if (!user_sid.empty()) {
-        return "\\\\.\\pipe\\Flux_IPC_" + user_sid;
-    }
-    char uname[256] = {0};
-    DWORD ulen = sizeof(uname);
-    if (GetUserNameA(uname, &ulen) && uname[0] != '\0') {
-        return "\\\\.\\pipe\\Flux_IPC_" + std::string(uname);
-    }
-    return "\\\\.\\pipe\\Flux_IPC_Default";
-#else
-    return "/tmp/flux_ipc_" + std::to_string(geteuid()) + ".sock";
-#endif
+    return GetDefaultIpcSocketPath();
 }
 
 IpcServer::IpcServer(DownloadController& controller, std::string socket_path)

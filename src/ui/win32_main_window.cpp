@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <thread>
@@ -2250,6 +2251,10 @@ constexpr int IDM_CTX_DELETE_DISK  = 3009;
 constexpr int IDM_CTX_SETTINGS     = 3010;
 constexpr int IDM_CTX_BROWSER_STAT = 3011;
 constexpr int IDM_CTX_ABOUT        = 3012;
+constexpr int IDM_CTX_ANTIVIRUS    = 3013;
+constexpr int IDM_CTX_ZIP_PREVIEW   = 3014;
+constexpr int IDM_CTX_EXPORT_TASKS  = 3015;
+constexpr int IDM_CTX_IMPORT_TASKS  = 3016;
 
 struct Win32WindowContext {
     DesktopView* view{nullptr};
@@ -3087,6 +3092,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     switch (msg) {
         case WM_CREATE: {
+            DragAcceptFiles(hwnd, TRUE);
             HICON hAppIcon = CreateFluxAppIcon();
             if (hAppIcon) {
                 SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hAppIcon));
@@ -3259,6 +3265,12 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             AppendMenuW(hMenu, tb.can_remove ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_REMOVE_LIST, L"Remove from List (Delete)");
             AppendMenuW(hMenu, tb.can_delete_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_DELETE_DISK, L"Delete File from Disk (Shift+Delete)");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, tb.can_open_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_ANTIVIRUS, L"Scan with Antivirus (Windows Defender)...");
+            AppendMenuW(hMenu, tb.can_open_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_ZIP_PREVIEW, L"Preview Archive Contents (ZIP)...");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_TASKS, L"Export Tasks (JSON / CSV)...");
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_IMPORT_TASKS, L"Import Tasks from File...");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_SETTINGS, L"Settings & Configuration (Ctrl+,)...");
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration & Worker Diagnostics...");
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About Flux Download Manager...");
@@ -3277,9 +3289,94 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (MessageBoxW(hwnd, L"Permanently delete the downloaded file from disk as well?", L"Confirm File Deletion", MB_YESNO | MB_ICONWARNING) == IDYES) {
                     ctx->view->ActionDeleteSelectedWithFile();
                 }
+            } else if (cmd == IDM_CTX_ANTIVIRUS) {
+                std::string sel = ctx->view->GetSelectedTaskId();
+                if (!sel.empty()) {
+                    auto rep = ctx->controller->ScanTaskFile(sel);
+                    if (rep.ok()) {
+                        std::wstring alert_info = (rep.value->status == security::ScanStatus::kClean)
+                            ? L"Antivirus scan completed: No threats were found."
+                            : L"Warning: Potential security risk or threat detected by scanner!";
+                        MessageBoxW(hwnd, alert_info.c_str(), L"Antivirus Scan Result",
+                            (rep.value->status == security::ScanStatus::kClean) ? MB_OK | MB_ICONINFORMATION : MB_OK | MB_ICONWARNING);
+                    }
+                }
+            } else if (cmd == IDM_CTX_ZIP_PREVIEW) {
+                std::string sel = ctx->view->GetSelectedTaskId();
+                if (!sel.empty()) {
+                    auto t = ctx->controller->GetTask(sel);
+                    if (t.has_value()) {
+                        std::filesystem::path fp = std::filesystem::path(t->save_dir) / t->file_name;
+                        auto preview_res = ctx->controller->PreviewZipArchive(fp);
+                        if (preview_res.ok()) {
+                            std::wstring preview_info = L"Archive: " + fp.filename().wstring() + L"\n" +
+                                                        L"Files: " + std::to_wstring(preview_res.value->total_files) + L"\n" +
+                                                        L"Folders: " + std::to_wstring(preview_res.value->total_folders) + L"\n" +
+                                                        L"Total Uncompressed: " + std::to_wstring(preview_res.value->total_uncompressed_bytes / 1024) + L" KB\n" +
+                                                        (preview_res.value->is_potential_zip_bomb ? L"[ALERT: High compression ratio (Zip Bomb Risk)]\n" : L"") +
+                                                        (preview_res.value->has_zip_slip_risk ? L"[ALERT: Suspicious paths (Zip Slip Risk)]\n" : L"");
+                            MessageBoxW(hwnd, preview_info.c_str(), L"ZIP Archive Preview", MB_OK | MB_ICONINFORMATION);
+                        } else {
+                            MessageBoxW(hwnd, L"Could not read ZIP Central Directory (file may not be a valid ZIP archive).", L"ZIP Preview Error", MB_OK | MB_ICONEXCLAMATION);
+                        }
+                    }
+                }
+            } else if (cmd == IDM_CTX_EXPORT_TASKS) {
+                auto exp_str = ctx->controller->ExportTasksData(storage::ExportFormat::kJson);
+                if (exp_str.ok()) {
+                    std::filesystem::path exp_path = PathSanitizer::GetDefaultDownloadDir() / "flux_tasks_export.json";
+                    std::ofstream ofs(exp_path);
+                    if (ofs) {
+                        ofs << exp_str.value.value();
+                        std::wstring export_info = L"Tasks successfully exported to:\n" + exp_path.wstring();
+                        MessageBoxW(hwnd, export_info.c_str(), L"Export Tasks", MB_OK | MB_ICONINFORMATION);
+                    }
+                }
             } else if (cmd == IDM_CTX_SETTINGS) ctx->view->OpenSettingsCenter(SettingsCategory::kGeneral);
             else if (cmd == IDM_CTX_BROWSER_STAT) ctx->view->OpenSettingsCenter(SettingsCategory::kBrowserIntegration);
             else if (cmd == IDM_CTX_ABOUT) ctx->view->OpenSettingsCenter(SettingsCategory::kAboutAndDiagnostics);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_DROPFILES: {
+            HDROP hDrop = reinterpret_cast<HDROP>(wParam);
+            UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT i = 0; i < count; ++i) {
+                wchar_t filePath[MAX_PATH];
+                if (DragQueryFileW(hDrop, i, filePath, MAX_PATH) > 0) {
+                    std::filesystem::path p(filePath);
+                    std::string ext = p.extension().string();
+                    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+                    if (ext == ".torrent") {
+                        TaskModel t;
+                        t.url = p.string();
+                        t.task_type = TaskType::kTorrent;
+                        t.file_name = p.stem().string();
+                        ctx->controller->AddTask(std::move(t), true, false);
+                    } else if (ext == ".txt" || ext == ".csv" || ext == ".json") {
+                        std::ifstream ifs(p);
+                        if (ifs) {
+                            std::stringstream ss_file;
+                            ss_file << ifs.rdbuf();
+                            std::string content = ss_file.str();
+                            if (ext == ".json") {
+                                ctx->controller->ImportTasksData(content, storage::ExportFormat::kJson);
+                            } else if (ext == ".csv") {
+                                ctx->controller->ImportTasksData(content, storage::ExportFormat::kCsv);
+                            } else {
+                                auto urls_res = storage::TaskImportExport::ImportFromUrlList(content);
+                                if (urls_res.ok()) {
+                                    for (auto& task_item : urls_res.value.value()) {
+                                        ctx->controller->AddTask(std::move(task_item), true, false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            DragFinish(hDrop);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }

@@ -22,9 +22,7 @@
 
 namespace openidm {
 
-namespace {
-
-std::string UrlDecode(std::string_view in) {
+std::string PathSanitizer::UrlDecode(std::string_view in) {
     std::string out;
     out.reserve(in.size());
     for (size_t i = 0; i < in.size(); ++i) {
@@ -42,6 +40,9 @@ std::string UrlDecode(std::string_view in) {
     }
     return out;
 }
+
+namespace {
+
 
 bool IsReservedDosName(std::string_view stem) {
     std::string upper;
@@ -71,6 +72,10 @@ std::string TaskTypeToString(TaskType t) {
         case TaskType::kStreamHls: return "STREAM_HLS";
         case TaskType::kStreamDash: return "STREAM_DASH";
         case TaskType::kStreamMss: return "STREAM_MSS";
+        case TaskType::kFtp: return "FTP";
+        case TaskType::kTorrent: return "TORRENT";
+        case TaskType::kRtsp: return "RTSP";
+        case TaskType::kSiteGrabber: return "SITE_GRABBER";
     }
     return "HTTP_FILE";
 }
@@ -79,6 +84,10 @@ TaskType TaskTypeFromString(const std::string& s) {
     if (s == "STREAM_HLS") return TaskType::kStreamHls;
     if (s == "STREAM_DASH") return TaskType::kStreamDash;
     if (s == "STREAM_MSS") return TaskType::kStreamMss;
+    if (s == "FTP" || s == "FTPS") return TaskType::kFtp;
+    if (s == "TORRENT" || s == "BITTORRENT") return TaskType::kTorrent;
+    if (s == "RTSP" || s == "RTSPS" || s == "MMS" || s == "RTMP") return TaskType::kRtsp;
+    if (s == "SITE_GRABBER" || s == "CRAWLER") return TaskType::kSiteGrabber;
     return TaskType::kHttpFile;
 }
 
@@ -135,12 +144,16 @@ std::string InferCategoryFromFilename(const std::string& filename) {
     static const std::set<std::string> kCompressed = {"zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "zst"};
     static const std::set<std::string> kDocuments = {"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "epub", "csv"};
     static const std::set<std::string> kPrograms = {"exe", "msi", "iso", "img", "dmg", "deb", "rpm", "apk", "msix"};
+    static const std::set<std::string> kImages = {"jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "tiff"};
+    static const std::set<std::string> kTorrents = {"torrent"};
 
     if (kVideo.count(ext)) return "Video";
     if (kAudio.count(ext)) return "Audio";
     if (kCompressed.count(ext)) return "Compressed";
     if (kDocuments.count(ext)) return "Documents";
     if (kPrograms.count(ext)) return "Programs";
+    if (kImages.count(ext)) return "Images";
+    if (kTorrents.count(ext)) return "Torrents";
     return "General";
 }
 

@@ -15,7 +15,11 @@ enum class TaskType {
     kHttpFile,
     kStreamHls,
     kStreamDash,
-    kStreamMss
+    kStreamMss,
+    kFtp,
+    kTorrent,
+    kRtsp,
+    kSiteGrabber
 };
 
 enum class TaskState {

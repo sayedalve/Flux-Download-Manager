@@ -5,7 +5,7 @@
 // auto-launching openidm --daemon if the server is not yet running.
 // Implements NATIVE_MESSAGING_AND_IPC.md & BUG-004 Fix.
 
-#include "ipc/ipc_server.hpp"
+#include "common/ipc_path.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -141,7 +141,7 @@ int main(int argc, char* argv[]) {
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-    std::string sock_path = openidm::ipc::IpcServer::DefaultSocketPath();
+    std::string sock_path = openidm::ipc::GetDefaultIpcSocketPath();
     if (const char* env_flux = std::getenv("FLUX_IPC_SOCKET")) {
         sock_path = env_flux;
     } else if (const char* env_old = std::getenv("OPENIDM_IPC_SOCKET")) {

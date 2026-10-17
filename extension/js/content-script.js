@@ -103,38 +103,42 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
         button {
           display: inline-flex;
           align-items: center;
-          gap: 6px;
-          background: linear-gradient(180deg, #111A2E 0%, #0F172A 100%);
-          color: #F8FAFC;
-          border: 1px solid #2563EB;
-          border-radius: 6px;
-          padding: 6px 12px;
-          font: 600 12px "Segoe UI Variable Text", "Segoe UI", -apple-system, sans-serif;
+          gap: 8px;
+          background: #2D2E32;
+          color: #F2F2F3;
+          border: 1px solid #414248;
+          border-radius: 7px;
+          padding: 7px 14px;
+          font: 600 13px "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
           letter-spacing: 0.01em;
           cursor: pointer;
-          opacity: 0.88;
-          box-shadow: 0 4px 12px rgba(7, 11, 20, 0.65);
-          transition: opacity 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+          opacity: 0.94;
+          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+          transition: opacity 0.14s ease, border-color 0.14s ease, background 0.14s ease, transform 0.1s ease;
         }
         button::before {
           content: "";
-          width: 6px;
-          height: 6px;
+          width: 7px;
+          height: 7px;
           border-radius: 50%;
-          background: #38BDF8;
-          box-shadow: 0 0 6px rgba(56, 189, 248, 0.7);
+          background: #FF4F57;
+          box-shadow: 0 0 8px rgba(255, 79, 87, 0.75);
           flex-shrink: 0;
         }
         button:hover:not(:disabled), button:focus-visible {
           opacity: 1;
-          border-color: #38BDF8;
-          background: linear-gradient(180deg, #1E293B 0%, #0F172A 100%);
+          border-color: #FF4F57;
+          background: #37383D;
+          color: #FFFFFF;
           outline: none;
+        }
+        button:active:not(:disabled) {
+          transform: scale(0.98);
         }
         button:disabled {
           opacity: 0.72;
-          border-color: #475569;
-          color: #94A3B8;
+          border-color: #414248;
+          color: #A4A5AC;
           cursor: not-allowed;
         }
         button:disabled::before {
@@ -154,8 +158,8 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
       btn.textContent = isDrm ? "DRM Protected (Unsupported)" : "Download with Flux";
       btn.disabled = isDrm;
       const baseBtnStyle =
-        "background:#0F172A;color:#F8FAFC;border:1px solid #2563EB;border-radius:6px;" +
-        "padding:6px 12px;font:600 12px 'Segoe UI Variable Text','Segoe UI',sans-serif;cursor:pointer;box-shadow:0 4px 12px rgba(7,11,20,0.65);";
+        "background:#2D2E32;color:#F2F2F3;border:1px solid #414248;border-radius:7px;" +
+        "padding:7px 14px;font:600 13px 'Segoe UI Variable Text','Segoe UI',sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.55);";
       if (btn.style) {
         btn.style.cssText = baseBtnStyle;
       }
@@ -324,6 +328,52 @@ function handleMediaPlaybackEvent(ev) {
   } catch (_) {}
 }
 
+function extractEligiblePageLinks(doc) {
+  if (!doc || !doc.querySelectorAll) return [];
+  const anchors = Array.from(doc.querySelectorAll("a[href]"));
+  const seen = new Set();
+  const results = [];
+
+  const extCategories = {
+    zip: "Compressed", rar: "Compressed", "7z": "Compressed", tar: "Compressed", gz: "Compressed", bz2: "Compressed", xz: "Compressed",
+    pdf: "Documents", doc: "Documents", docx: "Documents", xls: "Documents", xlsx: "Documents", ppt: "Documents", pptx: "Documents", epub: "Documents", txt: "Documents", csv: "Documents",
+    exe: "Applications", msi: "Applications", dmg: "Applications", pkg: "Applications", deb: "Applications", rpm: "Applications", apk: "Applications",
+    mp4: "Video", mkv: "Video", webm: "Video", mov: "Video", avi: "Video", flv: "Video",
+    mp3: "Music", m4a: "Music", flac: "Music", wav: "Music", ogg: "Music",
+    jpg: "Images", jpeg: "Images", png: "Images", gif: "Images", webp: "Images", svg: "Images"
+  };
+
+  for (const a of anchors) {
+    const rawHref = a.getAttribute("href") || "";
+    if (!rawHref || rawHref.startsWith("#") || rawHref.startsWith("javascript:") || rawHref.startsWith("mailto:") || rawHref.startsWith("data:")) {
+      continue;
+    }
+    let fullUrl = a.href;
+    try { fullUrl = new URL(rawHref, doc.location ? doc.location.href : undefined).href; } catch (_) {}
+    if (!fullUrl.startsWith("http://") && !fullUrl.startsWith("https://")) continue;
+    if (seen.has(fullUrl)) continue;
+    seen.add(fullUrl);
+
+    let pathname = "";
+    try { pathname = new URL(fullUrl).pathname; } catch (_) {}
+    const rawFilename = (a.download || pathname.split("/").pop() || "download").split("?")[0];
+    const lastDot = rawFilename.lastIndexOf(".");
+    const ext = lastDot !== -1 ? rawFilename.slice(lastDot + 1).toLowerCase() : "";
+    const category = extCategories[ext] || "Other";
+    const linkText = (a.textContent || a.title || rawFilename).trim().replace(/\s+/g, " ");
+
+    results.push({
+      url: fullUrl,
+      filename: rawFilename || "file",
+      ext: ext || "file",
+      category,
+      text: linkText.slice(0, 80),
+      isDirectFile: Boolean(extCategories[ext])
+    });
+  }
+  return results;
+}
+
 function injectDeepSearchScript() {
   if (typeof document === "undefined" || !document.documentElement) return;
   try {
@@ -356,20 +406,31 @@ function initContentScript() {
     if (ev.source !== window && ev.origin !== window.location.origin) return;
 
     if (ev.data.action === "catCatchAddMedia") {
+      if (typeof window !== "undefined") {
+        window.__fluxLastCandidate = ev.data;
+      }
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage({
           action: "addMedia",
           url: ev.data.url,
           streamType: ev.data.streamType || "HLS",
+          sourceType: ev.data.sourceType || "",
           ext: ev.data.ext || "mp4",
           mime: ev.data.mime || "",
           size: ev.data.size || 0,
           itag: ev.data.itag || "",
           isAudioOnly: Boolean(ev.data.isAudioOnly),
           isGoogleVideo: Boolean(ev.data.isGoogleVideo),
+          isAdaptiveTrack: Boolean(ev.data.isAdaptiveTrack),
+          requiresAudioMux: Boolean(ev.data.requiresAudioMux),
+          requiresCipherExtraction: Boolean(ev.data.requiresCipherExtraction),
           videoId: ev.data.videoId || "",
           resolution: ev.data.resolution || "",
+          videoUrl: ev.data.videoUrl || "",
           pairedAudioUrl: ev.data.pairedAudioUrl || "",
+          qualities: Array.isArray(ev.data.qualities) ? ev.data.qualities : [],
+          extractorJson: ev.data.extractorJson || "",
+          candidateId: ev.data.candidateId || "",
           cachedManifestBody: ev.data.cachedManifestBody || "",
           tabUrl: location.href,
           pageTitle: ev.data.pageTitle || document.title || "video"
@@ -406,6 +467,30 @@ function initContentScript() {
     }
   }, { capture: true });
 
+  // 3b. Handle background probePageMedia & extractPageLinks RPC
+  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (request && request.action === "probePageMedia") {
+        try {
+          window.postMessage({ action: "fluxScanPageMedia" }, "*");
+          sendResponse({ success: true });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+        return true;
+      }
+      if (request && request.action === "extractPageLinks") {
+        try {
+          const links = extractEligiblePageLinks(document);
+          sendResponse({ success: true, links });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message, links: [] });
+        }
+        return true;
+      }
+    });
+  }
+
   // 4. Inject deep search script into page DOM
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", injectDeepSearchScript, { once: true });
@@ -427,10 +512,17 @@ function initContentScript() {
       hostEl.setAttribute("data-flux-status", "starting");
     }
 
+    const lastCand = (typeof window !== "undefined" && window.__fluxLastCandidate) ? window.__fluxLastCandidate : null;
+    const candidateId = mediaMeta.candidateId || (lastCand && lastCand.candidateId) || "";
+    const qualityId = mediaMeta.qualityId || (lastCand && lastCand.qualityId) || "";
+    const videoSrc = mediaMeta.videoSrc || (lastCand ? (lastCand.videoUrl || lastCand.url) : "") || "";
+
     if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
       chrome.runtime.sendMessage({
         action: "downloadMedia",
-        url: mediaMeta.videoSrc || "",
+        candidateId,
+        qualityId,
+        url: videoSrc,
         isMseBlob: Boolean(mediaMeta.isMseBlob),
         pageTitle: mediaMeta.pageTitle || document.title || "video",
         tabUrl: mediaMeta.tabUrl || location.href,
@@ -498,6 +590,7 @@ if (typeof module !== "undefined" && module.exports) {
     observeDynamicVideosAndFullscreen,
     handleLinkClick,
     handleMediaPlaybackEvent,
+    extractEligiblePageLinks,
     initContentScript
   };
 }

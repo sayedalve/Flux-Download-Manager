@@ -17,9 +17,17 @@
 #include <thread>
 #include <vector>
 
+#include "archive/zip_preview.hpp"
 #include "brisk_engine/http_download_engine.hpp"
 #include "common/types.hpp"
+#include "crawler/site_grabber.hpp"
+#include "engine_ftp/ftp_client.hpp"
 #include "engine_stream/nm3u8dl_re_adapter.hpp"
+#include "engine_stream/rtsp_mms_adapter.hpp"
+#include "engine_torrent/torrent_engine.hpp"
+#include "engine_torrent/torrent_parser.hpp"
+#include "security/antivirus_scanner.hpp"
+#include "storage/import_export.hpp"
 #include "storage/sqlite_store.hpp"
 
 namespace openidm {
@@ -109,6 +117,27 @@ public:
 
     std::vector<TaskModel> ListTasks() const;
     std::optional<TaskModel> GetTask(const std::string& task_id) const;
+
+    // Multi-Queue Management (Phase 3 & Advanced Scheduler)
+    Result<void> UpsertQueue(const QueueConfig& queue);
+    std::vector<QueueConfig> ListQueues();
+    Result<void> MoveTaskToQueue(const std::string& task_id, const std::string& new_queue_id);
+
+    // Site Grabber & Crawler
+    Result<std::vector<crawler::GrabbedItem>> CrawlSite(
+        const crawler::SiteGrabberConfig& cfg,
+        std::atomic<bool>& cancel_requested,
+        crawler::GrabbedItemCallback on_item_found = nullptr);
+
+    // Post-Download Antivirus Scan
+    Result<security::ScanReport> ScanTaskFile(const std::string& task_id);
+
+    // ZIP Archive Preview
+    Result<archive::ZipArchiveSummary> PreviewZipArchive(const std::filesystem::path& zip_path);
+
+    // Import / Export
+    Result<std::string> ExportTasksData(storage::ExportFormat format, bool include_credentials = false);
+    Result<int> ImportTasksData(const std::string& data, storage::ExportFormat format);
 
     // Waits until a specific task reaches a terminal/paused state (useful for CLI & integration tests)
     Result<TaskModel> WaitForTaskCompletion(const std::string& task_id, int timeout_ms = 30000);

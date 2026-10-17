@@ -57,6 +57,7 @@ test: all
 	./$(BUILD_DIR)/flux_unit_tests
 	node tests/test_extension_detection.js
 	python3 tests/run_all_integration_tests.py
+	python3 tests/test_repair_pipeline_e2e.py
 
 clean:
 	find $(BUILD_DIR) -type f -delete 2>/dev/null || true

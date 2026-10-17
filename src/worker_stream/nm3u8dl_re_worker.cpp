@@ -1040,6 +1040,29 @@ std::vector<TrackItem> SelectTracks(const std::vector<TrackItem>& tracks, const 
     if (fl.find("worst") != std::string::npos) {
         return {candidates.back()};
     }
+    if (fl != "best" && !fl.empty()) {
+        // Match requested resolution height (e.g. "720p", "1080p", "360p", "1280x720") or track id/name
+        int target_h = 0;
+        std::smatch hm;
+        static const std::regex kHeightRe(R"((?:^|x|res=\"?\d*x?)(\d{3,4})p?(?:$|\"|\b))");
+        if (std::regex_search(fl, hm, kHeightRe)) {
+            target_h = std::stoi(hm[1].str());
+        }
+        for (const auto& c : candidates) {
+            std::string rl = ToLower(c.resolution);
+            std::string idl = ToLower(c.id);
+            if (rl == fl || idl == fl) {
+                return {c};
+            }
+            if (target_h > 0) {
+                std::string suffix = "x" + std::to_string(target_h);
+                std::string p_str = std::to_string(target_h) + "p";
+                if (rl.ends_with(suffix) || rl == p_str || rl.find(p_str) != std::string::npos || idl.find(p_str) != std::string::npos) {
+                    return {c};
+                }
+            }
+        }
+    }
     return {candidates.front()};
 }
 

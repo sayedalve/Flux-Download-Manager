@@ -69,6 +69,7 @@ std::string TaskTypeToString(TaskType t) {
         case TaskType::kStreamHls: return "STREAM_HLS";
         case TaskType::kStreamDash: return "STREAM_DASH";
         case TaskType::kStreamMss: return "STREAM_MSS";
+        case TaskType::kYouTubeExtraction: return "YOUTUBE_EXTRACTION";
     }
     return "HTTP_FILE";
 }
@@ -77,6 +78,7 @@ TaskType TaskTypeFromString(const std::string& s) {
     if (s == "STREAM_HLS") return TaskType::kStreamHls;
     if (s == "STREAM_DASH") return TaskType::kStreamDash;
     if (s == "STREAM_MSS") return TaskType::kStreamMss;
+    if (s == "YOUTUBE_EXTRACTION" || s == "YOUTUBE") return TaskType::kYouTubeExtraction;
     return TaskType::kHttpFile;
 }
 
@@ -461,6 +463,14 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
         base = base.substr(0, base.size() - 4);
     }
 
+    if (base == "yt-dlp") {
+        if (const char* env_yt = std::getenv("FLUX_YTDLP_BINARY")) {
+            if (env_yt[0] != '\0' && std::filesystem::exists(env_yt, ec)) {
+                return std::filesystem::path(env_yt);
+            }
+        }
+    }
+
 #ifdef _WIN32
     const std::string native_name = base + ".exe";
 #else
@@ -561,7 +571,10 @@ bool PathSanitizer::IsWebpageWatchUrl(std::string_view url) {
     // YouTube watch and shorts URLs
     if (lower.find("youtube.com/watch") != std::string::npos ||
         lower.find("youtube.com/shorts/") != std::string::npos ||
-        lower.find("youtu.be/") != std::string::npos) {
+        lower.find("youtube.com/embed/") != std::string::npos ||
+        lower.find("youtube.com/live/") != std::string::npos ||
+        lower.find("youtu.be/") != std::string::npos ||
+        lower.find("/watch?v=") != std::string::npos) {
         return true;
     }
 

@@ -15,7 +15,8 @@ enum class TaskType {
     kHttpFile,
     kStreamHls,
     kStreamDash,
-    kStreamMss
+    kStreamMss,
+    kYouTubeExtraction
 };
 
 enum class TaskState {
@@ -108,6 +109,7 @@ struct StreamTrack {
 };
 
 struct StreamSelectionOptions {
+    std::string source_type;              // "HLS_MANIFEST", "DASH_MANIFEST", "DIRECT_PROGRESSIVE", "YOUTUBE_EXTRACTION"
     std::string video_filter{"best"};     // -sv argument
     std::string audio_filter{"all"};      // -sa argument
     std::string subtitle_filter{"all"};   // -ss argument
@@ -115,11 +117,17 @@ struct StreamSelectionOptions {
     uint32_t thread_count{8};
     bool concurrent_download{true};       // -mt
     std::string custom_hls_key_hex;       // Optional user-supplied AES-128 key
-    std::string cached_manifest_body;     // Optional cached manifest from Cat Catch Deep Search
+    std::string cached_manifest_body;     // Actual HLS (#EXTM3U) or DASH (<MPD) manifest text ONLY
+    std::string video_url;                // Pre-resolved YouTube video stream URL (if available)
+    std::string paired_audio_url;         // Pre-resolved YouTube audio stream URL (if separate adaptive track)
+    std::string youtube_video_id;         // YouTube video ID
+    std::string extractor_json;           // Structured YouTube/site extractor descriptor (never passed as .m3u8)
+    bool requires_cipher_extraction{false};
 };
 
 struct TaskModel {
     std::string task_id;
+    std::string correlation_id;
     TaskType task_type{TaskType::kHttpFile};
     TaskState state{TaskState::kQueued};
     std::string queue_id{"main"};

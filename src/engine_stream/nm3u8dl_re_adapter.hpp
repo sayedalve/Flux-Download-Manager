@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — N_m3u8DL-RE Stream Download Adapter & Managed Worker Process Supervisor
-// Integrates nilaoda/N_m3u8DL-RE (v0.6.0-beta) & FFmpeg via Job Objects / Process Groups
+// OpenIDM — N_m3u8DL-RE Stream Download Adapter, YouTube Extractor & Managed Worker Process Supervisor
+// Integrates nilaoda/N_m3u8DL-RE (v0.3.0-beta), yt-dlp & FFmpeg via Job Objects / Process Groups
 // and ACL-restricted @job.rsp response files.
-// Implements FR-019, FR-020, FR-021, FR-022, NFR-015, THREAT-002, THREAT-004.
+// Implements FR-019, FR-020, FR-021, FR-022, NFR-015, THREAT-002, THREAT-004, and Defect B Fix.
 #pragma once
 
 #include <atomic>
@@ -49,6 +49,7 @@ public:
     Result<std::string> VerifyWorkerBinary() const;
 
     // Validates manifest URL or cached manifest body against SSRF / local file inclusion (THREAT-004)
+    // and rejects arbitrary JSON descriptors masquerading as HLS/DASH manifests (Defect B fix).
     Result<void> ValidateManifestSafety(std::string_view url, std::string_view body) const;
 
     // Writes ACL-restricted @job.rsp response file (0600 permissions) so Cookie/Authorization
@@ -68,9 +69,18 @@ public:
         const std::map<std::string, std::string>& auth_headers,
         const std::string& cached_manifest_body = "");
 
-    // Phase 2: Executes stream downloading and FFmpeg muxing via N_m3u8DL-RE worker process
+    // Phase 2: Executes HLS/DASH stream downloading and FFmpeg muxing via N_m3u8DL-RE worker process
     using ProgressCallback = std::function<void(const StreamProgress&)>;
     Result<std::filesystem::path> ExecuteStreamDownload(
+        TaskModel& task,
+        std::atomic<bool>& pause_requested,
+        std::atomic<bool>& cancel_requested,
+        uint64_t speed_limit_bps,
+        ProgressCallback on_progress);
+
+    // Phase 3: Executes YouTube / site-specific extraction, adaptive video+audio track download, and FFmpeg muxing
+    // without passing JSON descriptors as .m3u8 manifests to N_m3u8DL-RE (Defect B fix).
+    Result<std::filesystem::path> ExecuteYouTubeExtraction(
         TaskModel& task,
         std::atomic<bool>& pause_requested,
         std::atomic<bool>& cancel_requested,

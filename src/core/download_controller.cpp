@@ -135,6 +135,24 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
             "To download video from this site, play it in your web browser with the Flux extension enabled."
         );
     }
+    // Defect B Guard: Never allow a webpage watch URL or JSON descriptor to be queued as an HLS/DASH manifest task
+    if (task.task_type == TaskType::kStreamHls || task.task_type == TaskType::kStreamDash) {
+        const std::string& body = task.stream_options.cached_manifest_body;
+        if (!body.empty()) {
+            size_t first_non_space = body.find_first_not_of(" \t\r\n");
+            if (first_non_space != std::string::npos && (body[first_non_space] == '{' || body[first_non_space] == '[')) {
+                return Result<TaskModel>::Err(
+                    "ERR_STREAM_INVALID_MANIFEST",
+                    "JSON descriptor cannot be submitted as an HLS or DASH manifest"
+                );
+            }
+        } else if (PathSanitizer::IsWebpageWatchUrl(task.url)) {
+            return Result<TaskModel>::Err(
+                "ERR_STREAM_INVALID_MANIFEST",
+                "Webpage watch URL cannot be submitted as an HLS or DASH manifest; use YOUTUBE_EXTRACTION task type"
+            );
+        }
+    }
     auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
     if (!parsed_u.ok()) {
         return Result<TaskModel>::Err(parsed_u.error->code, parsed_u.error->message);
@@ -155,6 +173,9 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
 
     if (task.task_id.empty()) {
         task.task_id = GenerateUuidV4();
+    }
+    if (task.correlation_id.empty()) {
+        task.correlation_id = "corr-" + task.task_id.substr(0, 8);
     }
     m_deleted_tasks.erase(task.task_id);
 
@@ -185,6 +206,11 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
         return Result<TaskModel>::Err(db_res.error->code, db_res.error->message);
     }
 
+    OPENIDM_LOG_INFO("Controller",
+        "[" + task.correlation_id + "] Task created id=" + task.task_id +
+        " type=" + TaskTypeToString(task.task_type) +
+        " file=" + task.file_name);
+
     m_tasks[task.task_id] = task;
     m_cv.notify_all();
     return Result<TaskModel>::Ok(task);
@@ -207,6 +233,8 @@ Result<std::vector<TaskModel>> DownloadController::AddBatchTasks(
             t.task_type = TaskType::kStreamHls;
         } else if (u.find(".mpd") != std::string::npos) {
             t.task_type = TaskType::kStreamDash;
+        } else if (PathSanitizer::IsWebpageWatchUrl(u)) {
+            t.task_type = TaskType::kYouTubeExtraction;
         } else {
             t.task_type = TaskType::kHttpFile;
         }
@@ -290,6 +318,7 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
     auto last_db_sync = std::chrono::steady_clock::now();
 
     if (local_task.task_type == TaskType::kHttpFile) {
+        OPENIDM_LOG_INFO("Controller", "[" + local_task.correlation_id + "] Dispatching task=" + task_id + " to Brisk HttpDownloadEngine");
         brisk::EngineConfig ecfg;
         ecfg.stall_timeout_ms = m_cfg.stall_timeout_ms;
         ecfg.min_split_bytes = m_cfg.min_split_bytes;
@@ -327,7 +356,38 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 }
             });
         (void)res;
+    } else if (local_task.task_type == TaskType::kYouTubeExtraction) {
+        OPENIDM_LOG_INFO("Controller", "[" + local_task.correlation_id + "] Dispatching task=" + task_id + " to YouTube Extraction & Muxing Pipeline");
+        stream::StreamAdapterConfig scfg{
+            m_cfg.nm3u8dl_binary_path,
+            m_cfg.ffmpeg_binary_path,
+            m_cfg.temp_root_dir,
+            m_cfg.allow_loopback
+        };
+        stream::Nm3u8dlReAdapter adapter(std::move(scfg));
+        auto res = adapter.ExecuteYouTubeExtraction(
+            local_task,
+            ctrl->pause_requested,
+            ctrl->cancel_requested,
+            ctrl->task_speed_limit_bps.load(),
+            [&](const stream::StreamProgress& sp) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_tasks.find(task_id);
+                if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                    auto& t = it->second;
+                    t.state = sp.phase;
+                    t.downloaded_bytes = sp.downloaded_bytes;
+                    t.total_bytes = sp.total_bytes;
+                    t.speed_bps = sp.speed_bps;
+                    t.stream_percent = sp.percent;
+                    t.completed_segments = sp.completed_segments;
+                    t.total_segments = sp.total_segments;
+                    t.status_detail = sp.status_line;
+                }
+            });
+        (void)res;
     } else {
+        OPENIDM_LOG_INFO("Controller", "[" + local_task.correlation_id + "] Dispatching task=" + task_id + " to N_m3u8DL-RE Stream Engine");
         stream::StreamAdapterConfig scfg{
             m_cfg.nm3u8dl_binary_path,
             m_cfg.ffmpeg_binary_path,
@@ -360,6 +420,12 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
 
     local_task.speed_bps = 0;
     local_task.updated_at_ms = NowEpochMs();
+
+    OPENIDM_LOG_INFO("Controller",
+        "[" + local_task.correlation_id + "] Task finished id=" + task_id +
+        " state=" + TaskStateToString(local_task.state) +
+        " bytes=" + std::to_string(local_task.downloaded_bytes) +
+        (local_task.error_code.empty() ? "" : (" err=" + local_task.error_code)));
 
     // BUG-007 Fix: Granular merge under m_mutex without resurrecting deleted tasks
     bool should_persist = false;

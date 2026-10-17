@@ -244,6 +244,12 @@ bool TestStreamMetaJsonAndDrmRejection() {
     auto flag_inj = adapter.ValidateManifestSafety("--decryption-binary-path=/tmp/evil", "");
     ASSERT_TRUE(!flag_inj.ok() && flag_inj.error->code == "ERR_SEC_FLAG_INJECTION", "Blocked leading '-' flag injection in URL");
 
+    auto json_as_m3u8 = adapter.ValidateManifestSafety("https://www.youtube.com/watch?v=dQw4w9WgXcQ", R"({"fluxType":"YOUTUBE_STREAM","videoId":"dQw4w9WgXcQ"})");
+    ASSERT_TRUE(!json_as_m3u8.ok() && json_as_m3u8.error->code == "ERR_STREAM_INVALID_MANIFEST", "Rejected YouTube JSON descriptor passed as HLS/DASH manifest");
+    auto watch_as_m3u8 = adapter.ValidateManifestSafety("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "");
+    ASSERT_TRUE(!watch_as_m3u8.ok() && watch_as_m3u8.error->code == "ERR_STREAM_INVALID_MANIFEST", "Rejected YouTube watch page URL passed directly to N_m3u8DL-RE");
+
+
     std::filesystem::remove_all(tmp_dir);
     return true;
 }

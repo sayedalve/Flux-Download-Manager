@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# OpenIDM -- Reproducible Windows 11 x64 Build, PE32+ Verification, Test and Installer Pipeline
-# Detects MSVC / Windows SDK / CMake / Inno Setup, compiles openidm.exe (WIN32 GUI subsystem),
-# openidm-nmh.exe (CUI subsystem), and openidm_unit_tests.exe, validates PE32+ x64 headers,
-# provisions stream workers, runs automated unit/extension/integration tests, and compiles
-# the production installer dist/OpenIDM-Setup-x64-0.2.0.exe.
+# Flux Download Manager -- Reproducible Windows 11 x64 Portable Build, PE32+ Verification & Test Pipeline
+# Detects MSVC / Windows SDK / CMake, compiles flux.exe (WIN32 GUI subsystem),
+# flux-nmh.exe (CUI subsystem), and flux_unit_tests.exe, validates PE32+ x64 headers,
+# provisions stream workers, runs automated unit/extension/integration tests, and stages
+# the portable application at dist/Flux.exe with the loadable browser extension in extension/.
+# Note: Does NOT create an installer, setup executable, or MSI by default (Release Requirement 6).
 
 param(
+    [switch]$Clean = $false,
+    [switch]$Incremental = $false,
     [switch]$SkipWorkerFetch = $false,
     [switch]$SkipTests = $false,
-    [switch]$SkipInstaller = $false
+    [switch]$SkipInstaller = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,16 +20,22 @@ $BuildDir = Join-Path $RepoRoot "build\win-x64"
 $ToolsWinDir = Join-Path $RepoRoot "tools\win-x64"
 $DistDir = Join-Path $RepoRoot "dist"
 
+if ($Clean) {
+    Write-Host "`n==> [Clean] Resetting build directory for full clean build: $BuildDir..."
+    if (Test-Path $BuildDir) {
+        Remove-Item -Recurse -Force $BuildDir
+    }
+}
+
 Write-Host "================================================================="
-Write-Host "     Flux Download Manager v0.3.0 Windows 11 x64 Build Pipeline  "
+Write-Host "   Flux Download Manager v0.3.0 Windows 11 x64 Portable Pipeline "
 Write-Host "================================================================="
 
 # -----------------------------------------------------------------------------
 # 1. Toolchain and Environment Detection
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [1/8] Detecting Compiler, Windows SDK, CMake, and Build Tools..."
+Write-Host "`n==> [1/7] Detecting Compiler, Windows SDK, CMake, and Build Tools..."
 
-# 1.1 Locate CMake
 $CMakeCmd = $null
 if (Get-Command "cmake.exe" -ErrorAction SilentlyContinue) {
     $CMakeCmd = (Get-Command "cmake.exe").Source
@@ -51,34 +60,10 @@ if (-not $CMakeCmd) {
 }
 Write-Host "  [+] CMake: $CMakeCmd"
 
-# 1.2 Locate Inno Setup 6 ISCC
-$IsccCmd = $null
-if (Get-Command "ISCC.exe" -ErrorAction SilentlyContinue) {
-    $IsccCmd = (Get-Command "ISCC.exe").Source
-} else {
-    $isccCandidates = @(
-        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
-        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        "C:\Program Files\Inno Setup 6\ISCC.exe"
-    )
-    foreach ($cand in $isccCandidates) {
-        if (Test-Path $cand) {
-            $IsccCmd = $cand
-            break
-        }
-    }
-}
-if ($IsccCmd) {
-    Write-Host "  [+] Inno Setup: $IsccCmd"
-} else {
-    Write-Warning "Inno Setup 6 (ISCC.exe) not found. Pass -SkipInstaller if installer compilation is not required."
-}
-
-# 1.3 Detect Visual Studio Generator
 $ConfigureArgs = @("-S", $RepoRoot, "-B", $BuildDir, "-A", "x64", "-DCMAKE_BUILD_TYPE=Release")
 if (-not (Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
     $helpText = & $CMakeCmd --help
-    if ($helpText -match '\*\s+(Visual Studio \d+ \d+)') {
+    if (($helpText -join "`n") -match '\*\s+(Visual Studio \d+ \d+)') {
         $Generator = $Matches[1]
         $ConfigureArgs += @("-G", $Generator)
         Write-Host "  [+] Generator: $Generator (x64)"
@@ -90,7 +75,7 @@ if (-not (Test-Path (Join-Path $BuildDir "CMakeCache.txt"))) {
 # -----------------------------------------------------------------------------
 # 2. Configure CMake Build
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [2/8] Configuring CMake Release build in $BuildDir..."
+Write-Host "`n==> [2/7] Configuring CMake Release build in $BuildDir..."
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 & $CMakeCmd @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed with exit code $LASTEXITCODE" }
@@ -98,8 +83,8 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed with exit code $LAS
 # -----------------------------------------------------------------------------
 # 3. Compile Windows x64 Targets
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [3/8] Compiling Windows x64 targets (flux, flux-nmh, flux_unit_tests)..."
-& $CMakeCmd --build $BuildDir --config Release --target flux flux-nmh flux_unit_tests sqlite3
+Write-Host "`n==> [3/7] Compiling Windows x64 targets (flux, flux-nmh, flux_unit_tests, N_m3u8DL-RE)..."
+& $CMakeCmd --build $BuildDir --config Release --target flux flux-nmh flux_unit_tests N_m3u8DL-RE sqlite3
 if ($LASTEXITCODE -ne 0) { throw "CMake compilation failed with exit code $LASTEXITCODE" }
 
 $BuiltDir = $BuildDir
@@ -107,14 +92,12 @@ if (Test-Path (Join-Path $BuildDir "Release\flux.exe")) {
     $BuiltDir = Join-Path $BuildDir "Release"
 }
 
-# Copy targets to canonical locations expected by installer and test suites
-$Targets = @("flux.exe", "flux-nmh.exe", "flux_unit_tests.exe")
+$Targets = @("flux.exe", "flux-nmh.exe", "flux_unit_tests.exe", "N_m3u8DL-RE.exe")
 foreach ($t in $Targets) {
     $srcPath = Join-Path $BuiltDir $t
     Copy-Item -Force $srcPath (Join-Path $BuildDir $t)
     Copy-Item -Force $srcPath (Join-Path $RepoRoot "build\$t")
 }
-# Also create backwards-compatibility aliases if needed
 Copy-Item -Force (Join-Path $BuiltDir "flux.exe") (Join-Path $BuildDir "openidm.exe")
 Copy-Item -Force (Join-Path $BuiltDir "flux-nmh.exe") (Join-Path $BuildDir "openidm-nmh.exe")
 Copy-Item -Force (Join-Path $BuiltDir "flux_unit_tests.exe") (Join-Path $BuildDir "openidm_unit_tests.exe")
@@ -122,7 +105,7 @@ Copy-Item -Force (Join-Path $BuiltDir "flux_unit_tests.exe") (Join-Path $BuildDi
 # -----------------------------------------------------------------------------
 # 4. Verify PE32+ Headers and Subsystems
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [4/8] Verifying PE32+ AMD64 signatures and subsystem types..."
+Write-Host "`n==> [4/7] Verifying PE32+ AMD64 signatures and subsystem types..."
 
 function Verify-PeBinary([string]$FilePath, [int]$ExpectedSubsystem, [string]$SubsystemName) {
     if (-not (Test-Path $FilePath)) {
@@ -157,11 +140,12 @@ function Verify-PeBinary([string]$FilePath, [int]$ExpectedSubsystem, [string]$Su
 Verify-PeBinary (Join-Path $BuildDir "flux.exe") 2 "IMAGE_SUBSYSTEM_WINDOWS_GUI"
 Verify-PeBinary (Join-Path $BuildDir "flux-nmh.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 Verify-PeBinary (Join-Path $BuildDir "flux_unit_tests.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+Verify-PeBinary (Join-Path $BuildDir "N_m3u8DL-RE.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 
 # -----------------------------------------------------------------------------
 # 5. Provision and Verify Upstream Stream Workers
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [5/8] Provisioning and verifying upstream stream workers..."
+Write-Host "`n==> [5/7] Provisioning and verifying upstream stream workers..."
 New-Item -ItemType Directory -Force -Path $ToolsWinDir | Out-Null
 $NmExe = Join-Path $ToolsWinDir "N_m3u8DL-RE.exe"
 $FfExe = Join-Path $ToolsWinDir "ffmpeg.exe"
@@ -180,71 +164,15 @@ if (-not (Test-Path $FfExe)) {
 Verify-PeBinary $NmExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 Verify-PeBinary $FfExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 
-# Copy workers to tools root for local multi-process resolution
 $RootTools = Join-Path $RepoRoot "tools"
 New-Item -ItemType Directory -Force -Path $RootTools | Out-Null
 Copy-Item -Force $NmExe (Join-Path $RootTools "N_m3u8DL-RE.exe")
 Copy-Item -Force $FfExe (Join-Path $RootTools "ffmpeg.exe")
 
 # -----------------------------------------------------------------------------
-# 6. Test Suite Execution
+# 6. Stage Portable Distribution at dist/Flux.exe (No Installer / No MSI)
 # -----------------------------------------------------------------------------
-if (-not $SkipTests) {
-    Write-Host "`n==> [6/8] Executing Test Suites..."
-
-    # 6.1 C++ Unit Tests
-    Write-Host "  --> [A] C++20 Unit and Regression Tests (13 Suites)..."
-    & (Join-Path $BuildDir "flux_unit_tests.exe")
-    if ($LASTEXITCODE -ne 0) { throw "C++20 unit test suite failed!" }
-
-    # 6.2 Browser Extension Tests
-    if (Get-Command "node" -ErrorAction SilentlyContinue) {
-        Write-Host "  --> [B] Browser Extension Media Detection Tests..."
-        node (Join-Path $RepoRoot "tests\test_extension_detection.js")
-        if ($LASTEXITCODE -ne 0) { throw "Browser extension test suite failed!" }
-    } else {
-        Write-Warning "node.exe not found in PATH -- skipped extension tests."
-    }
-
-    # 6.3 End-to-End Integration Tests
-    if (Get-Command "python" -ErrorAction SilentlyContinue) {
-        Write-Host "  --> [C] End-to-End Integration, Stream and Benchmark Suite..."
-        python (Join-Path $RepoRoot "scripts\run-benchmarks.py")
-        if ($LASTEXITCODE -ne 0) { throw "Integration and benchmark suite failed!" }
-    } else {
-        Write-Warning "python.exe not found in PATH -- skipped integration tests."
-    }
-} else {
-    Write-Host "`n==> [6/8] Tests skipped as requested (-SkipTests)."
-}
-
-# -----------------------------------------------------------------------------
-# 7. Compile Inno Setup Production Installer
-# -----------------------------------------------------------------------------
-if (-not $SkipInstaller) {
-    Write-Host "`n==> [7/8] Compiling Windows 11 x64 Installer via Inno Setup 6..."
-    if (-not $IsccCmd) {
-        throw "ISCC.exe (Inno Setup 6) is required to build the release installer."
-    }
-    New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-    & $IsccCmd (Join-Path $RepoRoot "installer\flux.iss")
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup installer compilation failed!" }
-
-    $InstallerPath = Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe"
-    if (-not (Test-Path $InstallerPath)) {
-        throw "Installer output not found at $InstallerPath"
-    }
-    $instItem = Get-Item $InstallerPath
-    $instSizeMb = [Math]::Round(($instItem.Length / 1MB), 2)
-    Write-Host "  [+] Compiled installer: $InstallerPath ($instSizeMb MB)"
-} else {
-    Write-Host "`n==> [7/8] Installer compilation skipped as requested (-SkipInstaller)."
-}
-
-# -----------------------------------------------------------------------------
-# 8. Checksum Generation and Final Verification
-# -----------------------------------------------------------------------------
-Write-Host "`n==> [8/8] Staging Portable Distribution & Generating Release Checksums..."
+Write-Host "`n==> [6/7] Staging Portable Distribution at dist/Flux.exe..."
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools\win-x64") | Out-Null
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "Flux.exe")
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe")
@@ -258,10 +186,6 @@ $CheckFiles = @(
     (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe"),
     (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
 )
-if (Test-Path (Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe")) {
-    $CheckFiles += (Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe")
-}
-
 
 $ChecksumReport = Join-Path $DistDir "SHA256SUMS.txt"
 $hashLines = @()
@@ -279,6 +203,39 @@ foreach ($f in $CheckFiles) {
 }
 $hashLines | Out-File -Encoding utf8 -FilePath $ChecksumReport
 
+# -----------------------------------------------------------------------------
+# 7. Test Suite Execution
+# -----------------------------------------------------------------------------
+if (-not $SkipTests) {
+    Write-Host "`n==> [7/7] Executing Test Suites..."
+
+    Write-Host "  --> [A] C++20 Unit and Regression Tests..."
+    & (Join-Path $BuildDir "flux_unit_tests.exe")
+    if ($LASTEXITCODE -ne 0) { throw "C++20 unit test suite failed!" }
+
+    if (Get-Command "node" -ErrorAction SilentlyContinue) {
+        Write-Host "  --> [B] Browser Extension Media Detection Tests..."
+        node (Join-Path $RepoRoot "tests\test_extension_detection.js")
+        if ($LASTEXITCODE -ne 0) { throw "Browser extension test suite failed!" }
+    } else {
+        Write-Warning "node.exe not found in PATH -- skipped extension tests."
+    }
+
+    if (Get-Command "python" -ErrorAction SilentlyContinue) {
+        Write-Host "  --> [C] Deterministic Pipeline & Integration Suite..."
+        python (Join-Path $RepoRoot "tests\test_repair_pipeline_e2e.py")
+        if ($LASTEXITCODE -ne 0) { throw "Deterministic repair pipeline test suite failed!" }
+    } else {
+        Write-Warning "python.exe not found in PATH -- skipped integration tests."
+    }
+} else {
+    Write-Host "`n==> [7/7] Tests skipped as requested (-SkipTests)."
+}
+
 Write-Host "`n================================================================="
-Write-Host "     Windows 11 x64 Build & Verification Completed Successfully  "
+Write-Host "   Windows 11 x64 Portable Build & Verification Completed        "
+Write-Host "   Portable App : $DistDir\Flux.exe                              "
+Write-Host "   Native Host  : $DistDir\flux-nmh.exe                          "
+Write-Host "   Extension Dir: $RepoRoot\extension                            "
+Write-Host "   Register NMH : .\scripts\register-native-messaging.ps1        "
 Write-Host "=================================================================`n"

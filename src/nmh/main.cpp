@@ -49,10 +49,19 @@ HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem:
     if (h != INVALID_HANDLE_VALUE) return h;
 
     if (!daemon_bin_path.empty() && std::filesystem::exists(daemon_bin_path)) {
-        std::wstring cmd = L"\"" + daemon_bin_path.wstring() + L"\" --daemon --ipc-socket \"" + wpipe + L"\"";
+        const char* headless_env = std::getenv("FLUX_HEADLESS_DAEMON");
+        bool launch_headless = (headless_env && headless_env[0] == '1');
+        std::wstring cmd = launch_headless
+            ? (L"\"" + daemon_bin_path.wstring() + L"\" --daemon --ipc-socket \"" + wpipe + L"\"")
+            : (L"\"" + daemon_bin_path.wstring() + L"\" --ipc-socket \"" + wpipe + L"\"");
         STARTUPINFOW si{sizeof(STARTUPINFOW)};
+        if (!launch_headless) {
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_SHOWNORMAL;
+        }
+        DWORD creation_flags = launch_headless ? (CREATE_NO_WINDOW | DETACHED_PROCESS) : 0;
         PROCESS_INFORMATION pi{};
-        if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, creation_flags, nullptr, nullptr, &si, &pi)) {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
         }
@@ -118,7 +127,10 @@ int main(int argc, char* argv[]) {
     if (argc > 0 && argv[0]) {
         std::filesystem::path self_path = std::filesystem::path(argv[0]);
 #ifdef _WIN32
-        std::filesystem::path candidate = self_path.parent_path() / "flux.exe";
+        std::filesystem::path candidate = self_path.parent_path() / "Flux.exe";
+        if (!std::filesystem::exists(candidate)) {
+            candidate = self_path.parent_path() / "flux.exe";
+        }
         if (!std::filesystem::exists(candidate)) {
             candidate = self_path.parent_path() / "openidm.exe";
         }

@@ -394,7 +394,8 @@ bool DesktopView::MatchesCategory(const TaskModel& t, SidebarCategory cat) const
             return t.state == TaskState::kFailed || t.state == TaskState::kCanceled;
         case SidebarCategory::kVideoDownloads:
             return t.task_type == TaskType::kStreamHls || t.task_type == TaskType::kStreamDash ||
-                   t.task_type == TaskType::kStreamMss || t.category == "Video";
+                   t.task_type == TaskType::kStreamMss || t.task_type == TaskType::kYouTubeExtraction ||
+                   t.category == "Video";
         case SidebarCategory::kScheduled:
             return t.scheduled;
     }
@@ -569,6 +570,7 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
 
         if (t.task_type == TaskType::kStreamHls) row.file_type_badge = "HLS STREAM";
         else if (t.task_type == TaskType::kStreamDash) row.file_type_badge = "DASH STREAM";
+        else if (t.task_type == TaskType::kYouTubeExtraction) row.file_type_badge = "YOUTUBE";
         else row.file_type_badge = t.range_supported ? "HTTP MULTI" : "HTTP FILE";
 
         if (!t.status_detail.empty()) {
@@ -721,6 +723,12 @@ TaskDetailsViewModel DesktopView::BuildSelectedTaskDetails() const {
         vm.engine_name = "Brisk Segmented HTTP/1.1 Engine (" + std::to_string(t.max_connections) + " max connections)";
         vm.stream_format = t.range_supported ? "HTTP/1.1 Byte-Range (206 Partial Content)" : "HTTP/1.1 Single-Stream (200 OK)";
         vm.selected_tracks_summary = "N/A (Direct File Transfer — " + std::to_string(t.segments.size()) + " segments)";
+    } else if (t.task_type == TaskType::kYouTubeExtraction) {
+        vm.engine_name = "YouTube Extractor (yt-dlp / Adaptive Track Muxer) + FFmpeg";
+        vm.stream_format = "YouTube Adaptive / Progressive Stream";
+        vm.selected_tracks_summary = "Video: " + t.stream_options.video_filter +
+                                     " | Audio: " + t.stream_options.audio_filter +
+                                     " | Container: ." + t.stream_options.output_format;
     } else {
         vm.engine_name = "N_m3u8DL-RE + FFmpeg Managed Stream Pipeline";
         vm.stream_format = (t.task_type == TaskType::kStreamDash) ? "MPEG-DASH (.mpd)" : "Apple HLS (.m3u8)";
@@ -1729,6 +1737,18 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (wParam == IDT_UI_REFRESH) {
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            return 0;
+        }
+        case (WM_APP + 105): {
+            if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            SetForegroundWindow(hwnd);
+            if (ctx && ctx->view) {
+                ctx->view->SelectFirstRow();
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_KEYDOWN: {

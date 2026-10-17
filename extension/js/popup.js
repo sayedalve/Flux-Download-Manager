@@ -85,6 +85,14 @@ function renderDetectedMediaList(candidates, options = {}) {
     const variantNote = (item.variants && item.variants.length > 0)
       ? `<small>(+${item.variants.length} sub-playlists grouped)</small>`
       : "";
+    const qualitiesList = Array.isArray(item.qualities) ? item.qualities : [];
+    const qualitySelectHtml = qualitiesList.length > 0
+      ? `<select class="quality-select" data-id="${item.candidateId}" title="Select video quality">${qualitiesList.map(q => {
+          const qSize = (q.size && q.size > 0) ? (" · " + formatMediaSize(q.size)) : "";
+          const qLabel = (q.label || q.resolution || "Auto") + qSize;
+          return `<option value="${q.id || q.resolution || "best"}">${qLabel}</option>`;
+        }).join("")}</select>`
+      : "";
     const statusText = item.handoffStatus || "Ready";
     const actionLabel = (!desktopConnected && !isStream) ? "Browser Download" : "Download in Flux";
 
@@ -101,7 +109,10 @@ function renderDetectedMediaList(candidates, options = {}) {
           ${variantNote}
         </div>
       </div>
-      <button class="dl-btn" data-url="${item.url}" data-id="${item.candidateId}">${actionLabel}</button>
+      <div class="media-actions">
+        ${qualitySelectHtml}
+        <button class="dl-btn" data-url="${item.url}" data-id="${item.candidateId}">${actionLabel}</button>
+      </div>
     </div>`;
   }).join("\n");
 
@@ -147,6 +158,8 @@ function initPopupUI() {
         const targetBtn = ev.currentTarget || ev.target;
         const candidateId = targetBtn.getAttribute("data-id");
         const url = targetBtn.getAttribute("data-url");
+        const qSelect = mediaListEl.querySelector(`.quality-select[data-id="${candidateId}"]`);
+        const qualityId = qSelect ? qSelect.value : "";
         targetBtn.textContent = "Connecting...";
         targetBtn.disabled = true;
 
@@ -155,6 +168,7 @@ function initPopupUI() {
             action: "downloadMedia",
             candidateId,
             url,
+            qualityId,
             tabId: currentTabId,
             tabUrl: currentTabUrl
           }, (resp) => {

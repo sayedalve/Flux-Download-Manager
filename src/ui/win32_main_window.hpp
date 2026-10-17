@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — Windows 11 Desktop Interface, Hit-Testing, Interaction Controller & Supporting Dialogs
+// Flux Download Manager — Windows 11 Cosmic Dark Desktop Interface, Star-Field Controller,
+// Multi-Column Hit-Testing, Interaction Controller & Professional Settings Center
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/download_controller.hpp"
@@ -47,6 +50,26 @@ enum class ToolbarActionId {
     kClearHistory,
     kOpenFolder,
     kSettings
+};
+
+enum class SettingsCategory {
+    kGeneral = 0,
+    kDownloads,
+    kSaveLocations,
+    kConnections,
+    kSpeedLimits,
+    kBrowserIntegration,
+    kAboutAndDiagnostics
+};
+
+enum class SettingsControlType {
+    kToggleSwitch = 0,
+    kNumericStepper,
+    kFolderSelector,
+    kBandwidthControl,
+    kActionButton,
+    kReadOnlyStatus,
+    kCategoryRuleTable
 };
 
 enum class HitTargetType {
@@ -94,6 +117,7 @@ struct TaskRowLayout {
     RectI filename_rect;
     RectI progress_bar_rect;
     RectI action_button_rect;
+    std::vector<RectI> cell_rects;
 };
 
 struct WindowLayoutGeometry {
@@ -137,12 +161,16 @@ struct CategoryCounts {
 
 struct FormattedTaskRow {
     std::string task_id;
+    TaskState task_state{TaskState::kQueued};
     std::string display_filename;
     std::string full_filename_tooltip;
     bool is_filename_truncated{false};
     std::string file_type_badge;
     bool is_stream{false};
     std::string status_text;
+    std::string status_tone; // "active", "probing", "paused", "queued", "completed", "failed", "canceled"
+    ColorRgba status_color;
+    ColorRgba badge_color;
     std::string progress_text;
     double progress_fraction{0.0};
     bool progress_indeterminate{false};
@@ -150,6 +178,7 @@ struct FormattedTaskRow {
     std::string speed_text;
     std::string eta_text;
     std::string primary_action_label;
+    bool primary_action_enabled{true};
     bool selected{false};
 };
 
@@ -179,10 +208,12 @@ struct StatusBarViewModel {
     size_t active_downloads{0};
     uint64_t total_speed_bps{0};
     std::string formatted_total_speed;
+    std::string formatted_speed_limit;
     size_t remaining_queued{0};
     bool browser_ipc_listening{false};
     bool browser_capture_enabled{true};
     bool workers_ready{false};
+    bool cosmic_motion_active{true};
     std::string status_message;
 };
 
@@ -204,7 +235,10 @@ struct AddDownloadDialogInput {
 struct BrowserIntegrationStatusView {
     bool ipc_server_running{false};
     std::string ipc_endpoint;
+    std::string native_host_id{"com.flux.downloadmanager"};
     bool capture_enabled{true};
+    uint64_t min_capture_size_bytes{1048576};
+    std::vector<std::string> intercepted_extensions;
     bool nm3u8dl_available{false};
     std::string nm3u8dl_path;
     bool ffmpeg_available{false};
@@ -217,7 +251,59 @@ struct AboutDialogView {
     std::string version{"0.3.0"};
     std::string license{"GPL-3.0-or-later"};
     std::string target_platform{"Windows 11 x64 (Native Win32 + Direct2D/GDI)"};
+    std::string data_dir_path;
+    std::string state_db_path;
     std::vector<std::string> upstream_attributions;
+};
+
+struct FileCategoryRuleView {
+    std::string category_name;
+    std::string subfolder_path;
+    std::string extensions_summary;
+};
+
+struct SettingsItemViewModel {
+    std::string key;
+    SettingsCategory category{SettingsCategory::kGeneral};
+    SettingsControlType control_type{SettingsControlType::kReadOnlyStatus};
+    std::string label;
+    std::string description;
+    std::string current_value_display;
+    std::string default_value_display;
+    bool is_modified{false};
+    bool is_advanced{false};
+    bool is_dangerous{false};
+    bool requires_confirmation{false};
+    bool enabled{true};
+    std::string validation_error;
+};
+
+struct SettingsCategorySummary {
+    SettingsCategory category{SettingsCategory::kGeneral};
+    std::string title;
+    std::string subtitle;
+    size_t item_count{0};
+    size_t modified_count{0};
+    bool selected{false};
+    RectI rect;
+};
+
+struct SettingsCenterViewModel {
+    bool is_open{false};
+    SettingsCategory selected_category{SettingsCategory::kGeneral};
+    std::string search_query;
+    bool show_advanced{true};
+    bool has_unsaved_changes{false};
+    bool is_valid{true};
+    std::string validation_summary;
+    std::string status_banner;
+    AppSettings draft_settings;
+    AppSettings committed_settings;
+    std::vector<SettingsCategorySummary> categories;
+    std::vector<SettingsItemViewModel> visible_items;
+    std::vector<FileCategoryRuleView> category_rules;
+    BrowserIntegrationStatusView browser_status;
+    AboutDialogView about_info;
 };
 
 class DesktopView {
@@ -233,6 +319,14 @@ public:
     bool IsCompactColumnsMode() const { return m_window_width < m_metrics.compact_width_threshold; }
     std::vector<std::string> GetVisibleColumns() const;
 
+    // Cosmic Star-Field Background State & Performance Lifecycle
+    void SetWindowVisibility(bool visible, bool minimized = false);
+    bool IsWindowVisibleState() const { return m_window_visible && !m_window_minimized; }
+    bool IsCosmicAnimationActive() const;
+    void AdvanceCosmicAnimation(int64_t delta_ms);
+    int64_t GetCosmicElapsedMs() const { return m_cosmic_elapsed_ms; }
+    CosmicBackgroundState ComputeCosmicBackgroundState(int64_t elapsed_ms = -1) const;
+
     WindowLayoutGeometry ComputeLayoutGeometry(size_t scroll_offset = 0) const;
     HitTestResult HitTestPoint(int x, int y, size_t scroll_offset = 0) const;
     bool HandleMouseClick(int x, int y, bool double_click = false, size_t scroll_offset = 0);
@@ -247,6 +341,8 @@ public:
 
     static std::string FormatBytes(uint64_t bytes);
     static std::string FormatSpeed(uint64_t bps);
+    static std::string FormatBandwidthLimit(uint64_t bps);
+    static Result<uint64_t> ParseBandwidthLimitInput(std::string_view text);
     static std::string FormatEta(uint64_t remaining_bytes, uint64_t speed_bps);
     static std::string TruncateFilenameGracefully(std::string_view filename, size_t max_chars = 38);
 
@@ -279,7 +375,29 @@ public:
     StatusBarViewModel BuildStatusBar() const;
     std::string GetEmptyStateMessage() const;
 
-    // All 20 Interactive Actions & Dialog Controllers
+    // Professional Download Manager Settings Center
+    void OpenSettingsCenter(SettingsCategory initial_category = SettingsCategory::kGeneral);
+    void CloseSettingsCenter(bool discard_unsaved = true);
+    bool IsSettingsCenterOpen() const { return m_settings_open; }
+    void SelectSettingsCategory(SettingsCategory category);
+    SettingsCategory GetSelectedSettingsCategory() const { return m_settings_category; }
+    static std::string SettingsCategoryToLabel(SettingsCategory category);
+    void SetSettingsSearchQuery(std::string query);
+    const std::string& GetSettingsSearchQuery() const { return m_settings_search_query; }
+    void SetShowAdvancedSettings(bool show_advanced);
+    bool GetShowAdvancedSettings() const { return m_settings_show_advanced; }
+
+    const AppSettings& GetSettingsDraft() const { return m_settings_draft; }
+    void SetSettingsDraft(const AppSettings& draft);
+    Result<void> SetSettingsDraftField(std::string_view key, std::string_view value_str);
+    Result<void> ResetSettingsDraftField(std::string_view key);
+    Result<void> ValidateSettingsDraft() const;
+    Result<void> ApplySettingsDraft();
+    void CancelSettingsDraft();
+    std::vector<FileCategoryRuleView> GetSupportedCategoryRules() const;
+    SettingsCenterViewModel BuildSettingsCenterViewModel() const;
+
+    // Interactive Actions & Dialog Controllers
     Result<TaskModel> SubmitAddDownloadDialog(const AddDownloadDialogInput& input);
     Result<stream::StreamProbeResult> ProbeStreamForDialog(
         const std::string& manifest_url,
@@ -331,6 +449,11 @@ public:
 private:
     bool MatchesCategory(const TaskModel& t, SidebarCategory cat) const;
     bool MatchesSearch(const TaskModel& t) const;
+    static AppSettings BuildDefaultAppSettings(const DownloadController& controller);
+    std::vector<SettingsItemViewModel> BuildAllSettingsItems(
+        const AppSettings& draft,
+        const AppSettings& committed,
+        const AppSettings& defaults) const;
 
     DownloadController& m_controller;
     ipc::IpcServer* m_ipc_server{nullptr};
@@ -341,12 +464,23 @@ private:
     std::string m_theme_name{"dark"};
     ThemePalette m_palette;
 
+    bool m_window_visible{true};
+    bool m_window_minimized{false};
+    int64_t m_cosmic_elapsed_ms{0};
+
     SidebarCategory m_selected_category{SidebarCategory::kAllDownloads};
     SortColumn m_sort_column{SortColumn::kCreatedAt};
     bool m_sort_ascending{false};
     std::string m_search_query;
     std::string m_selected_task_id;
     std::string m_last_feedback_message{"Ready"};
+
+    bool m_settings_open{false};
+    SettingsCategory m_settings_category{SettingsCategory::kGeneral};
+    std::string m_settings_search_query;
+    bool m_settings_show_advanced{true};
+    AppSettings m_settings_draft;
+    std::string m_settings_validation_error;
 
     int m_hovered_toolbar_index{-1};
     int m_hovered_sidebar_index{-1};

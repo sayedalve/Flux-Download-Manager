@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/popup.js) for Flux Popup UI.
-// Supports media type filtering (All / Streams / Direct), search filtering,
+// Adapted from xifangczy/cat-catch (js/popup.js) for Flux Cosmic Dark Popup UI.
+// Supports media type filtering (All / Streams / Direct), live count badges, search filtering,
 // resolution/size formatting, real-time background query, and batch/single download handoff.
 
 function formatMediaSize(bytes) {
@@ -73,6 +73,7 @@ function renderDetectedMediaList(candidates, options = {}) {
 
   const itemsHtml = filtered.map(item => {
     const isStream = isStreamCandidate(item);
+    const isUnavailable = Boolean(item.unavailable || item.drmProtected || !item.url);
     const badge = isStream
       ? item.streamType
       : (item.ext ? item.ext.toUpperCase() : (item.streamType || "MEDIA"));
@@ -80,23 +81,31 @@ function renderDetectedMediaList(candidates, options = {}) {
     const rawName = item.pageTitle || item.fileName || (item.url ? item.url.split("?")[0].split("/").pop() : "media");
     const sourceHost = extractSourceHost(item.tabUrl || item.url);
     const qualityTag = item.resolution
-      ? `<span>${item.resolution}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
-      : `<span>${formatMediaSize(item.size)}</span>`;
+      ? `<span class="media-size-tag">${item.resolution}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
+      : `<span class="media-size-tag">${formatMediaSize(item.size)}</span>`;
     const variantNote = (item.variants && item.variants.length > 0)
       ? `<small>(+${item.variants.length} sub-playlists grouped)</small>`
       : "";
     const qualitiesList = Array.isArray(item.qualities) ? item.qualities : [];
     const qualitySelectHtml = qualitiesList.length > 0
-      ? `<select class="quality-select" data-id="${item.candidateId}" title="Select video quality">${qualitiesList.map(q => {
+      ? `<select class="quality-select" data-id="${item.candidateId}" title="Select video quality"${isUnavailable ? " disabled" : ""}>${qualitiesList.map(q => {
           const qSize = (q.size && q.size > 0) ? (" · " + formatMediaSize(q.size)) : "";
           const qLabel = (q.label || q.resolution || "Auto") + qSize;
           return `<option value="${q.id || q.resolution || "best"}">${qLabel}</option>`;
         }).join("")}</select>`
       : "";
-    const statusText = item.handoffStatus || "Ready";
-    const actionLabel = (!desktopConnected && !isStream) ? "Browser Download" : "Download in Flux";
 
-    return `<div class="media-item" data-id="${item.candidateId}" data-stream="${isStream}">
+    const statusText = isUnavailable
+      ? (item.drmProtected ? "DRM Protected" : "Unavailable")
+      : (item.handoffStatus || "Ready");
+    const statusAttr = isUnavailable
+      ? "unavailable"
+      : (statusText.includes("Queued") ? "queued" : (statusText.includes("Fallback") ? "fallback" : "ready"));
+    const actionLabel = isUnavailable
+      ? "Unavailable"
+      : ((!desktopConnected && !isStream) ? "Browser Download" : "Download in Flux");
+
+    return `<div class="media-item" data-id="${item.candidateId}" data-stream="${isStream}"${isUnavailable ? ' data-unavailable="true"' : ""}>
       <div class="media-meta">
         <div class="media-title-row">
           <span class="${badgeClass}">${badge}</span>
@@ -105,13 +114,13 @@ function renderDetectedMediaList(candidates, options = {}) {
         <div class="media-sub-row">
           <span>${sourceHost}</span>
           ${qualityTag}
-          <span class="item-status">${statusText}</span>
+          <span class="item-status" data-status="${statusAttr}">${statusText}</span>
           ${variantNote}
         </div>
       </div>
       <div class="media-actions">
         ${qualitySelectHtml}
-        <button class="dl-btn" data-url="${item.url}" data-id="${item.candidateId}">${actionLabel}</button>
+        <button class="dl-btn" data-url="${item.url || ""}" data-id="${item.candidateId}"${isUnavailable ? " disabled" : ""}>${actionLabel}</button>
       </div>
     </div>`;
   }).join("\n");
@@ -133,13 +142,37 @@ function initPopupUI() {
 
   const mediaListEl = document.getElementById("mediaList");
   const connectionBadge = document.getElementById("connectionBadge");
+  const siteHostLabel = document.getElementById("siteHostLabel");
   const siteToggle = document.getElementById("siteToggle");
   const searchInput = document.getElementById("searchInput");
   const clearListBtn = document.getElementById("clearListBtn");
   const batchDownloadBtn = document.getElementById("batchDownloadBtn");
+  const footerMeta = document.getElementById("footerMeta");
+  const countAllEl = document.getElementById("countAll");
+  const countStreamEl = document.getElementById("countStream");
+  const countDirectEl = document.getElementById("countDirect");
   const filterTabs = document.querySelectorAll(".tab-btn");
 
+  function updateTabCountBadges() {
+    const allCount = Array.isArray(currentCandidates) ? currentCandidates.length : 0;
+    const streamCount = filterPopupCandidates(currentCandidates, "stream", "").length;
+    const directCount = filterPopupCandidates(currentCandidates, "direct", "").length;
+    if (countAllEl) countAllEl.textContent = String(allCount);
+    if (countStreamEl) countStreamEl.textContent = String(streamCount);
+    if (countDirectEl) countDirectEl.textContent = String(directCount);
+    if (footerMeta) {
+      footerMeta.textContent = allCount > 0
+        ? `${allCount} item${allCount === 1 ? "" : "s"} detected`
+        : "Alt+Click bypasses capture";
+    }
+    if (batchDownloadBtn) {
+      const visible = filterPopupCandidates(currentCandidates, activeFilterMode, activeSearchQuery);
+      batchDownloadBtn.disabled = visible.length === 0;
+    }
+  }
+
   function refreshListDisplay() {
+    updateTabCountBadges();
     if (!mediaListEl) return;
     mediaListEl.innerHTML = renderDetectedMediaList(currentCandidates, {
       filterMode: activeFilterMode,
@@ -156,6 +189,7 @@ function initPopupUI() {
     buttons.forEach(btn => {
       btn.addEventListener("click", (ev) => {
         const targetBtn = ev.currentTarget || ev.target;
+        if (targetBtn.disabled) return;
         const candidateId = targetBtn.getAttribute("data-id");
         const url = targetBtn.getAttribute("data-url");
         const qSelect = mediaListEl.querySelector(`.quality-select[data-id="${candidateId}"]`);
@@ -210,6 +244,9 @@ function initPopupUI() {
     const queryAndLoad = (tabId, tabUrl) => {
       currentTabId = tabId;
       currentTabUrl = tabUrl || "";
+      if (siteHostLabel) {
+        siteHostLabel.textContent = currentTabUrl ? extractSourceHost(currentTabUrl) : "Active tab";
+      }
       chrome.runtime.sendMessage({
         action: "getMediaList",
         tabId: currentTabId,
@@ -245,7 +282,6 @@ function initPopupUI() {
 
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs && tabs[0]) {
-        // If popup.html itself was opened as a tab, find the active non-extension tab in the window
         let targetTab = tabs[0];
         if (targetTab.url && targetTab.url.startsWith("chrome-extension://")) {
           chrome.tabs.query({ currentWindow: true }, (allTabs) => {
@@ -272,8 +308,12 @@ function initPopupUI() {
   // Filter tab buttons
   filterTabs.forEach(tab => {
     tab.addEventListener("click", () => {
-      filterTabs.forEach(t => t.classList.remove("active"));
+      filterTabs.forEach(t => {
+        t.classList.remove("active");
+        t.setAttribute("aria-selected", "false");
+      });
       tab.classList.add("active");
+      tab.setAttribute("aria-selected", "true");
       activeFilterMode = tab.getAttribute("data-filter") || "all";
       refreshListDisplay();
     });

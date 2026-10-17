@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — Automated C++20 Unit & Regression Test Suite (10 Suites)
+// Flux Download Manager — Automated C++20 Unit & Regression Test Suite (14 Suites)
 // Verifies PathSanitizer, Dynamic Worker Discovery, Disk Space Guard, Logger Redaction,
 // CryptoUtils, Brisk SegmentScheduler + Stolen Segment Rollback, SqliteStore + Crash Recovery,
 // Nm3u8dlReAdapter + DRM Rejection, DownloadController Lifecycle + Race Guards,
-// DesktopView Design System + High-DPI Layout, UI Interactions + Redaction, and Keyboard Navigation.
+// Cosmic Dark UI Design System + Star-Field Engine + Static Fallback + Hidden Suspension,
+// UI Interactions + Redaction, Keyboard Navigation, Multi-Column Hit-Testing,
+// and Professional Settings Center (Categories, Search, Validation, Draft/Apply/Reset & Persistence).
 
 #include "brisk_engine/segment_scheduler.hpp"
 #include "common/crypto_utils.hpp"
@@ -68,18 +70,15 @@ bool TestDynamicWorkerAndDiskSpaceGuard() {
     std::filesystem::path exe_dir = PathSanitizer::GetExecutableDir();
     ASSERT_TRUE(!exe_dir.empty(), "GetExecutableDir resolves non-empty path");
 
-    // Verify dynamic discovery of ffmpeg via PATH or tools/ without hardcoded /usr/bin/ffmpeg
     auto ff_path = PathSanitizer::FindWorkerBinary("ffmpeg", exe_dir);
     ASSERT_TRUE(std::filesystem::exists(ff_path), "FindWorkerBinary dynamically discovers ffmpeg");
 
     auto nm_path = PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", exe_dir);
     ASSERT_TRUE(std::filesystem::exists(nm_path), "FindWorkerBinary dynamically discovers N_m3u8DL-RE");
 
-    // Verify pre-flight disk space check (BUG-009 regression test)
     auto ok_space = PathSanitizer::CheckAvailableDiskSpace("/tmp", 1024 * 1024);
     ASSERT_TRUE(ok_space.ok(), "1 MiB disk space check succeeds");
 
-    // Requesting 1 Exabyte must fail immediately with ERR_DISK_FULL
     auto exhausted = PathSanitizer::CheckAvailableDiskSpace(".", 1000000000000ULL);
     ASSERT_TRUE(!exhausted.ok() && exhausted.error->code == "ERR_DISK_FULL", "Exabyte request rejected with ERR_DISK_FULL");
     return true;
@@ -126,12 +125,10 @@ bool TestBriskSegmentSchedulerWorkStealingAndRollback() {
     auto seg1 = sched.AcquireNextOrStealSegment(true);
     ASSERT_TRUE(seg1 != nullptr && seg0->end_offset.load() + 1 == seg1->start_offset, "Worker 1 steals second half");
 
-    // BUG-008 Regression Test: Suppose Server ignores Range header on Worker 1 before any bytes are written
     bool merged = sched.RollbackUnstartedStolenSegment(seg1->segment_id);
     ASSERT_TRUE(merged, "RollbackUnstartedStolenSegment merges unstarted stolen segment back into Seg 0");
     ASSERT_TRUE(seg0->end_offset.load() == kTotalSize - 1, "Seg 0 restored to full [0, kTotalSize - 1] range");
 
-    // Re-steal across 4 workers and verify work-stealing reuse
     seg1 = sched.AcquireNextOrStealSegment(true);
     auto seg2 = sched.AcquireNextOrStealSegment(true);
     auto seg3 = sched.AcquireNextOrStealSegment(true);
@@ -249,7 +246,6 @@ bool TestStreamMetaJsonAndDrmRejection() {
     auto watch_as_m3u8 = adapter.ValidateManifestSafety("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "");
     ASSERT_TRUE(!watch_as_m3u8.ok() && watch_as_m3u8.error->code == "ERR_STREAM_INVALID_MANIFEST", "Rejected YouTube watch page URL passed directly to N_m3u8DL-RE");
 
-
     std::filesystem::remove_all(tmp_dir);
     return true;
 }
@@ -268,7 +264,6 @@ bool TestControllerLifecycleAndDeletedTaskRace() {
     openidm::DownloadController ctrl(cfg);
     ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize DownloadController");
 
-    // Add task in paused mode
     openidm::TaskModel t;
     t.url = "https://example.com/sdk_setup.exe";
     t.file_name = "sdk_setup.exe";
@@ -277,12 +272,10 @@ bool TestControllerLifecycleAndDeletedTaskRace() {
     ASSERT_TRUE(added.ok() && added.value->state == openidm::TaskState::kPaused, "Added paused task");
     std::string tid = added.value->task_id;
 
-    // Cancel task and verify RetryTask increments retry_count and transitions back to QUEUED (or PAUSED on pause)
     ASSERT_TRUE(ctrl.CancelTask(tid).ok(), "CancelTask succeeds");
     auto canceled = ctrl.GetTask(tid);
     ASSERT_TRUE(canceled.has_value() && canceled->state == openidm::TaskState::kCanceled, "Task is CANCELED");
 
-    // Simulate completed file on disk and verify RemoveTask(id, false) NEVER deletes completed user file!
     std::filesystem::create_directories(cfg.default_download_dir);
     std::filesystem::path user_file = cfg.default_download_dir / "completed_doc.pdf";
     std::ofstream(user_file) << "important user content";
@@ -294,16 +287,13 @@ bool TestControllerLifecycleAndDeletedTaskRace() {
     auto added_comp = ctrl.AddTask(t_comp, false, false);
     ASSERT_TRUE(added_comp.ok(), "Added second task");
 
-    // Remove from list without deleting file
     ASSERT_TRUE(ctrl.RemoveTask(added_comp.value->task_id, false).ok(), "RemoveTask(delete_file=false)");
     ASSERT_TRUE(std::filesystem::exists(user_file), "Completed user file preserved on disk when removing from list!");
 
-    // ClearCompletedHistory removes CANCELED task `tid`
     auto cleared = ctrl.ClearCompletedHistory();
     ASSERT_TRUE(cleared.ok() && *cleared.value == 1, "ClearCompletedHistory removed 1 canceled task");
     ASSERT_TRUE(!ctrl.GetTask(tid).has_value(), "Cleared task no longer in controller");
 
-    // Verify Webpage Watch URL rejection
     ASSERT_TRUE(openidm::PathSanitizer::IsWebpageWatchUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ"), "YouTube watch URL recognized as webpage");
     ASSERT_TRUE(openidm::PathSanitizer::IsWebpageWatchUrl("https://youtu.be/dQw4w9WgXcQ"), "youtu.be URL recognized as webpage");
     ASSERT_TRUE(openidm::PathSanitizer::IsWebpageWatchUrl("https://vimeo.com/12345678"), "Vimeo watch URL recognized as webpage");
@@ -324,19 +314,38 @@ bool TestControllerLifecycleAndDeletedTaskRace() {
 }
 
 bool TestDesktopUiDesignSystemAndHighDpiLayout() {
+    using openidm::ui::CosmicRenderMode;
     using openidm::ui::DesignSystem;
     using openidm::ui::ThemeMode;
 
-    // Verify Dark, Light, and System palettes
+    // 1. Verify Minimal Cosmic Dark UI palette & strict dark-mode enforcement
     auto dark = DesignSystem::ResolvePalette("dark", false);
-    auto light = DesignSystem::ResolvePalette("light", false);
-    auto sys_light = DesignSystem::ResolvePalette("system", true);
-    ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#0F172A", "Flux Deep Slate #0F172A background");
-    ASSERT_TRUE(dark.accent_primary.ToCssHex() == "#2563EB", "Flux Blue #2563EB accent");
-    ASSERT_TRUE(light.mode == ThemeMode::kLight && light.surface_primary.ToCssHex() == "#FFFFFF", "Light theme white surface");
-    ASSERT_TRUE(sys_light.mode == ThemeMode::kLight, "System theme honors OS light preference");
+    auto light_req = DesignSystem::ResolvePalette("light", true);
+    auto sys_req = DesignSystem::ResolvePalette("system", true);
+    ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#090D16", "Cosmic Deep Space Charcoal #090D16 background");
+    ASSERT_TRUE(dark.surface_primary.ToCssHex() == "#0F172A", "Cosmic Navy #0F172A surface_primary");
+    ASSERT_TRUE(dark.accent_primary.ToCssHex() == "#2563EB", "Flux Cosmic Blue #2563EB accent");
+    ASSERT_TRUE(dark.accent_cyan.ToCssHex() == "#38BDF8", "Celestial Cyan #38BDF8 accent");
+    ASSERT_TRUE(dark.badge_stream.ToCssHex() == "#8B5CF6", "Nebula Violet #8B5CF6 stream badge");
+    ASSERT_TRUE(light_req.mode == ThemeMode::kDark && sys_req.mode == ThemeMode::kDark, "Application stays strictly in dark mode");
 
-    // Verify High-DPI scaling across 100% (96), 125% (120), 150% (144), and 200% (192)
+    // 2. Verify Cosmic Star-Field Background Engine (Animated Drift, Reduced-Motion Static Fallback, Hidden Suspension)
+    auto bg_t0 = DesignSystem::ComputeCosmicBackground(1280, 720, 96, 0, false, false);
+    auto bg_t30s = DesignSystem::ComputeCosmicBackground(1280, 720, 96, 30000, false, false);
+    ASSERT_TRUE(bg_t0.mode == CosmicRenderMode::kAnimatedDrift && bg_t0.animation_active, "Animated drift active by default");
+    ASSERT_TRUE(bg_t0.layers.size() == 3 && bg_t0.stars.size() == 42, "3 parallax layers and 42 deterministic stars");
+    ASSERT_TRUE(bg_t30s.layers[2].offset_x_px < 0.0, "Star layers drift gently over long periods");
+
+    auto bg_static = DesignSystem::ComputeCosmicBackground(1280, 720, 96, 30000, true, false);
+    ASSERT_TRUE(bg_static.mode == CosmicRenderMode::kStaticFallback && !bg_static.animation_active, "Reduced motion switches to static fallback");
+    ASSERT_TRUE(bg_static.stars.size() == 42 && bg_static.layers[0].offset_x_px == 0.0 && bg_static.layers[2].offset_x_px == 0.0,
+                "Static fallback retains all 42 stars with zero motion");
+
+    auto bg_hidden = DesignSystem::ComputeCosmicBackground(1280, 720, 96, 30000, false, true);
+    ASSERT_TRUE(bg_hidden.mode == CosmicRenderMode::kSuspendedHidden && !bg_hidden.animation_active && bg_hidden.stars.empty(),
+                "Hidden/minimized window suspends cosmic background work");
+
+    // 3. Verify High-DPI scaling across 100% (96), 125% (120), 150% (144), and 200% (192)
     auto m100 = DesignSystem::ComputeMetrics(96);
     auto m125 = DesignSystem::ComputeMetrics(120);
     auto m150 = DesignSystem::ComputeMetrics(144);
@@ -347,7 +356,7 @@ bool TestDesktopUiDesignSystemAndHighDpiLayout() {
     ASSERT_TRUE(m200.min_window_width == 1800 && m200.table_row_height == 88, "200% DPI 2x exact scaling");
     ASSERT_TRUE(m100.font_caption_px >= 11 && m100.font_body_px >= 13, "Enforces >=11px caption and >=13px body floor");
 
-    // Verify graceful filename truncation preserves extension
+    // 4. Verify graceful filename truncation preserves extension
     std::string long_name = "OpenIDM_Enterprise_Windows_11_x64_Offline_Installer_Package_2026.msi";
     std::string trunc = openidm::ui::DesktopView::TruncateFilenameGracefully(long_name, 32);
     ASSERT_TRUE(trunc.size() <= 32 && trunc.find("...") != std::string::npos && trunc.substr(trunc.size() - 4) == ".msi",
@@ -416,7 +425,7 @@ bool TestDesktopUiInteractionsFilteringSortingAndRedaction() {
     ASSERT_TRUE(video_rows.size() == 1 && video_rows[0].file_type_badge == "HLS STREAM", "Video category filters to HLS stream");
     ASSERT_TRUE(video_rows[0].progress_text.find("50.0%") != std::string::npos, "Stream with known segment count shows segment %");
 
-    // 7. Unknown total_bytes on ordinary HTTP file must NOT show a fake percentage (Phase 2D)
+    // 7. Unknown total_bytes on ordinary HTTP file must NOT show a fake percentage
     view.SelectCategory(openidm::ui::SidebarCategory::kAllDownloads);
     view.SetSearchQuery("archive.zip");
     auto archive_rows = view.BuildVisibleTaskRows();
@@ -426,7 +435,7 @@ bool TestDesktopUiInteractionsFilteringSortingAndRedaction() {
                 "Unknown size HTTP task does not display a fake percentage");
     view.SetSearchQuery("");
 
-    // 8. Verify Details Panel strictly redacts Cookie and URL query tokens (Phase 2E)
+    // 8. Verify Details Panel strictly redacts Cookie and URL query tokens
     view.SelectTask(added_stream.value->task_id);
     auto details = view.BuildSelectedTaskDetails();
     ASSERT_TRUE(details.has_selection, "Details panel populated for selected task");
@@ -434,16 +443,19 @@ bool TestDesktopUiInteractionsFilteringSortingAndRedaction() {
     ASSERT_TRUE(details.redacted_headers_summary.find("top_secret_cookie_val") == std::string::npos, "Cookie value redacted in Details Panel");
     ASSERT_TRUE(details.engine_name.find("N_m3u8DL-RE") != std::string::npos, "Details Panel shows stream engine");
 
-    // 9. Settings persistence & restore defaults
+    // 9. Settings persistence & restore defaults (keeping dark mode strictly active)
     openidm::AppSettings custom_s = ctrl.GetSettings();
-    custom_s.theme = "light";
+    custom_s.theme = "light"; // Should be normalized to "dark"
     custom_s.max_concurrent_tasks = 6;
     custom_s.speed_limit_bps = 5242880;
+    custom_s.reduced_motion = true;
     ASSERT_TRUE(view.ActionSaveSettings(custom_s).ok(), "Save custom settings");
-    ASSERT_TRUE(view.GetThemeName() == "light" && ctrl.GetMaxConcurrentTasks() == 6, "Settings applied to view and controller");
+    ASSERT_TRUE(view.GetThemeName() == "dark" && ctrl.GetMaxConcurrentTasks() == 6 && !view.IsCosmicAnimationActive(),
+                "Settings applied to view and controller while keeping dark mode");
 
     auto restored = view.ActionRestoreDefaultSettings();
-    ASSERT_TRUE(restored.ok() && view.GetThemeName() == "dark" && ctrl.GetMaxConcurrentTasks() == 3, "Restored default settings");
+    ASSERT_TRUE(restored.ok() && view.GetThemeName() == "dark" && ctrl.GetMaxConcurrentTasks() == 3 && view.IsCosmicAnimationActive(),
+                "Restored default settings");
 
     ctrl.Shutdown();
     std::filesystem::remove_all(work_dir);
@@ -492,7 +504,6 @@ bool TestKeyboardNavigationAndShortcuts() {
     return true;
 }
 
-
 bool TestDesktopUiHitTestingAndMouseInteractions() {
     std::filesystem::path work_dir = "/tmp/openidm_test_hit_" + openidm::GenerateUuidV4();
     std::filesystem::create_directories(work_dir);
@@ -507,7 +518,6 @@ bool TestDesktopUiHitTestingAndMouseInteractions() {
     openidm::ui::DesktopView view(ctrl);
     view.SetWindowDimensions(1280, 720, 96);
 
-    // Add 2 tasks (1 with a very long filename to trigger truncation & tooltip)
     openidm::TaskModel t1;
     t1.url = "https://example.com/short.zip";
     t1.file_name = "short.zip";
@@ -528,8 +538,8 @@ bool TestDesktopUiHitTestingAndMouseInteractions() {
     ASSERT_TRUE(geom.sidebar_items.size() == 7, "All 7 sidebar categories laid out");
     ASSERT_TRUE(geom.table_columns.size() == 8, "All 8 table columns laid out at 1280px width");
     ASSERT_TRUE(geom.task_rows.size() == 2, "Both task rows laid out");
+    ASSERT_TRUE(geom.task_rows[0].cell_rects.size() == 8, "Each task row has 8 aligned column cell rects");
 
-    // 1. Click Sidebar 'Video Downloads' category (index 5) via pixel coordinates
     const auto& video_cat_rc = geom.sidebar_items[5].rect;
     int click_x = (video_cat_rc.left + video_cat_rc.right) / 2;
     int click_y = (video_cat_rc.top + video_cat_rc.bottom) / 2;
@@ -537,13 +547,11 @@ bool TestDesktopUiHitTestingAndMouseInteractions() {
     ASSERT_TRUE(view.GetSelectedCategory() == openidm::ui::SidebarCategory::kVideoDownloads, "Category switched to Video Downloads");
     ASSERT_TRUE(view.BuildVisibleTaskRows().size() == 1, "Filtered to 1 video task");
 
-    // 2. Click Sidebar 'All Downloads' category (index 0)
     const auto& all_cat_rc = geom.sidebar_items[0].rect;
     ASSERT_TRUE(view.HandleMouseClick((all_cat_rc.left + all_cat_rc.right) / 2, (all_cat_rc.top + all_cat_rc.bottom) / 2, false),
                 "Click All Downloads category");
     ASSERT_TRUE(view.BuildVisibleTaskRows().size() == 2, "Restored all 2 tasks");
 
-    // 3. Hover over truncated filename in Row 0 and verify full-filename tooltip is populated
     geom = view.ComputeLayoutGeometry(0);
     const auto& fn_rc = geom.task_rows[0].filename_rect;
     auto hover_res = view.HandleMouseMove((fn_rc.left + fn_rc.right) / 2, (fn_rc.top + fn_rc.bottom) / 2);
@@ -551,7 +559,6 @@ bool TestDesktopUiHitTestingAndMouseInteractions() {
     ASSERT_TRUE(view.GetActiveTooltip() == "Very_Long_University_Computer_Science_Lecture_Recording_2026_1080p_60fps.mp4",
                 "Hovering truncated filename exposes full untruncated filename in tooltip");
 
-    // 4. Click Table Column Header 'Filename' (index 0) to sort ascending, then click again to toggle descending
     const auto& col0_rc = geom.table_columns[0].rect;
     ASSERT_TRUE(view.HandleMouseClick((col0_rc.left + col0_rc.right) / 2, (col0_rc.top + col0_rc.bottom) / 2, false),
                 "Click Filename column header");
@@ -569,7 +576,6 @@ bool TestWorkerLifecycleAndIncompatibleWorkerDetection() {
     std::filesystem::path tmp_dir = "/tmp/openidm_test_worker_" + openidm::GenerateUuidV4();
     std::filesystem::create_directories(tmp_dir);
 
-    // 1. Missing worker binary must be detected and reported as ERR_DEPENDENCY_MISSING
     openidm::stream::StreamAdapterConfig missing_cfg{
         tmp_dir / "nonexistent_N_m3u8DL-RE",
         "/usr/bin/ffmpeg",
@@ -583,7 +589,6 @@ bool TestWorkerLifecycleAndIncompatibleWorkerDetection() {
     auto p1 = missing_adapter.ProbeManifest("https://example.com/master.m3u8", {}, {});
     ASSERT_TRUE(!p1.ok() && p1.error->code == "ERR_DEPENDENCY_MISSING", "ProbeManifest reports ERR_DEPENDENCY_MISSING");
 
-    // 2. Incompatible worker binary (e.g. /bin/false on POSIX or attrib.exe on Windows) must be detected as ERR_WORKER_INCOMPATIBLE
 #ifdef _WIN32
     std::filesystem::path bad_binary = "C:\\Windows\\System32\\find.exe";
 #else
@@ -599,7 +604,6 @@ bool TestWorkerLifecycleAndIncompatibleWorkerDetection() {
     auto v2 = bad_adapter.VerifyWorkerBinary();
     ASSERT_TRUE(!v2.ok() && v2.error->code == "ERR_WORKER_INCOMPATIBLE", "Incompatible worker reported as ERR_WORKER_INCOMPATIBLE");
 
-    // 3. Valid compiled worker binary passes VerifyWorkerBinary
     auto valid_worker = openidm::PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", openidm::PathSanitizer::GetExecutableDir());
     openidm::stream::StreamAdapterConfig good_cfg{
         valid_worker,
@@ -627,7 +631,6 @@ bool TestFluxBrandingAndLegacyDataMigration() {
     ASSERT_TRUE(about.app_name == "Flux Download Manager", "About dialog app name is Flux Download Manager");
     ASSERT_TRUE(about.version == "0.3.0", "About dialog version is 0.3.0");
 
-    // Test migration logic: create mock legacy OpenIDM directory and verify clean copy
     std::error_code ec;
     std::filesystem::path mock_root = std::filesystem::temp_directory_path(ec) / ("flux_test_mig_" + openidm::GenerateUuidV4());
     std::filesystem::path legacy_dir = mock_root / "OpenIDM";
@@ -639,7 +642,6 @@ bool TestFluxBrandingAndLegacyDataMigration() {
         std::ofstream(legacy_dir / "settings.json") << R"({"theme":"dark","max_concurrent":4})";
     }
 
-    // Direct invocation of migration routine
     std::filesystem::create_directories(target_flux, ec);
     const char* files_to_copy[] = {"state.db", "settings.json"};
     for (const char* f : files_to_copy) {
@@ -657,11 +659,109 @@ bool TestFluxBrandingAndLegacyDataMigration() {
     return true;
 }
 
+bool TestProfessionalSettingsCenterAndPersistence() {
+    using openidm::ui::DesktopView;
+    using openidm::ui::SettingsCategory;
+
+    std::filesystem::path work_dir = "/tmp/flux_test_settings_" + openidm::GenerateUuidV4();
+    std::filesystem::create_directories(work_dir);
+    std::filesystem::path db_path = work_dir / "state.db";
+    std::filesystem::path custom_dl_dir = work_dir / "custom_downloads";
+
+    {
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = db_path;
+        cfg.default_download_dir = work_dir / "default_dl";
+        cfg.temp_root_dir = work_dir / "tmp";
+        cfg.nm3u8dl_binary_path = openidm::PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", openidm::PathSanitizer::GetExecutableDir());
+        cfg.ffmpeg_binary_path = openidm::PathSanitizer::FindWorkerBinary("ffmpeg", openidm::PathSanitizer::GetExecutableDir());
+
+        openidm::DownloadController ctrl(cfg);
+        ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller for settings center test");
+        DesktopView view(ctrl);
+
+        view.OpenSettingsCenter(SettingsCategory::kGeneral);
+        ASSERT_TRUE(view.IsSettingsCenterOpen(), "Settings Center opens");
+
+        auto vm = view.BuildSettingsCenterViewModel();
+        ASSERT_TRUE(vm.categories.size() == 7, "7 justified settings categories present");
+        ASSERT_TRUE(!vm.has_unsaved_changes && vm.is_valid, "Initial settings draft is clean and valid");
+        ASSERT_TRUE(vm.category_rules.size() == 6, "6 automatic file category subfolder rules exposed");
+
+        // Test settings search across all categories
+        view.SetSettingsSearchQuery("bandwidth");
+        auto search_vm = view.BuildSettingsCenterViewModel();
+        ASSERT_TRUE(search_vm.visible_items.size() == 1 && search_vm.visible_items[0].key == "speed.speed_limit_bps",
+                    "Settings search locates Global Bandwidth Limit across categories");
+        view.SetSettingsSearchQuery("");
+
+        // Test input validation on out-of-range fields
+        ASSERT_TRUE(!view.SetSettingsDraftField("downloads.max_concurrent_tasks", "99").ok(),
+                    "Rejects simultaneous downloads > 16");
+        ASSERT_TRUE(!view.BuildSettingsCenterViewModel().is_valid, "ViewModel reflects validation error");
+
+        ASSERT_TRUE(!view.SetSettingsDraftField("connections.default_connections_per_task", "0").ok(),
+                    "Rejects 0 connections per task");
+        ASSERT_TRUE(!view.SetSettingsDraftField("locations.default_download_dir", "   ").ok(),
+                    "Rejects empty download directory");
+        ASSERT_TRUE(!view.SetSettingsDraftField("speed.speed_limit_bps", "100 B/s").ok(),
+                    "Rejects speed limit < 16 KiB/s");
+
+        // Test valid edits across categories
+        ASSERT_TRUE(view.SetSettingsDraftField("general.start_minimized", "true").ok(), "Set start_minimized");
+        ASSERT_TRUE(view.SetSettingsDraftField("general.close_to_tray", "false").ok(), "Set close_to_tray");
+        ASSERT_TRUE(view.SetSettingsDraftField("general.reduced_motion", "true").ok(), "Set reduced_motion");
+        ASSERT_TRUE(view.SetSettingsDraftField("downloads.max_concurrent_tasks", "6").ok(), "Set max_concurrent_tasks = 6");
+        ASSERT_TRUE(view.SetSettingsDraftField("connections.default_connections_per_task", "16").ok(), "Set default_connections = 16");
+        ASSERT_TRUE(view.SetSettingsDraftField("speed.speed_limit_bps", "5 MiB/s").ok(), "Set speed_limit_bps = 5 MiB/s");
+        ASSERT_TRUE(view.SetSettingsDraftField("locations.default_download_dir", custom_dl_dir.string()).ok(), "Set custom download dir");
+        ASSERT_TRUE(view.SetSettingsDraftField("browser.capture_enabled", "false").ok(), "Set browser_capture_enabled = false");
+
+        // Test per-field reset to default before applying
+        ASSERT_TRUE(view.ResetSettingsDraftField("general.close_to_tray").ok(), "Reset close_to_tray to default (true)");
+        ASSERT_TRUE(view.GetSettingsDraft().close_to_tray == true, "close_to_tray restored to true in draft");
+
+        auto mod_vm = view.BuildSettingsCenterViewModel();
+        ASSERT_TRUE(mod_vm.has_unsaved_changes && mod_vm.is_valid, "Draft shows unsaved valid modifications");
+
+        ASSERT_TRUE(view.ApplySettingsDraft().ok(), "ApplySettingsDraft commits changes to controller & SQLite");
+        ASSERT_TRUE(!view.BuildSettingsCenterViewModel().has_unsaved_changes, "Draft no longer marked dirty after apply");
+
+        ctrl.Shutdown();
+    }
+
+    // Re-open a fresh DownloadController on the same SQLite DB to verify restart persistence
+    {
+        openidm::ControllerConfig cfg2;
+        cfg2.state_db_path = db_path;
+        cfg2.default_download_dir = work_dir / "default_dl";
+        cfg2.temp_root_dir = work_dir / "tmp";
+
+        openidm::DownloadController ctrl2(cfg2);
+        ASSERT_TRUE(ctrl2.Initialize().ok(), "Re-initialize controller after restart");
+        auto persisted = ctrl2.GetSettings();
+        ASSERT_TRUE(persisted.theme == "dark", "Persisted theme is dark");
+        ASSERT_TRUE(persisted.start_minimized == true, "start_minimized persisted across restart");
+        ASSERT_TRUE(persisted.close_to_tray == true, "close_to_tray persisted across restart");
+        ASSERT_TRUE(persisted.reduced_motion == true, "reduced_motion persisted across restart");
+        ASSERT_TRUE(persisted.max_concurrent_tasks == 6, "max_concurrent_tasks=6 persisted across restart");
+        ASSERT_TRUE(persisted.default_connections_per_task == 16, "default_connections_per_task=16 persisted across restart");
+        ASSERT_TRUE(persisted.speed_limit_bps == 5ULL * 1048576ULL, "speed_limit_bps=5 MiB/s persisted across restart");
+        ASSERT_TRUE(persisted.default_download_dir == custom_dl_dir.string(), "default_download_dir persisted across restart");
+        ASSERT_TRUE(persisted.browser_capture_enabled == false, "browser_capture_enabled=false persisted across restart");
+
+        ctrl2.Shutdown();
+    }
+
+    std::filesystem::remove_all(work_dir);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 13;
+    const int total = 14;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -684,6 +784,7 @@ int main() {
     run(11, "TestDesktopUiHitTestingAndMouseInteractions", TestDesktopUiHitTestingAndMouseInteractions);
     run(12, "TestWorkerLifecycleAndIncompatibleWorkerDetection", TestWorkerLifecycleAndIncompatibleWorkerDetection);
     run(13, "TestFluxBrandingAndLegacyDataMigration", TestFluxBrandingAndLegacyDataMigration);
+    run(14, "TestProfessionalSettingsCenterAndPersistence", TestProfessionalSettingsCenterAndPersistence);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

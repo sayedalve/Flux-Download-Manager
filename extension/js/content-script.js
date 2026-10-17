@@ -258,10 +258,13 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
       btn.textContent = isDrm ? "DRM Protected (Unsupported)" : "Download with Flux";
       btn.disabled = isDrm;
       const baseBtnStyle =
-        "background:#0F172A;color:#F8FAFC;border:1px solid #2563EB;border-radius:6px;" +
-        "padding:6px 12px;font:600 12px 'Segoe UI Variable Text','Segoe UI',sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5);";
+        "background:#090D16;color:#F8FAFC;border:1px solid #2563EB;border-radius:6px;" +
+        "padding:6px 12px;font:600 12px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;" +
+        "letter-spacing:0.01em;cursor:pointer;box-shadow:0 4px 12px rgba(6,9,19,0.68);";
       if (btn.style) {
-        btn.style.cssText = baseBtnStyle;
+        btn.style.cssText = isDrm
+          ? (baseBtnStyle + "border-color:#475569;color:#94A3B8;cursor:not-allowed;opacity:0.8;")
+          : baseBtnStyle;
       }
 
       // Quality selector dropdown inside Closed Shadow DOM (IDM floating resolution selector equivalent)
@@ -271,9 +274,9 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
         qualitySelect.classList.add("flux-quality-select");
       }
       const selectStyle =
-        "background:#1E293B;color:#F8FAFC;border:1px solid #2563EB;border-radius:6px;" +
-        "padding:5px 8px;font:600 11px 'Segoe UI Variable Text','Segoe UI',sans-serif;cursor:pointer;" +
-        "box-shadow:0 2px 8px rgba(0,0,0,0.5);margin-right:4px;";
+        "background:#0F172A;color:#F8FAFC;border:1px solid #26334D;border-radius:6px;" +
+        "padding:5px 8px;font:600 11px 'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;cursor:pointer;" +
+        "box-shadow:0 4px 12px rgba(6,9,19,0.68);margin-right:4px;";
       if (qualitySelect.style) {
         qualitySelect.style.cssText = selectStyle + "display:none;";
       }
@@ -315,7 +318,7 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
             qualitySelect.value = initial.id || initial.resolution || "best";
           }
         } else if (defaultRes && defaultRes !== "Auto") {
-          if ( hostEl && typeof hostEl.setAttribute === "function") {
+          if (hostEl && typeof hostEl.setAttribute === "function") {
             hostEl.setAttribute("data-flux-qualities", defaultRes);
           }
         }
@@ -862,6 +865,7 @@ function initContentScript() {
       const qBadge = mediaMeta.resolution ? ` (${mediaMeta.resolution})` : "";
       btn.textContent = mediaMeta.isMseBlob ? `Resolving${qBadge}...` : `Starting${qBadge}...`;
       btn.disabled = true;
+      if (btn.style) btn.style.cssText = baseStyle + "border-color:#38BDF8;color:#E0F2FE;";
     }
     if (hostEl && hostEl.setAttribute) {
       hostEl.setAttribute("data-flux-status", "starting");
@@ -907,7 +911,11 @@ function initContentScript() {
             btn.textContent = isFallback ? "Browser Download" : "Queued in Flux \u2713";
             btn.title = taskId ? ("Task ID: " + taskId) : "Queued in Flux";
             btn.disabled = false;
-            if (btn.style) btn.style.cssText = baseStyle + "border-color:#22C55E;color:#86EFAC;";
+            if (btn.style) {
+              btn.style.cssText = isFallback
+                ? (baseStyle + "border-color:#F59E0B;color:#FDE68A;")
+                : (baseStyle + "border-color:#10B981;color:#A7F3D0;");
+            }
           }
           if (hostEl && hostEl.setAttribute) {
             hostEl.setAttribute("data-flux-status", isFallback ? "browser_fallback" : "queued");

@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Automated Browser Extension Verification Suite (13 Suites)
+// Automated Browser Extension Verification Suite (14 Suites)
 // Verifies Cat Catch media detection, HLS/DASH discovery, master/child deduplication,
 // segment suppression, per-site exclusion, DOM overlay attachment (including empty-<video> rejection
 // and active blob: URL discovery), Deep Search hook, MV3 Service Worker session persistence,
-// Popup filtering/states, 5-way typed stream handoff (never passing JSON as .m3u8),
+// Cosmic Dark Popup filtering/states (ready, queued, fallback, unavailable/DRM), 5-way typed stream handoff,
 // and per-tab/per-URL ordinary download click/redirect correlation + Alt-bypass race guards.
 
 const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
 const { G, SourceType } = require("../extension/js/init.js");
 const {
   isSiteDisabled,
@@ -195,6 +197,7 @@ async function runTests() {
   assert.strictEqual(obsResult.activeOverlays.length, 1, "Overlay attached to visible <video> with blob: src");
   assert.strictEqual(obsResult.activeOverlays[0].hostEl.shadowMode, "closed", "Uses closed Shadow DOM");
   assert(obsResult.activeOverlays[0].hostEl.style.cssText.includes("top:50px"), "Positioned at top-right of video");
+  assert(obsResult.activeOverlays[0].btn.style.cssText.includes("#090D16"), "Overlay uses Cosmic Dark #090D16 surface");
 
   videoRect = { width: 1920, height: 1080, top: 0, left: 0, right: 1920 };
   fullscreenHandler();
@@ -251,7 +254,12 @@ async function runTests() {
   assert.strictEqual(isSiteDisabled("https://persisted-exclude.example.com/video"), true, "Restored disabled host after wake");
   console.log("  -> PASS");
 
-  console.log("[8/14] Testing Popup Filter Tabs, Search, States & Direct Media Fallback...");
+  console.log("[8/14] Testing Popup Filter Tabs, Search, Cosmic Dark Tokens, States & Direct Media Fallback...");
+  const popupCss = fs.readFileSync(path.join(__dirname, "../extension/css/popup.css"), "utf8");
+  assert.ok(popupCss.includes("#090D16") && popupCss.includes("#38BDF8"), "Popup CSS uses shared Cosmic Dark tokens");
+  assert.ok(!popupCss.includes("prefers-color-scheme: light"), "Popup CSS strictly maintains Cosmic Dark mode without light theme");
+  assert.ok(popupCss.includes("prefers-reduced-motion: reduce"), "Popup CSS honors prefers-reduced-motion");
+
   const combinedList = G.cacheData.get(20).concat(G.cacheData.get(10));
   assert.strictEqual(filterPopupCandidates(combinedList, "stream", "").length, 2, "Stream filter returns HLS + DASH");
   assert.strictEqual(filterPopupCandidates(combinedList, "direct", "").length, 1, "Direct filter returns MP4");
@@ -263,6 +271,12 @@ async function runTests() {
   assert(offlineHtml.includes('data-state="disconnected"') && offlineHtml.includes("Browser Download"));
   const onlineHtml = renderDetectedMediaList(combinedList, { desktopConnected: true });
   assert(onlineHtml.includes("Download in Flux"), "Popup renders 'Download in Flux' action label");
+
+  const unavailHtml = renderDetectedMediaList([
+    { candidateId: "drm-1", pageTitle: "Encrypted Show", streamType: "DASH", drmProtected: true, url: "https://example.com/drm.mpd" }
+  ], { desktopConnected: true });
+  assert.ok(unavailHtml.includes('data-unavailable="true"') && unavailHtml.includes("DRM Protected") && unavailHtml.includes("disabled"),
+    "Unavailable/DRM media state visually clear and disabled");
 
   let browserFallbackTriggeredUrl = null;
   const mp4Candidate = G.cacheData.get(10)[0];
@@ -414,7 +428,6 @@ async function runTests() {
   assert.strictEqual(submittedRpcPayload.params.cachedManifestBody, "", "stream.add must receive empty cachedManifestBody for YouTube");
   assert.ok(submittedRpcPayload.params.extractorJson.includes("YOUTUBE_STREAM"));
 
-  // Adaptive video-only googlevideo network response must be classified as YOUTUBE_EXTRACTION, not standalone HTTP_FILE
   const gvAdaptive = classifyNetworkResource({
     tabId: 88,
     url: "https://rr2---sn-test.googlevideo.com/videoplayback?itag=137&mime=video%2Fmp4&clen=10485760",
@@ -425,14 +438,12 @@ async function runTests() {
   console.log("  -> PASS");
 
   console.log("[13/14] Testing Defect C Fix: Multi-Tab Click Correlation, 302 Redirects & Alt-Bypass across onCreated + onDeterminingFilename...");
-  // 1. Record click on /redirect/release on Tab 42
   recordClickedLink(42, {
     url: "https://mirror.example.com/redirect/release",
     filename: "",
     referrer: "https://mirror.example.com/downloads",
     pageTitle: "Mirror Downloads"
   });
-  // 2. Simulate 302 redirect to final CDN URL without file extension in initial path
   onHeadersReceivedHandler({
     requestId: "req-redir-1",
     tabId: 42,
@@ -440,7 +451,6 @@ async function runTests() {
     statusCode: 302,
     responseHeaders: [{ name: "Location", value: "https://cdn.mirror.example.com/blobs/pkg_9988" }]
   });
-  // 3. Simulate 200 attachment response on redirected URL
   onHeadersReceivedHandler({
     requestId: "req-redir-1",
     tabId: 42,
@@ -474,7 +484,6 @@ async function runTests() {
   assert.strictEqual(offeredRedirectParams.originalUrl, "https://mirror.example.com/redirect/release", "Preserved original clicked URL across redirect");
   assert.strictEqual(offeredRedirectParams.tabUrl, "https://mirror.example.com/downloads", "Preserved referrer from per-tab click record");
 
-  // 4. Verify Alt-bypass survives BOTH onCreated and onDeterminingFilename for the same downloadItem.id
   handleRuntimeMessage({ action: "bypassNextDownload", tabId: 42, url: "https://mirror.example.com/files/manual.pdf" }, { tab: { id: 42 } }, () => {});
   const bypassItem = { id: 902, tabId: 42, url: "https://mirror.example.com/files/manual.pdf", filename: "manual.pdf" };
   const bypassOnCreated = await onDownloadCreatedHandler(bypassItem, null, null, null, "created");
@@ -485,13 +494,9 @@ async function runTests() {
   assert.strictEqual(bypassOnDetermine.reason, "BYPASS_MODIFIER_ACTIVE");
   console.log("  -> PASS");
 
-  // -------------------------------------------------------------------------
-  // 14. Automatic Multi-Quality Video Grab on Playback (YouTube, HLS, DASH, HTML5 <source>)
-  // -------------------------------------------------------------------------
   console.log("[14/14] Testing Automatic Multi-Quality Video Extraction & Selection (1080p / 720p / 360p / Audio)...");
   G.cacheData.clear();
 
-  // 14a. HLS Master Playlist multi-quality parsing
   const hlsMasterBody = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
@@ -512,7 +517,6 @@ async function runTests() {
   assert.strictEqual(hlsAdded.candidate.qualities.length, 3, "HLS master should expose 3 distinct video qualities");
   assert.deepStrictEqual(hlsAdded.candidate.qualities.map(q => q.resolution), ["1080p", "720p", "360p"]);
 
-  // Verify selecting 720p passes videoFilter="720p" and appends [720p] to title
   let submittedHls720 = null;
   await submitMediaCandidateToFlux(
     hlsAdded.candidate,
@@ -525,7 +529,6 @@ async function runTests() {
   assert.strictEqual(submittedHls720.params.videoFilter, "720p");
   assert.ok(submittedHls720.params.pageTitle.includes("[720p]"), "Selected quality tag should be included in title");
 
-  // 14b. YouTube Player multi-quality extraction via catch.js hook
   const mqYtEvents = [];
   const mqYtWindow = {
     location: { href: "https://www.youtube.com/watch?v=MultiQual99", hostname: "www.youtube.com" },
@@ -547,7 +550,6 @@ async function runTests() {
   assert.strictEqual(mqYtEvents[0].qualities.length, 4, "Should extract 1080p, 720p, 360p, and Audio Only");
   assert.deepStrictEqual(mqYtEvents[0].qualities.map(q => q.resolution), ["1080p", "720p", "360p", "Audio"]);
 
-  // Render Popup HTML and verify quality selector <select class="quality-select">
   const ytCandRes = addOrDeduplicateMediaCandidate(56, mqYtEvents[0]);
   const mqPopupHtml = renderDetectedMediaList([ytCandRes.candidate], { desktopConnected: true });
   assert.ok(mqPopupHtml.includes('class="quality-select"'), "Popup must render interactive quality selector dropdown");

@@ -59,7 +59,7 @@ void DownloadController::LoadPersistedSettingsLocked() {
     try {
         auto val = json::Parse(*sres.value);
         if (!val.is_object()) return;
-        m_settings.theme = val["theme"].as_string("dark");
+        m_settings.theme = "dark";
         m_settings.max_concurrent_tasks = std::clamp<uint32_t>(
             static_cast<uint32_t>(val["maxConcurrentTasks"].as_int64(m_cfg.max_concurrent_tasks)), 1u, 16u);
         m_settings.speed_limit_bps = static_cast<uint64_t>(val["speedLimitBps"].as_int64(m_cfg.global_speed_limit_bps));
@@ -82,7 +82,7 @@ void DownloadController::LoadPersistedSettingsLocked() {
 
 Result<void> DownloadController::SaveSettingsLocked() {
     json::Value obj = json::Object{};
-    obj["theme"] = m_settings.theme;
+    obj["theme"] = "dark";
     obj["maxConcurrentTasks"] = static_cast<int64_t>(m_settings.max_concurrent_tasks);
     obj["speedLimitBps"] = static_cast<int64_t>(m_settings.speed_limit_bps);
     obj["defaultConnectionsPerTask"] = static_cast<int64_t>(m_settings.default_connections_per_task);
@@ -754,9 +754,7 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
         m_settings = settings;
         m_settings.max_concurrent_tasks = std::clamp(m_settings.max_concurrent_tasks, 1u, 16u);
         m_settings.default_connections_per_task = std::clamp(m_settings.default_connections_per_task, 1u, 32u);
-        if (m_settings.theme != "dark" && m_settings.theme != "light" && m_settings.theme != "system") {
-            m_settings.theme = "dark";
-        }
+        m_settings.theme = "dark";
         if (!m_settings.default_download_dir.empty()) {
             m_cfg.default_download_dir = m_settings.default_download_dir;
             std::error_code ec;

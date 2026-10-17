@@ -8,30 +8,59 @@
 <body>
   <header class="header">
     <div class="brand">
-      <h1>Flux Capture</h1>
-      <span id="connectionBadge" class="conn-badge conn-disconnected">Checking Desktop...</span>
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="6.25" stroke="#38BDF8" stroke-width="1.3" stroke-opacity="0.75"/>
+          <path d="M8 3.5V10.5M8 10.5L5.25 7.75M8 10.5L10.75 7.75" stroke="#F8FAFC" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="12.5" cy="3.5" r="1.2" fill="#8B5CF6"/>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <div class="brand-title-row">
+          <h1>Flux Capture</h1>
+          <span id="connectionBadge" class="conn-badge conn-disconnected">Checking Desktop...</span>
+        </div>
+        <span id="siteHostLabel" class="site-host-label">Active tab</span>
+      </div>
     </div>
     <label class="toggle" title="Enable automatic download &amp; media capture on this site">
       <input type="checkbox" id="siteToggle" checked>
-      <span>Capture on site</span>
+      <span class="toggle-track" aria-hidden="true"><span class="toggle-thumb"></span></span>
+      <span class="toggle-label">Capture on site</span>
     </label>
   </header>
 
   <section class="toolbar" aria-label="Media Filter Controls">
     <div class="filter-tabs" role="tablist">
-      <button type="button" class="tab-btn active" data-filter="all" role="tab" aria-selected="true">All</button>
-      <button type="button" class="tab-btn" data-filter="stream" role="tab" aria-selected="false">Streams (HLS/DASH)</button>
-      <button type="button" class="tab-btn" data-filter="direct" role="tab" aria-selected="false">Direct Files</button>
+      <button type="button" class="tab-btn active" data-filter="all" role="tab" aria-selected="true">
+        <span>All</span>
+        <span id="countAll" class="tab-count">0</span>
+      </button>
+      <button type="button" class="tab-btn" data-filter="stream" role="tab" aria-selected="false">
+        <span>Streams (HLS/DASH)</span>
+        <span id="countStream" class="tab-count">0</span>
+      </button>
+      <button type="button" class="tab-btn" data-filter="direct" role="tab" aria-selected="false">
+        <span>Direct Files</span>
+        <span id="countDirect" class="tab-count">0</span>
+      </button>
     </div>
-    <input type="search" id="searchInput" class="search-input" placeholder="Filter by title, resolution, or format..." aria-label="Search detected media">
+    <div class="search-wrap">
+      <svg class="search-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M11 11L14.2 14.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <input type="search" id="searchInput" class="search-input" placeholder="Filter by title, resolution, or format..." aria-label="Search detected media">
+    </div>
   </section>
 
   <main id="mediaList" class="media-list" role="region" aria-live="polite">
-    <p class="empty">No media detected on this tab yet. Play a video or start a download to capture streams.</p>
+    <p class="empty" data-state="empty">No media detected on this tab yet. Play a video or start a download to capture streams.</p>
   </main>
 
   <footer class="footer">
-    <button id="clearListBtn" type="button" class="btn-secondary">Clear List</button>
+    <button id="clearListBtn" type="button" class="btn-secondary" title="Clear detected media list for this tab">Clear List</button>
+    <span id="footerMeta" class="footer-meta">Alt+Click bypasses capture</span>
     <button id="batchDownloadBtn" type="button" class="btn-primary">Download All in Flux</button>
   </footer>
   <script src="js/popup.js"></script>

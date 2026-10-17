@@ -18,6 +18,9 @@ DIST_NMH = ROOT / "dist" / "flux-nmh.exe"
 assert DIST_FLUX.is_file(), f"Missing {DIST_FLUX}"
 assert DIST_NMH.is_file(), f"Missing {DIST_NMH}"
 
+os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
+os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
+
 PAYLOAD_2MB = os.urandom(2 * 1024 * 1024)
 SHA256_2MB = hashlib.sha256(PAYLOAD_2MB).hexdigest()
 

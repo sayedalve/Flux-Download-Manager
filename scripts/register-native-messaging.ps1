@@ -129,7 +129,7 @@ $firefoxManifest = @{
     description = "Flux Download Manager Native Messaging Host"
     path = $HostExePath
     type = "stdio"
-    allowed_extensions = @("flux@openidm.org", "flux@downloadmanager.org")
+    allowed_extensions = @("flux-extension@fluxdownloadmanager.org", "flux@openidm.org", "flux@downloadmanager.org", "extension@openidm.org")
 }
 $firefoxJson = $firefoxManifest | ConvertTo-Json -Depth 5
 Write-Utf8NoBom -FilePath $firefoxManifestPath -Content $firefoxJson

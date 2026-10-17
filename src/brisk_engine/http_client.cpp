@@ -115,7 +115,6 @@ std::wstring Utf8ToWide(std::string_view sv) {
 std::string WideToUtf8(std::wstring_view wv) {
     if (wv.empty()) return {};
     int sz = WideCharToMultiByte(CP_UTF8, 0, wv.data(), static_cast<int>(wv.size()), nullptr, 0, nullptr, nullptr);
-    if (sz <= 0) return {};
     std::string out(static_cast<size_t>(sz), '\0');
     WideCharToMultiByte(CP_UTF8, 0, wv.data(), static_cast<int>(wv.size()), out.data(), sz, nullptr, nullptr);
     return out;
@@ -123,6 +122,47 @@ std::string WideToUtf8(std::wstring_view wv) {
 #endif
 
 } // namespace
+
+std::string HttpClient::ResolveRedirectTarget(const ParsedUrl& base, const std::string& loc) {
+    if (loc.empty()) return "";
+    // 1. Absolute URI with scheme (e.g. http:// or https://)
+    if (loc.find("://") != std::string::npos) {
+        return loc;
+    }
+    // 2. Protocol-relative URL (e.g. //localhost:18082/full.bin)
+    if (loc.rfind("//", 0) == 0) {
+        return base.scheme + ":" + loc;
+    }
+    std::string authority = base.scheme + "://" + base.host;
+    if ((base.scheme == "http" && base.port != 80) || (base.scheme == "https" && base.port != 443)) {
+        authority += ":" + std::to_string(base.port);
+    }
+    // 3. Absolute path (e.g. /path/to/resource)
+    if (loc.front() == '/') {
+        return authority + loc;
+    }
+    // 4. Query-only reference (e.g. ?query=val)
+    if (loc.front() == '?') {
+        std::string base_path = base.path_and_query.empty() ? "/" : base.path_and_query;
+        auto q_pos = base_path.find('?');
+        if (q_pos != std::string::npos) {
+            base_path = base_path.substr(0, q_pos);
+        }
+        return authority + base_path + loc;
+    }
+    // 5. Relative path (e.g. subpath/file.bin or ../file.bin)
+    std::string base_dir = "/";
+    std::string clean_path = base.path_and_query;
+    auto q_pos = clean_path.find('?');
+    if (q_pos != std::string::npos) {
+        clean_path = clean_path.substr(0, q_pos);
+    }
+    auto last_slash = clean_path.rfind('/');
+    if (last_slash != std::string::npos) {
+        base_dir = clean_path.substr(0, last_slash + 1);
+    }
+    return authority + base_dir + loc;
+}
 
 Result<ParsedUrl> HttpClient::ParseUrl(std::string_view url) {
     std::string u = Trim(url);
@@ -328,15 +368,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
                 return Result<HttpResponseMeta>::Err("ERR_HTTP_REDIRECT_NO_LOCATION", "Redirect missing Location header");
             }
             std::string loc = loc_it->second;
-            if (loc.find("://") == std::string::npos) {
-                std::ostringstream abs_url;
-                abs_url << pu.scheme << "://" << pu.host << ":" << pu.port;
-                if (loc.front() != '/') abs_url << "/";
-                abs_url << loc;
-                current_url = abs_url.str();
-            } else {
-                current_url = loc;
-            }
+            current_url = ResolveRedirectTarget(pu, loc);
             continue;
         }
 
@@ -577,15 +609,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
                 return Result<HttpResponseMeta>::Err("ERR_HTTP_REDIRECT_NO_LOCATION", "Redirect missing Location header");
             }
             std::string loc = loc_it->second;
-            if (loc.find("://") == std::string::npos) {
-                std::ostringstream abs_url;
-                abs_url << pu.scheme << "://" << pu.host << ":" << pu.port;
-                if (loc.front() != '/') abs_url << "/";
-                abs_url << loc;
-                current_url = abs_url.str();
-            } else {
-                current_url = loc;
-            }
+            current_url = ResolveRedirectTarget(pu, loc);
             continue;
         }
 

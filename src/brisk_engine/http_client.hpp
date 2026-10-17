@@ -42,6 +42,7 @@ struct HttpResponseMeta {
 class HttpClient {
 public:
     static Result<ParsedUrl> ParseUrl(std::string_view url);
+    static std::string ResolveRedirectTarget(const ParsedUrl& base, const std::string& loc);
 
     // Executes an HTTP/HTTPS GET request with optional byte range [range_start, range_end].
     // Calls on_headers once response headers arrive; if on_headers returns false, aborts before reading body.

@@ -125,6 +125,26 @@ All changes have been implemented in production C++20 code, accompanied by unit 
   - Enforced `BEGIN IMMEDIATE TRANSACTION` with scoped RAII transaction guards that issue `ROLLBACK` on step/prepare failures.
   - Enforced parameterized queries across all database updates.
 
+### 4.4 NET-03: Relative & Protocol-Relative Redirect Resolution
+- **Issue:** Previously, redirects with `Location: //localhost:18082/full.bin` failed with `ERR_HTTP_404_NOT_FOUND` because non-`://` targets were treated as relative path strings appended directly to the base origin.
+- **Remediation:**
+  - Implemented `HttpClient::ResolveRedirectTarget(base, loc)` following RFC 3986 URI-reference resolution:
+    - Protocol-relative (`//authority/path`): Inherits scheme from base URL.
+    - Absolute path (`/path/to/res`): Inherits base scheme, host, and port.
+    - Query-only (`?param=val`): Replaces existing query while preserving path and authority.
+    - Directory-relative (`sub/path.bin`): Resolves relative to the base URL's directory path.
+    - Absolute URI (`scheme://...`): Preserved verbatim.
+- **Verification:**
+  - Added `TestRelativeAndProtocolRelativeRedirectResolution` (Suite 21).
+
+### 4.5 APP-01 & APP-02: Native Messaging Identity Alignment & Manifest Hardening
+- **Issue:**
+  - Native host manifests (`installer/manifests/` and Inno Setup `installer/flux.iss`) only permitted placeholder Extension ID `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/`, blocking real browser extensions (`ngpampappnmepgilojfohadhhmbhlaek` and `llbjbkhnmlidjebalopleeepgdfgcpec`).
+  - Firefox extension ID in `register-native-messaging.ps1` omitted canonical gecko ID `flux-extension@fluxdownloadmanager.org`.
+- **Remediation:**
+  - Aligned all allowed origins across Inno Setup installer scripts, manifest templates, and HKCU PowerShell registration scripts to include all canonical Extension IDs.
+  - Verified `extension/manifest.chromium.json` contains valid `host_permissions: ["<all_urls>"]`.
+
 ---
 
 ## 5. Test Matrix & Verification Summary
@@ -151,13 +171,14 @@ All changes have been implemented in production C++20 code, accompanied by unit 
 | **Suite 18** | **`TestSegmentSchedulerBoundarySplitRaceGuard`** | **CON-01 Segment boundary split race prevention** | **PASS** |
 | **Suite 19** | **`TestIpcSecurityDaclAndPathTraversal`** | **SEC-02 Named pipe SDDL & path traversal rejection** | **PASS** |
 | **Suite 20** | **`TestGlobalRateLimiting`** | **CTRL-01 Shared global token bucket rate limiting** | **PASS** |
+| **Suite 21** | **`TestRelativeAndProtocolRelativeRedirectResolution`** | **NET-03 RFC 3986 protocol-relative redirect resolution** | **PASS** |
 
-**Summary: 20 / 20 Test Suites Passed (100% pass rate).**
+**Summary: 21 / 21 Test Suites Passed (100% pass rate).**
 
 ---
 
 ## 6. Build & Deployment Verification
 
 - **MSVC Build:** Native x64 Release builds of `flux.exe`, `flux-nmh.exe`, and `flux_unit_tests.exe` completed with 0 errors.
-- **Git State:** All remediation commits (`a3ed953`) pushed to remote `origin/fix/audit-remediation` and fast-forward merged to `origin/main`.
+- **Git State:** All remediation commits pushed to remote `origin/fix/audit-remediation` and fast-forward merged to `origin/main`.
 - **UI Design System:** Dark UI matte charcoal theme preserved with zero regressions.

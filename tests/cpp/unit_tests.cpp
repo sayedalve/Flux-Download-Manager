@@ -6,6 +6,7 @@
 // DesktopView Cosmic Dark Design System + High-DPI Layout, CosmicStarfield Animation & Static Fallback,
 // Professional Settings Center + Validation + Persistence, UI Interactions + Redaction, and Keyboard Navigation.
 
+#include "brisk_engine/http_client.hpp"
 #include "brisk_engine/segment_scheduler.hpp"
 #include "common/crypto_utils.hpp"
 #include "common/json_mini.hpp"
@@ -964,11 +965,42 @@ bool TestGlobalRateLimiting() {
     return true;
 }
 
+// Regression Suite 21: Verify URI Reference & Protocol-Relative Redirect Resolution (NET-03)
+bool TestRelativeAndProtocolRelativeRedirectResolution() {
+    openidm::brisk::ParsedUrl base;
+    base.scheme = "http";
+    base.host = "127.0.0.1";
+    base.port = 18081;
+    base.path_and_query = "/dir/sample.bin?token=abc";
+
+    // 1. Protocol-relative URL
+    std::string r1 = openidm::brisk::HttpClient::ResolveRedirectTarget(base, "//localhost:18082/full.bin");
+    ASSERT_TRUE(r1 == "http://localhost:18082/full.bin", "Protocol-relative redirect inherits scheme");
+
+    // 2. Absolute path
+    std::string r2 = openidm::brisk::HttpClient::ResolveRedirectTarget(base, "/downloads/output.dat");
+    ASSERT_TRUE(r2 == "http://127.0.0.1:18081/downloads/output.dat", "Absolute path inherits authority");
+
+    // 3. Query-only relative redirect
+    std::string r3 = openidm::brisk::HttpClient::ResolveRedirectTarget(base, "?retry=1");
+    ASSERT_TRUE(r3 == "http://127.0.0.1:18081/dir/sample.bin?retry=1", "Query-only replaces existing query");
+
+    // 4. Directory-relative path
+    std::string r4 = openidm::brisk::HttpClient::ResolveRedirectTarget(base, "chunk2.bin");
+    ASSERT_TRUE(r4 == "http://127.0.0.1:18081/dir/chunk2.bin", "Relative path resolves against directory");
+
+    // 5. Full absolute URL
+    std::string r5 = openidm::brisk::HttpClient::ResolveRedirectTarget(base, "https://secure.example.com/asset.zip");
+    ASSERT_TRUE(r5 == "https://secure.example.com/asset.zip", "Absolute URL preserved verbatim");
+
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 20;
+    const int total = 21;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -998,6 +1030,7 @@ int main() {
     run(18, "TestSegmentSchedulerBoundarySplitRaceGuard", TestSegmentSchedulerBoundarySplitRaceGuard);
     run(19, "TestIpcSecurityDaclAndPathTraversal", TestIpcSecurityDaclAndPathTraversal);
     run(20, "TestGlobalRateLimiting", TestGlobalRateLimiting);
+    run(21, "TestRelativeAndProtocolRelativeRedirectResolution", TestRelativeAndProtocolRelativeRedirectResolution);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

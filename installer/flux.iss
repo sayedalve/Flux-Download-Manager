@@ -93,7 +93,9 @@ begin
     '  "path": "' + NmhPathEscaped + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
     '  "allowed_origins": [' + #13#10 +
-    '    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"' + #13#10 +
+    '    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",' + #13#10 +
+    '    "chrome-extension://ngpampappnmepgilojfohadhhmbhlaek/",' + #13#10 +
+    '    "chrome-extension://llbjbkhnmlidjebalopleeepgdfgcpec/"' + #13#10 +
     '  ]' + #13#10 +
     '}' + #13#10;
   SaveStringToFile(ExpandConstant('{app}\com.flux.downloadmanager.chromium.json'), FluxChromiumJson, False);
@@ -117,7 +119,9 @@ begin
     '  "path": "' + NmhPathEscaped + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
     '  "allowed_origins": [' + #13#10 +
-    '    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"' + #13#10 +
+    '    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",' + #13#10 +
+    '    "chrome-extension://ngpampappnmepgilojfohadhhmbhlaek/",' + #13#10 +
+    '    "chrome-extension://llbjbkhnmlidjebalopleeepgdfgcpec/"' + #13#10 +
     '  ]' + #13#10 +
     '}' + #13#10;
   SaveStringToFile(ExpandConstant('{app}\org.openidm.native.chromium.json'), LegacyChromiumJson, False);

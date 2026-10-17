@@ -1327,11 +1327,238 @@ bool TestSystemSuspendResumeAndPauseReason() {
     return true;
 }
 
+bool TestConcurrentAtomicCommitsAndSha256() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_atomic_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    const int kThreadCount = 8;
+    std::vector<std::string> payloads(kThreadCount);
+    std::vector<std::string> expected_hashes(kThreadCount);
+    std::vector<std::filesystem::path> part_files(kThreadCount);
+
+    for (int i = 0; i < kThreadCount; ++i) {
+        payloads[i] = "PAYLOAD_THREAD_CHUNK_" + std::to_string(i) + "_" + std::string(1024 * (i + 1), static_cast<char>('A' + i));
+        expected_hashes[i] = openidm::CryptoUtils::ComputeBufferSha256Hex(payloads[i]);
+        part_files[i] = work_dir / ("worker_" + std::to_string(i) + ".part");
+        std::ofstream ofs(part_files[i], std::ios::binary);
+        ofs << payloads[i];
+    }
+
+    // 1. Hammer kAutoRename concurrently: All 8 threads simultaneously commit to "contended.bin"
+    std::vector<std::filesystem::path> resulting_paths(kThreadCount);
+    std::vector<bool> thread_success(kThreadCount, false);
+    std::atomic<bool> start_signal{false};
+
+    std::vector<std::thread> workers;
+    for (int i = 0; i < kThreadCount; ++i) {
+        workers.emplace_back([&, i]() {
+            while (!start_signal.load()) {
+                std::this_thread::yield();
+            }
+            auto res = openidm::PathSanitizer::CommitPartFile(
+                part_files[i], work_dir, "contended.bin", openidm::ConflictPolicy::kAutoRename);
+            if (res.ok()) {
+                resulting_paths[i] = *res.value;
+                thread_success[i] = true;
+            }
+        });
+    }
+
+    start_signal.store(true);
+    for (auto& w : workers) {
+        if (w.joinable()) w.join();
+    }
+
+    // Verify: Every thread must have succeeded
+    for (int i = 0; i < kThreadCount; ++i) {
+        ASSERT_TRUE(thread_success[i], "Thread commit succeeded under kAutoRename");
+        ASSERT_TRUE(std::filesystem::exists(resulting_paths[i], ec), "Resulting file exists");
+    }
+
+    // Verify: All resulting paths must be unique (no duplicate auto-rename slots!)
+    std::set<std::filesystem::path> unique_paths(resulting_paths.begin(), resulting_paths.end());
+    ASSERT_TRUE(unique_paths.size() == kThreadCount, "All 8 committed paths are strictly unique");
+
+    // Verify: The SHA-256 digest of each committed file matches its exact source payload!
+    for (int i = 0; i < kThreadCount; ++i) {
+        std::ifstream ifs(resulting_paths[i], std::ios::binary);
+        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        std::string actual_hash = openidm::CryptoUtils::ComputeBufferSha256Hex(content);
+        ASSERT_TRUE(actual_hash == expected_hashes[i], "Committed file SHA-256 matches exact source content without corruption");
+    }
+
+    // 2. Hammer kFailIfExists concurrently:
+    // Create new parts and attempt to commit to "exclusive.bin"
+    for (int i = 0; i < kThreadCount; ++i) {
+        part_files[i] = work_dir / ("failif_" + std::to_string(i) + ".part");
+        std::ofstream ofs(part_files[i], std::ios::binary);
+        ofs << payloads[i];
+    }
+
+    std::atomic<int> success_count{0};
+    std::atomic<int> already_exists_count{0};
+    start_signal.store(false);
+    workers.clear();
+
+    for (int i = 0; i < kThreadCount; ++i) {
+        workers.emplace_back([&, i]() {
+            while (!start_signal.load()) {
+                std::this_thread::yield();
+            }
+            auto res = openidm::PathSanitizer::CommitPartFile(
+                part_files[i], work_dir, "exclusive.bin", openidm::ConflictPolicy::kFailIfExists);
+            if (res.ok()) {
+                ++success_count;
+            } else if (res.error->code == "ERR_FILE_EXISTS") {
+                ++already_exists_count;
+            }
+        });
+    }
+
+    start_signal.store(true);
+    for (auto& w : workers) {
+        if (w.joinable()) w.join();
+    }
+
+    // Exactly 1 thread must claim "exclusive.bin" and the other 7 must fail with ERR_FILE_EXISTS
+    ASSERT_TRUE(success_count.load() == 1, "Exactly 1 thread claims exclusive file under kFailIfExists");
+    ASSERT_TRUE(already_exists_count.load() == kThreadCount - 1, "Other threads receive ERR_FILE_EXISTS");
+
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestDnsRebindingAndDestinationSecurity() {
+    using openidm::brisk::HttpClient;
+
+    // 1. IPv4 private / loopback / link-local / CGNAT / multicast / broadcast
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0x7F000001), "127.0.0.1 is loopback");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0x7FFFFFFF), "127.255.255.255 is loopback");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0x0A000001), "10.0.0.1 is RFC 1918");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xAC100001), "172.16.0.1 is RFC 1918");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xAC1FFFFF), "172.31.255.255 is RFC 1918");
+    ASSERT_TRUE(!HttpClient::IsPrivateOrLoopbackIp(0xAC200001), "172.32.0.1 is public");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xC0A80101), "192.168.1.1 is RFC 1918");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xA9FEA9FE), "169.254.169.254 is Link-Local APIPA");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0x64400001), "100.64.0.1 is Carrier-Grade NAT");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xC0000201), "192.0.2.1 is TEST-NET-1");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xE0000001), "224.0.0.1 is Multicast");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0xFFFFFFFF), "255.255.255.255 is Broadcast");
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIp(0x00000000), "0.0.0.0 is Unspecified");
+    ASSERT_TRUE(!HttpClient::IsPrivateOrLoopbackIp(0x08080808), "8.8.8.8 is Public DNS");
+    ASSERT_TRUE(!HttpClient::IsPrivateOrLoopbackIp(0x5DB8D822), "93.184.216.34 (example.com) is Public");
+
+    // 2. IPv6 private / loopback / ULA / link-local / mapped
+    uint8_t loopback_v6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIpv6(loopback_v6), "::1 is IPv6 loopback");
+
+    uint8_t unspec_v6[16] = {0};
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIpv6(unspec_v6), ":: is IPv6 unspecified");
+
+    uint8_t link_local_v6[16] = {0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIpv6(link_local_v6), "fe80::1 is IPv6 link-local");
+
+    uint8_t ula_v6[16] = {0xFD, 0x12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIpv6(ula_v6), "fd12::1 is IPv6 ULA");
+
+    uint8_t mcast_v6[16] = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIpv6(mcast_v6), "ff02::1 is IPv6 multicast");
+
+    uint8_t mapped_priv[16] = {0,0,0,0,0,0,0,0,0,0,0xFF,0xFF,127,0,0,1};
+    ASSERT_TRUE(HttpClient::IsPrivateOrLoopbackIpv6(mapped_priv), "::ffff:127.0.0.1 is IPv4-mapped loopback");
+
+    uint8_t mapped_pub[16] = {0,0,0,0,0,0,0,0,0,0,0xFF,0xFF,8,8,8,8};
+    ASSERT_TRUE(!HttpClient::IsPrivateOrLoopbackIpv6(mapped_pub), "::ffff:8.8.8.8 is IPv4-mapped public");
+
+    // 3. DNS resolution check
+    ASSERT_TRUE(HttpClient::CheckHostResolvesToPrivate("localhost"), "localhost resolves to private");
+    ASSERT_TRUE(HttpClient::CheckHostResolvesToPrivate("127.0.0.1"), "127.0.0.1 resolves to private");
+
+    return true;
+}
+
+bool TestStreamContainerValidation() {
+    using openidm::stream::Nm3u8dlReAdapter;
+    std::error_code ec;
+    std::filesystem::path tmp_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_container_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(tmp_dir, ec);
+
+    // 1. MP4 / M4A (ISO BMFF ftyp / moov)
+    auto p_mp4 = tmp_dir / "test.mp4";
+    {
+        std::ofstream ofs(p_mp4, std::ios::binary);
+        uint8_t ftyp_hdr[] = {0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0, 0, 2, 0};
+        ofs.write(reinterpret_cast<char*>(ftyp_hdr), sizeof(ftyp_hdr));
+        ofs.write(std::string(64, '\0').data(), 64);
+    }
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_mp4, "mp4"), "Valid MP4 ftyp container recognized");
+
+    auto p_m4a = tmp_dir / "test.m4a";
+    {
+        std::ofstream ofs(p_m4a, std::ios::binary);
+        uint8_t m4a_hdr[] = {0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'M', '4', 'A', ' ', 0, 0, 0, 0};
+        ofs.write(reinterpret_cast<char*>(m4a_hdr), sizeof(m4a_hdr));
+        ofs.write(std::string(64, '\0').data(), 64);
+    }
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_m4a, "m4a"), "Valid M4A audio container recognized");
+
+    // 2. MKV / WebM (EBML 0x1A 0x45 0xDF 0xA3)
+    auto p_mkv = tmp_dir / "test.mkv";
+    {
+        std::ofstream ofs(p_mkv, std::ios::binary);
+        uint8_t ebml_hdr[] = {0x1A, 0x45, 0xDF, 0xA3, 0x93, 0x42, 0x82, 0x88, 'm', 'a', 't', 'r', 'o', 's', 'k', 'a'};
+        ofs.write(reinterpret_cast<char*>(ebml_hdr), sizeof(ebml_hdr));
+    }
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_mkv, "mkv"), "Valid MKV EBML container recognized");
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_mkv, "webm"), "Valid WebM EBML container recognized");
+
+    // 3. MP3 (ID3v2 and MPEG frame sync)
+    auto p_mp3 = tmp_dir / "test.mp3";
+    {
+        std::ofstream ofs(p_mp3, std::ios::binary);
+        uint8_t id3_hdr[] = {'I', 'D', '3', 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10};
+        ofs.write(reinterpret_cast<char*>(id3_hdr), sizeof(id3_hdr));
+        ofs.write(std::string(64, '\0').data(), 64);
+    }
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_mp3, "mp3"), "Valid MP3 ID3 container recognized");
+
+    // 4. FLAC ("fLaC")
+    auto p_flac = tmp_dir / "test.flac";
+    {
+        std::ofstream ofs(p_flac, std::ios::binary);
+        uint8_t flac_hdr[] = {'f', 'L', 'a', 'C', 0, 0, 0, 0x22};
+        ofs.write(reinterpret_cast<char*>(flac_hdr), sizeof(flac_hdr));
+    }
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_flac, "flac"), "Valid FLAC container recognized");
+
+    // 5. MPEG-TS (0x47 sync byte)
+    auto p_ts = tmp_dir / "test.ts";
+    {
+        std::ofstream ofs(p_ts, std::ios::binary);
+        uint8_t ts_packet[188] = {0x47, 0x00, 0x10, 0x10};
+        ofs.write(reinterpret_cast<char*>(ts_packet), sizeof(ts_packet));
+    }
+    ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_ts, "ts"), "Valid MPEG-TS container recognized");
+
+    // 6. Corrupt / empty / invalid files
+    auto p_corrupt = tmp_dir / "corrupt.mp4";
+    {
+        std::ofstream ofs(p_corrupt, std::ios::binary);
+        ofs << "XYZ";
+    }
+    ASSERT_TRUE(!Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_corrupt, "mp4"), "Corrupt MP4 rejected");
+    ASSERT_TRUE(!Nm3u8dlReAdapter::VerifyContainerMagicBytes(p_corrupt, "mkv"), "Corrupt MKV rejected");
+
+    std::filesystem::remove_all(tmp_dir, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 27;
+    const int total = 30;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -1368,6 +1595,9 @@ int main() {
     run(25, "TestIpcShutdownAndFirstPipeInstance", TestIpcShutdownAndFirstPipeInstance);
     run(26, "TestConflictPolicies", TestConflictPolicies);
     run(27, "TestSystemSuspendResumeAndPauseReason", TestSystemSuspendResumeAndPauseReason);
+    run(28, "TestConcurrentAtomicCommitsAndSha256", TestConcurrentAtomicCommitsAndSha256);
+    run(29, "TestDnsRebindingAndDestinationSecurity", TestDnsRebindingAndDestinationSecurity);
+    run(30, "TestStreamContainerValidation", TestStreamContainerValidation);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

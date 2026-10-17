@@ -62,6 +62,10 @@ public:
     // Parses N_m3u8DL-RE meta.json output and detects unsupported DRM (NFR-015)
     static Result<StreamProbeResult> ParseMetaJson(const std::filesystem::path& meta_json_path);
 
+    // Validates that output stream file is non-empty and contains valid container magic bytes
+    // (MP4/M4A/MOV, MKV/WebM, MP3, AAC, FLAC, Ogg/Opus, TS).
+    static bool VerifyContainerMagicBytes(const std::filesystem::path& file_path, const std::string& fmt);
+
     // Phase 1: Probes a detected HLS/DASH manifest using the actual N_m3u8DL-RE worker (--skip-download --write-meta-json)
     Result<StreamProbeResult> ProbeManifest(
         const std::string& manifest_url,

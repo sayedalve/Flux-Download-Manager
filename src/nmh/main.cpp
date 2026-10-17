@@ -259,8 +259,13 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        if (::send(ipc_fd, &in_len, sizeof(in_len), 0) != sizeof(in_len) ||
-            ::send(ipc_fd, payload.data(), in_len, 0) != static_cast<ssize_t>(in_len)) {
+#ifdef MSG_NOSIGNAL
+        int send_flags = MSG_NOSIGNAL;
+#else
+        int send_flags = 0;
+#endif
+        if (::send(ipc_fd, &in_len, sizeof(in_len), send_flags) != sizeof(in_len) ||
+            ::send(ipc_fd, payload.data(), in_len, send_flags) != static_cast<ssize_t>(in_len)) {
             ::close(ipc_fd);
             ipc_fd = -1;
             WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_DISCONNECTED"}})");

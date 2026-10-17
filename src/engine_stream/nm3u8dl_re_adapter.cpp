@@ -127,27 +127,61 @@ std::string EscapeMuxPath(const std::filesystem::path& p) {
 }
 
 // Verifies that muxed MP4/MKV output file is non-empty and starts with valid container magic bytes
-bool VerifyContainerMagicBytes(const std::filesystem::path& file_path, const std::string& fmt) {
+} // namespace
+
+bool Nm3u8dlReAdapter::VerifyContainerMagicBytes(const std::filesystem::path& file_path, const std::string& fmt) {
     std::ifstream ifs(file_path, std::ios::binary);
     if (!ifs) return false;
-    uint8_t hdr[12]{};
+    uint8_t hdr[16]{};
     ifs.read(reinterpret_cast<char*>(hdr), sizeof(hdr));
     std::streamsize got = ifs.gcount();
-    if (got < 8) return false;
+    if (got < 4) return false;
 
-    if (fmt == "mkv") {
-        // Matroska EBML header: 0x1A 0x45 0xDF 0xA3
-        return (hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3);
+    std::string f = ToLowerStr(fmt);
+
+    // Matroska / WebM EBML header: 0x1A 0x45 0xDF 0xA3
+    if (f == "mkv" || f == "webm") {
+        return (got >= 4 && hdr[0] == 0x1A && hdr[1] == 0x45 && hdr[2] == 0xDF && hdr[3] == 0xA3);
     }
-    // ISO Base Media File Format (MP4): bytes 4..7 == "ftyp" or "moov" or "free" or "mdat"
-    if (std::memcmp(hdr + 4, "ftyp", 4) == 0 ||
-        std::memcmp(hdr + 4, "moov", 4) == 0 ||
-        std::memcmp(hdr + 4, "free", 4) == 0 ||
-        std::memcmp(hdr + 4, "mdat", 4) == 0) {
-        return true;
+    // ISO Base Media File Format (MP4, M4A, MOV): bytes 4..7 == "ftyp", "moov", "free", "mdat"
+    if (f == "mp4" || f == "m4a" || f == "mov") {
+        if (got >= 8 &&
+            (std::memcmp(hdr + 4, "ftyp", 4) == 0 ||
+             std::memcmp(hdr + 4, "moov", 4) == 0 ||
+             std::memcmp(hdr + 4, "free", 4) == 0 ||
+             std::memcmp(hdr + 4, "mdat", 4) == 0)) {
+            return true;
+        }
+        return false;
     }
-    return false;
+    // MP3: ID3 header ("ID3") or MPEG audio frame sync (0xFF followed by 0xE0..0xFF)
+    if (f == "mp3") {
+        if (got >= 3 && hdr[0] == 'I' && hdr[1] == 'D' && hdr[2] == '3') return true;
+        if (got >= 2 && hdr[0] == 0xFF && (hdr[1] & 0xE0) == 0xE0) return true;
+        return false;
+    }
+    // AAC: ADTS frame sync (0xFF followed by 0xF0..0xFF)
+    if (f == "aac") {
+        if (got >= 2 && hdr[0] == 0xFF && (hdr[1] & 0xF0) == 0xF0) return true;
+        return false;
+    }
+    // FLAC: "fLaC" (0x66 0x4C 0x61 0x43)
+    if (f == "flac") {
+        return (got >= 4 && hdr[0] == 'f' && hdr[1] == 'L' && hdr[2] == 'a' && hdr[3] == 'C');
+    }
+    // Ogg / Opus: "OggS" (0x4F 0x67 0x67 0x53)
+    if (f == "ogg" || f == "opus") {
+        return (got >= 4 && hdr[0] == 'O' && hdr[1] == 'g' && hdr[2] == 'g' && hdr[3] == 'S');
+    }
+    // MPEG-TS: 0x47 sync byte
+    if (f == "ts") {
+        return (got >= 1 && hdr[0] == 0x47);
+    }
+    // Fallback for other media container formats: require at least 8 valid bytes
+    return got >= 8;
 }
+
+namespace {
 
 int RunExternalFfmpegMux(const std::filesystem::path& ffmpeg_bin, const std::vector<std::string>& args) {
 #ifdef _WIN32
@@ -707,7 +741,11 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
         input_target = local_manifest.string();
     }
 
-    std::string fmt = (task.stream_options.output_format == "mkv") ? "mkv" : "mp4";
+    std::string req_fmt = ToLowerStr(task.stream_options.output_format);
+    std::string fmt = "mp4";
+    if (req_fmt == "mkv" || req_fmt == "webm" || req_fmt == "m4a" || req_fmt == "mp3" || req_fmt == "ts") {
+        fmt = req_fmt;
+    }
     std::string base_stem = PathSanitizer::SanitizeFileName(task.file_name.empty() ? "stream_video" : task.file_name);
     auto dot = base_stem.find_last_of('.');
     if (dot != std::string::npos) {
@@ -735,9 +773,21 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     rsp_lines.push_back("--sub-format SRT");
     rsp_lines.push_back("--no-log");
     rsp_lines.push_back("--ffmpeg-binary-path \"" + EscapeRspArg(m_cfg.ffmpeg_binary_path.string()) + "\"");
-    rsp_lines.push_back("--auto-select");
-    rsp_lines.push_back("-sv " + EscapeRspArg(task.stream_options.video_filter.empty() ? "best" : task.stream_options.video_filter));
-    rsp_lines.push_back("-sa " + EscapeRspArg(task.stream_options.audio_filter.empty() ? "all" : task.stream_options.audio_filter));
+
+    bool is_audio_only = (fmt == "m4a" || fmt == "mp3" || task.stream_options.video_filter == "none");
+    bool is_video_only = (task.stream_options.audio_filter == "none");
+
+    if (is_audio_only) {
+        rsp_lines.push_back("--drop-video");
+        rsp_lines.push_back("-sa " + EscapeRspArg(task.stream_options.audio_filter.empty() || task.stream_options.audio_filter == "all" ? "best" : task.stream_options.audio_filter));
+    } else if (is_video_only) {
+        rsp_lines.push_back("--drop-audio");
+        rsp_lines.push_back("-sv " + EscapeRspArg(task.stream_options.video_filter.empty() ? "best" : task.stream_options.video_filter));
+    } else {
+        rsp_lines.push_back("--auto-select");
+        rsp_lines.push_back("-sv " + EscapeRspArg(task.stream_options.video_filter.empty() ? "best" : task.stream_options.video_filter));
+        rsp_lines.push_back("-sa " + EscapeRspArg(task.stream_options.audio_filter.empty() ? "all" : task.stream_options.audio_filter));
+    }
     rsp_lines.push_back("-ss " + EscapeRspArg(task.stream_options.subtitle_filter.empty() ? "all" : task.stream_options.subtitle_filter));
     rsp_lines.push_back("-M format=" + fmt + ":muxer=ffmpeg:bin_path=\"" + EscapeMuxPath(m_cfg.ffmpeg_binary_path) + "\":keep=false");
 
@@ -1024,6 +1074,8 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     if (exit_code != 0 || !std::filesystem::exists(muxed_output, ec) ||
         std::filesystem::file_size(muxed_output, ec) == 0 ||
         !VerifyContainerMagicBytes(muxed_output, fmt)) {
+        std::filesystem::remove_all(task_tmp_dir, ec);
+        std::filesystem::remove(muxed_output, ec);
         task.state = TaskState::kFailed;
         task.error_code = (last_error_line.find("DRM") != std::string::npos) ? "ERR_STREAM_DRM_PROTECTED" : "ERR_STREAM_WORKER_CRASH";
         task.error_message = last_error_line.empty() ? ("Worker exited with code " + std::to_string(exit_code)) : last_error_line;
@@ -1043,6 +1095,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     std::filesystem::remove_all(task_tmp_dir, ec);
 
     if (!commit_res.ok()) {
+        std::filesystem::remove(muxed_output, ec);
         task.state = TaskState::kFailed;
         task.error_code = commit_res.error->code;
         task.error_message = commit_res.error->message;

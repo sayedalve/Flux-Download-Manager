@@ -244,9 +244,9 @@ void IpcServer::Stop() {
         }
     }
 
-    for (auto& th : m_client_threads) {
-        if (th.joinable()) {
-            th.join();
+    for (auto& entry : m_client_threads) {
+        if (entry.thread.joinable()) {
+            entry.thread.join();
         }
     }
     m_client_threads.clear();
@@ -270,9 +270,9 @@ void IpcServer::Stop() {
         }
     }
 
-    for (auto& th : m_client_threads) {
-        if (th.joinable()) {
-            th.join();
+    for (auto& entry : m_client_threads) {
+        if (entry.thread.joinable()) {
+            entry.thread.join();
         }
     }
     m_client_threads.clear();
@@ -337,7 +337,8 @@ void IpcServer::AcceptLoop() {
         HANDLE clientPipe = hPipe;
         hPipe = INVALID_HANDLE_VALUE;
 
-        std::thread t([this, clientPipe]() {
+        auto done_flag = std::make_shared<std::atomic<bool>>(false);
+        std::thread t([this, clientPipe, done_flag]() {
             while (m_running.load()) {
                 uint32_t msg_len = 0;
                 DWORD got = 0;
@@ -368,11 +369,20 @@ void IpcServer::AcceptLoop() {
                     m_active_pipe_handles.erase(it);
                 }
             }
+            done_flag->store(true);
         });
 
         {
             std::lock_guard<std::mutex> lk(m_clients_mutex);
-            m_client_threads.push_back(std::move(t));
+            for (auto it = m_client_threads.begin(); it != m_client_threads.end();) {
+                if (it->done->load() && it->thread.joinable()) {
+                    it->thread.join();
+                    it = m_client_threads.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            m_client_threads.push_back({std::move(t), done_flag});
         }
     }
     if (pSD) {
@@ -399,10 +409,22 @@ void IpcServer::AcceptLoop() {
             m_active_client_fds.push_back(client_fd);
         }
 
-        std::thread t(&IpcServer::HandleClientConnection, this, client_fd);
+        auto done_flag = std::make_shared<std::atomic<bool>>(false);
+        std::thread t([this, client_fd, done_flag]() {
+            HandleClientConnection(client_fd);
+            done_flag->store(true);
+        });
         {
             std::lock_guard<std::mutex> lk(m_clients_mutex);
-            m_client_threads.push_back(std::move(t));
+            for (auto it = m_client_threads.begin(); it != m_client_threads.end();) {
+                if (it->done->load() && it->thread.joinable()) {
+                    it->thread.join();
+                    it = m_client_threads.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            m_client_threads.push_back({std::move(t), done_flag});
         }
     }
 #endif
@@ -424,8 +446,13 @@ void IpcServer::HandleClientConnection(int client_fd) {
 
         std::string resp = HandleJsonRpcMessage(payload);
         uint32_t resp_len = static_cast<uint32_t>(resp.size());
-        if (::send(client_fd, &resp_len, sizeof(resp_len), 0) != sizeof(resp_len)) break;
-        if (::send(client_fd, resp.data(), resp.size(), 0) != static_cast<ssize_t>(resp.size())) break;
+#ifdef MSG_NOSIGNAL
+        int send_flags = MSG_NOSIGNAL;
+#else
+        int send_flags = 0;
+#endif
+        if (::send(client_fd, &resp_len, sizeof(resp_len), send_flags) != sizeof(resp_len)) break;
+        if (::send(client_fd, resp.data(), resp.size(), send_flags) != static_cast<ssize_t>(resp.size())) break;
     }
     ::close(client_fd);
 

@@ -53,8 +53,13 @@ private:
     std::atomic<bool> m_capture_enabled{true};
     std::thread m_accept_thread;
 
+    struct ClientWorkerEntry {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done{std::make_shared<std::atomic<bool>>(false)};
+    };
+
     std::mutex m_clients_mutex;
-    std::vector<std::thread> m_client_threads;
+    std::vector<ClientWorkerEntry> m_client_threads;
 #ifdef _WIN32
     HANDLE m_first_pipe_handle{INVALID_HANDLE_VALUE};
     std::vector<HANDLE> m_active_pipe_handles;

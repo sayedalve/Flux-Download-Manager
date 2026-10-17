@@ -107,18 +107,36 @@ async function sendNativeRpc(method, params, customTransport = null) {
       if (!hostName) continue;
       try {
         const res = await new Promise((resolve, reject) => {
-          chrome.runtime.sendNativeMessage(hostName, payload, (response) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else if (response && response.error) {
-              const rpcErr = new Error(response.error.message || "RPC Error");
-              rpcErr.isRpcError = true;
-              rpcErr.code = response.error.code;
-              reject(rpcErr);
-            } else {
-              resolve(response ? response.result : null);
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              reject(new Error("Native Messaging RPC timed out after 5000ms"));
             }
-          });
+          }, 5000);
+          try {
+            chrome.runtime.sendNativeMessage(hostName, payload, (response) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else if (response && response.error) {
+                const rpcErr = new Error(response.error.message || "RPC Error");
+                rpcErr.isRpcError = true;
+                rpcErr.code = response.error.code;
+                reject(rpcErr);
+              } else {
+                resolve(response ? response.result : null);
+              }
+            });
+          } catch (e) {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              reject(e);
+            }
+          }
         });
         logPipelineStage(correlationId, "NATIVE_RPC_RESULT", {
           method,
@@ -569,14 +587,22 @@ async function onDownloadCreatedHandler(
         if (cancelBrowserDownloadFn) {
           await cancelBrowserDownloadFn(downloadItem.id);
         } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-          chrome.downloads.cancel(downloadItem.id, () => {
-            if (chrome.runtime) void chrome.runtime.lastError;
-            if (chrome.downloads.erase) {
-              chrome.downloads.erase({ id: downloadItem.id }, () => {
-                if (chrome.runtime) void chrome.runtime.lastError;
-              });
-            }
-          });
+          const tryCancel = (retries = 2) => {
+            chrome.downloads.cancel(downloadItem.id, () => {
+              if (chrome.runtime && chrome.runtime.lastError) {
+                if (retries > 0) {
+                  setTimeout(() => tryCancel(retries - 1), 60);
+                  return;
+                }
+              }
+              if (chrome.downloads.erase) {
+                chrome.downloads.erase({ id: downloadItem.id }, () => {
+                  if (chrome.runtime) void chrome.runtime.lastError;
+                });
+              }
+            });
+          };
+          tryCancel();
         }
         return { intercepted: true, taskId: result.taskId, fileName: result.fileName, correlationId };
       }
@@ -747,10 +773,11 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     extractorJson,
     pageTitle: baseTitle,
     tabUrl: candidate.tabUrl || "",
-    frameUrl: candidate.frameUrl || "",
-    outputFormat: options.outputFormat || defaultExt,
-    videoFilter: effectiveVideoFilter,
-    audioFilter: options.audioFilter || (chosenQuality && chosenQuality.isAudioOnly ? "best" : "all"),
+    outputFormat: (options.audioOnly || (chosenQuality && chosenQuality.isAudioOnly))
+      ? (options.outputFormat || (defaultExt === "mp3" || defaultExt === "m4a" ? defaultExt : "m4a"))
+      : (options.outputFormat || defaultExt),
+    videoFilter: (options.audioOnly || (chosenQuality && chosenQuality.isAudioOnly)) ? "none" : effectiveVideoFilter,
+    audioFilter: options.videoOnly ? "none" : (options.audioFilter || (chosenQuality && chosenQuality.isAudioOnly ? "best" : "all")),
     subtitleFilter: options.subtitleFilter || "all",
     customKeyHex: options.customKeyHex || "",
     cachedManifestBody: validCachedManifest,

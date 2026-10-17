@@ -404,26 +404,47 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             m_cfg.allow_loopback
         };
         stream::Nm3u8dlReAdapter adapter(std::move(scfg));
-        auto res = adapter.ExecuteStreamDownload(
-            local_task,
-            ctrl->pause_requested,
-            ctrl->cancel_requested,
-            ctrl->task_speed_limit_bps.load(),
-            [&](const stream::StreamProgress& sp) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                auto it = m_tasks.find(task_id);
-                if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
-                    auto& t = it->second;
-                    t.state = sp.phase;
-                    t.downloaded_bytes = sp.downloaded_bytes;
-                    t.total_bytes = sp.total_bytes;
-                    t.speed_bps = sp.speed_bps;
-                    t.stream_percent = sp.percent;
-                    t.completed_segments = sp.completed_segments;
-                    t.total_segments = sp.total_segments;
-                    t.status_detail = sp.status_line;
-                }
-            });
+        Result<std::filesystem::path> res;
+        bool is_yt = (task_type_str == "YOUTUBE_EXTRACTION" ||
+                      local_task.url.find("googlevideo.com") != std::string::npos ||
+                      local_task.url.find("youtube.com") != std::string::npos ||
+                      local_task.url.find("youtu.be") != std::string::npos ||
+                      local_task.page_url.find("youtube.com") != std::string::npos ||
+                      local_task.stream_options.cached_manifest_body.find("YOUTUBE") != std::string::npos ||
+                      (!local_task.stream_options.cached_manifest_body.empty() &&
+                       (local_task.stream_options.cached_manifest_body.front() == '{' ||
+                        local_task.stream_options.cached_manifest_body.front() == '[')));
+        auto progress_cb = [&](const stream::StreamProgress& sp) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            auto it = m_tasks.find(task_id);
+            if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                auto& t = it->second;
+                t.state = sp.phase;
+                t.downloaded_bytes = sp.downloaded_bytes;
+                t.total_bytes = sp.total_bytes;
+                t.speed_bps = sp.speed_bps;
+                t.stream_percent = sp.percent;
+                t.completed_segments = sp.completed_segments;
+                t.total_segments = sp.total_segments;
+                t.status_detail = sp.status_line;
+            }
+        };
+
+        if (is_yt) {
+            res = adapter.ExecuteYouTubeExtraction(
+                local_task,
+                ctrl->pause_requested,
+                ctrl->cancel_requested,
+                ctrl->task_speed_limit_bps.load(),
+                progress_cb);
+        } else {
+            res = adapter.ExecuteStreamDownload(
+                local_task,
+                ctrl->pause_requested,
+                ctrl->cancel_requested,
+                ctrl->task_speed_limit_bps.load(),
+                progress_cb);
+        }
         (void)res;
     }
 

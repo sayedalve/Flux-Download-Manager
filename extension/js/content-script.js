@@ -254,6 +254,7 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
   return { activeOverlays, observer: null, refreshPositions };
 }
 
+
 function handleLinkClick(ev) {
   try {
     if (ev.altKey) {
@@ -264,11 +265,13 @@ function handleLinkClick(ev) {
       return;
     }
 
+    if (ev.button !== undefined && ev.button !== 0 && ev.button !== 1) return;
+
     const anchor = ev.target && typeof ev.target.closest === "function" ? ev.target.closest("a") : null;
     if (!anchor || !anchor.href) return;
 
     const href = anchor.href;
-    if (href.startsWith("javascript:") || href.startsWith("#")) return;
+    if (href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("mailto:")) return;
 
     const pathname = anchor.pathname || "";
     const lastDot = pathname.lastIndexOf(".");
@@ -277,7 +280,8 @@ function handleLinkClick(ev) {
 
     const interceptExts = new Set([
       "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "iso", "exe", "msi", "dmg", "pdf",
-      "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav", "apk", "bin", "deb", "rpm"
+      "apk", "bin", "deb", "rpm", "docx", "xlsx", "pptx", "csv", "epub",
+      "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav"
     ]);
 
     if (hasDownloadAttr || interceptExts.has(ext) || pathname.includes("/redirect") || pathname.includes("/download")) {
@@ -286,6 +290,7 @@ function handleLinkClick(ev) {
           action: "linkClicked",
           url: href,
           filename: anchor.download || "",
+          hasDownloadAttr,
           referrer: (typeof location !== "undefined" ? location.href : ""),
           pageTitle: (typeof document !== "undefined" ? document.title : ""),
           bypass: false

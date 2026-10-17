@@ -617,9 +617,29 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
     // 5. stream.add
     if (method == "stream.add") {
         std::string stream_type = params["streamType"].as_string("HLS");
+        std::string source_type = params["sourceType"].as_string();
+        if (source_type == "YOUTUBE_EXTRACTION") {
+            stream_type = "YOUTUBE";
+        }
         std::string manifest_url = params["manifestUrl"].as_string();
         if (manifest_url.empty()) manifest_url = params["url"].as_string();
         std::string cached_body = params["cachedManifestBody"].as_string();
+        if (cached_body.empty() && params.contains("extractorJson") && !params["extractorJson"].as_string().empty()) {
+            cached_body = params["extractorJson"].as_string();
+        }
+        if (cached_body.empty() && (params.contains("videoUrl") || params.contains("pairedAudioUrl"))) {
+            std::string vu = params["videoUrl"].as_string();
+            std::string au = params["pairedAudioUrl"].as_string();
+            if (!vu.empty() || !au.empty()) {
+                json::Object jdesc;
+                jdesc["fluxType"] = "YOUTUBE_STREAM";
+                jdesc["videoUrl"] = vu;
+                jdesc["audioUrl"] = au;
+                jdesc["watchUrl"] = params["tabUrl"].as_string();
+                jdesc["videoId"] = params["videoId"].as_string();
+                cached_body = json::Value(std::move(jdesc)).dump();
+            }
+        }
 
         if (stream_type == "HLS" && !cached_body.empty()) {
             std::string_view trimmed = cached_body;

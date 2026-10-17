@@ -692,6 +692,17 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     ProgressCallback on_progress) {
 
     std::error_code ec;
+    if (task.url.find("googlevideo.com") != std::string::npos ||
+        task.url.find("youtube.com") != std::string::npos ||
+        task.url.find("youtu.be") != std::string::npos ||
+        task.page_url.find("youtube.com") != std::string::npos ||
+        task.stream_options.cached_manifest_body.find("YOUTUBE") != std::string::npos ||
+        (!task.stream_options.cached_manifest_body.empty() &&
+         (task.stream_options.cached_manifest_body.front() == '{' ||
+          task.stream_options.cached_manifest_body.front() == '['))) {
+        return ExecuteYouTubeExtraction(task, pause_requested, cancel_requested, speed_limit_bps, on_progress);
+    }
+
     if (!std::filesystem::exists(m_cfg.nm3u8dl_binary_path, ec)) {
         task.state = TaskState::kFailed;
         task.error_code = "ERR_DEPENDENCY_MISSING";
@@ -1219,6 +1230,10 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         } catch (...) {}
     }
 
+    if (video_url.empty() && task.url.find("googlevideo.com") != std::string::npos) {
+        video_url = StripGooglevideoRangeParams(task.url);
+    }
+
     if (!video_url.empty() && (video_url == watch_url || PathSanitizer::IsWebpageWatchUrl(video_url))) {
         if (watch_url.empty()) watch_url = video_url;
         video_url.clear();
@@ -1227,6 +1242,12 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     std::map<std::string, std::string> combined_headers = task.headers;
     for (const auto& [k, v] : task.auth_headers) {
         combined_headers[k] = v;
+    }
+    if (combined_headers.find("User-Agent") == combined_headers.end()) {
+        combined_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    }
+    if (combined_headers.find("Referer") == combined_headers.end()) {
+        combined_headers["Referer"] = (!watch_url.empty() && watch_url.find("youtube.com") != std::string::npos) ? watch_url : "https://www.youtube.com/";
     }
 
     // 2. If watch_url is a webpage or player endpoint and video_url is not yet resolved, inspect page/player JSON

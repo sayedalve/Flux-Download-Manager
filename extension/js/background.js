@@ -491,15 +491,39 @@ async function onDownloadCreatedHandler(
   const wasExplicitLinkClick = Boolean(clickedInfo);
 
   // In Chromium, onDeterminingFilename always fires right after onCreated for every download.
-  // When chrome.downloads.onDeterminingFilename is available, defer processing from phase === "created"
-  // to avoid "Cannot cancel download while determining filename" and eliminate duplicate RPC task offers.
-  if (phase === "created" && typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
-    return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
+  if (phase === "created") {
+    // If this download URL was already pre-intercepted at link-click time, cancel competing download immediately
+    const normTarget = normalizeCorrelationUrl(targetUrl);
+    const normOrig = normalizeCorrelationUrl(downloadItem.url || "");
+    if (G.handledDownloadUrls && (G.handledDownloadUrls.has(normTarget) || G.handledDownloadUrls.has(normOrig))) {
+      if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
+        chrome.downloads.cancel(downloadItem.id, () => {
+          if (chrome.downloads.erase) chrome.downloads.erase({ id: downloadItem.id }, () => {});
+        });
+      }
+      return { intercepted: true, reason: "ALREADY_INTERCEPTED_VIA_CLICK" };
+    }
+
+    // Immediately pause browser download so it cannot complete or download competing bytes
+    if (typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
+      try {
+        chrome.downloads.pause(downloadItem.id, () => {
+          if (chrome.runtime) void chrome.runtime.lastError;
+        });
+      } catch (_) {}
+    }
+
+    if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
+      return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
+    }
   }
 
   if (!isEligibleExt && !isEligibleMime && !wasExplicitLinkClick && !isAttachment) {
     if (fileSize === 0 || fileSize < G.minFileSizeBytes) {
       invokeSuggestIfNeeded();
+      if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+        try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+      }
       return { intercepted: false, reason: "BELOW_SIZE_OR_EXT_FILTER" };
     }
   }
@@ -583,15 +607,14 @@ async function onDownloadCreatedHandler(
           taskId: result.taskId,
           fileName: result.fileName
         });
-        invokeSuggestIfNeeded();
         if (cancelBrowserDownloadFn) {
           await cancelBrowserDownloadFn(downloadItem.id);
         } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-          const tryCancel = (retries = 2) => {
+          const tryCancel = (retries = 3) => {
             chrome.downloads.cancel(downloadItem.id, () => {
               if (chrome.runtime && chrome.runtime.lastError) {
                 if (retries > 0) {
-                  setTimeout(() => tryCancel(retries - 1), 60);
+                  setTimeout(() => tryCancel(retries - 1), 50);
                   return;
                 }
               }
@@ -780,7 +803,7 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     audioFilter: options.videoOnly ? "none" : (options.audioFilter || (chosenQuality && chosenQuality.isAudioOnly ? "best" : "all")),
     subtitleFilter: options.subtitleFilter || "all",
     customKeyHex: options.customKeyHex || "",
-    cachedManifestBody: validCachedManifest,
+    cachedManifestBody: validCachedManifest || (sourceType === SourceType.YOUTUBE_EXTRACTION ? extractorJson : "") || "",
     headers: candidate.headers || {}
   };
 

@@ -411,8 +411,8 @@ function classifyNetworkResource(details) {
           const watchUrl = isYouTubeWatchOrShortsUrl(tabUrl) ? tabUrl : url;
           return {
             url: watchUrl,
-            videoUrl: (!isAudioOnly && !hasUmp) ? url : "",
-            pairedAudioUrl: (isAudioOnly && !hasUmp) ? url : "",
+            videoUrl: !isAudioOnly ? url : "",
+            pairedAudioUrl: isAudioOnly ? url : "",
             ext: "mp4",
             streamType: "YOUTUBE",
             sourceType: SourceType.YOUTUBE_EXTRACTION,
@@ -423,7 +423,7 @@ function classifyNetworkResource(details) {
             isGoogleVideo: true,
             isAdaptiveTrack: true,
             requiresAudioMux: !isAudioOnly,
-            requiresCipherExtraction: hasUmp,
+            requiresCipherExtraction: false,
             videoId: extractYouTubeVideoId(watchUrl),
             matchedBy: "googlevideo_adaptive"
           };
@@ -807,6 +807,14 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
       }
       videoCand.sourceType = SourceType.YOUTUBE_EXTRACTION;
       return { added: false, groupedUnder: videoCand.candidateId, candidate: videoCand };
+    }
+  }
+
+  // If this is a video googlevideo stream and an audio-only stream was already observed, pair it
+  if (candidate.isGoogleVideo && !candidate.isAudioOnly && !candidate.pairedAudioUrl) {
+    const audioCand = list.find(item => item.isGoogleVideo && item.isAudioOnly);
+    if (audioCand && (audioCand.pairedAudioUrl || audioCand.url)) {
+      candidate.pairedAudioUrl = audioCand.pairedAudioUrl || audioCand.url;
     }
   }
 

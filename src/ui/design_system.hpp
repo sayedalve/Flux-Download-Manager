@@ -418,28 +418,34 @@ public:
 
     static ThemePalette GetRedesignPalette() {
         ThemePalette p = GetDarkPalette();
-        p.app_background   = {0x16, 0x16, 0x18, 255}; // #161618 Matte Charcoal
+        p.app_background   = {0x16, 0x16, 0x18, 255}; // #161618 Warm Matte Charcoal
         p.cosmic_void      = {0x12, 0x12, 0x14, 255}; // #121214
         p.cosmic_nebula    = {0x1A, 0x1A, 0x1E, 255}; // #1A1A1E
-        p.surface_primary  = {0x1E, 0x1E, 0x22, 255}; // #1E1E22
-        p.surface_elevated = {0x24, 0x24, 0x2A, 255}; // #24242A
-        p.surface_hover    = {0x1F, 0x1F, 0x24, 255}; // #1F1F24
-        p.surface_selected = {0x26, 0x26, 0x2E, 255}; // #26262E
-        p.border_subtle    = {0x28, 0x28, 0x2E, 255}; // #28282E
-        p.border_focus     = {0xFF, 0x52, 0x52, 255}; // #FF5252 Coral Red
-        p.accent_primary   = {0xFF, 0x52, 0x52, 255}; // #FF5252 Coral Red
-        p.accent_hover     = {0xFF, 0x66, 0x66, 255}; // #FF6666
+        p.surface_primary  = {0x1E, 0x1E, 0x22, 255}; // #1E1E22 Surface
+        p.surface_elevated = {0x28, 0x28, 0x2E, 255}; // #28282E Elevated
+        p.surface_hover    = {0x25, 0x25, 0x2B, 255}; // #25252B Row hover
+        p.surface_selected = {0x2A, 0x2A, 0x32, 255}; // #2A2A32 Selected row
+        p.border_subtle    = {0x2E, 0x2F, 0x35, 255}; // #2E2F35 Hairline divider
+        p.border_focus     = {0xFF, 0x4F, 0x57, 255}; // #FF4F57 Reference Coral Red
+        p.text_primary     = {0xF2, 0xF2, 0xF3, 255}; // #F2F2F3 Crisp off-white
+        p.text_secondary   = {0xA4, 0xA5, 0xAC, 255}; // #A4A5AC Secondary metadata
+        p.text_muted       = {0x72, 0x73, 0x7A, 255}; // #72737A Muted text
+        p.accent_primary   = {0xFF, 0x4F, 0x57, 255}; // #FF4F57 Reference Coral Red
+        p.accent_hover     = {0xFF, 0x66, 0x6D, 255}; // #FF666D Hover Coral Red
+        p.badge_stream     = {0xFF, 0x4F, 0x57, 255}; // #FF4F57 Coral stream badge
+        p.badge_file       = {0xFF, 0x4F, 0x57, 255}; // #FF4F57 Coral file badge
         p.status_success   = {0x8E, 0x8E, 0x98, 255}; // #8E8E98
         p.status_warning   = {0x9E, 0x9E, 0xA8, 255}; // #9E9EA8
-        p.status_danger    = {0xFF, 0x52, 0x52, 255}; // #FF5252
-        p.progress_track   = {0x2E, 0x2E, 0x36, 255}; // #2E2E36
+        p.status_danger    = {0xFF, 0x4F, 0x57, 255}; // #FF4F57 Error Coral Red
+        p.progress_track   = {0x2E, 0x2E, 0x36, 255}; // #2E2E36 Progress track
         return p;
     }
 
     static ThemePalette ResolvePalette(std::string_view theme_setting, bool os_prefers_light = false) {
         if (theme_setting == "light") return GetLightPalette();
-        if (theme_setting == "system") return os_prefers_light ? GetLightPalette() : GetDarkPalette();
-        return GetDarkPalette();
+        if (theme_setting == "dark" || theme_setting == "cosmic") return GetDarkPalette();
+        if (theme_setting == "system") return os_prefers_light ? GetLightPalette() : GetRedesignPalette();
+        return GetRedesignPalette();
     }
 
     static const char* GetAccessibleIconGlyph(IconId icon) {

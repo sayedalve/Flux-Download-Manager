@@ -68,12 +68,12 @@ DesktopView::DesktopView(DownloadController& controller, ipc::IpcServer* ipc_ser
     : m_controller(controller),
       m_ipc_server(ipc_server),
       m_metrics(DesignSystem::ComputeMetrics(96)),
-      m_palette(DesignSystem::GetDarkPalette()) {
+      m_palette(DesignSystem::GetRedesignPalette()) {
     auto settings = m_controller.GetSettings();
     m_draft_settings = settings;
     m_starfield.SetReducedMotion(settings.reduced_motion);
     m_starfield.SetWindowState(!settings.start_minimized, settings.start_minimized);
-    SetTheme("dark", false);
+    SetTheme("coral", false);
 }
 
 void DesktopView::SetWindowDimensions(int width, int height, uint32_t dpi) {
@@ -107,30 +107,30 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     int w = m_window_width;
     int h = m_window_height;
 
-    int bar_h = DesignSystem::ScaleForDpi(48, m.dpi);
+    int bar_h = DesignSystem::ScaleForDpi(56, m.dpi);
     g.toolbar_rect = {0, 0, w, bar_h};
 
-    int chk_s = DesignSystem::ScaleForDpi(18, m.dpi);
+    int chk_s = DesignSystem::ScaleForDpi(20, m.dpi);
     int chk_y = (bar_h - chk_s) / 2;
     g.select_all_checkbox_rect = {16, chk_y, 16 + chk_s, chk_y + chk_s};
 
-    int sort_w = DesignSystem::ScaleForDpi(96, m.dpi);
-    int sort_h = DesignSystem::ScaleForDpi(28, m.dpi);
+    int sort_w = DesignSystem::ScaleForDpi(110, m.dpi);
+    int sort_h = DesignSystem::ScaleForDpi(36, m.dpi);
     int sort_y = (bar_h - sort_h) / 2;
     g.sort_dropdown_rect = {16 + chk_s + 12, sort_y, 16 + chk_s + 12 + sort_w, sort_y + sort_h};
 
-    int filt_w = DesignSystem::ScaleForDpi(96, m.dpi);
+    int filt_w = DesignSystem::ScaleForDpi(110, m.dpi);
     int filt_x = g.sort_dropdown_rect.right + 10;
     g.filter_dropdown_rect = {filt_x, sort_y, filt_x + filt_w, sort_y + sort_h};
 
-    int search_w = DesignSystem::ScaleForDpi(230, m.dpi);
-    int add_btn_w = DesignSystem::ScaleForDpi(132, m.dpi);
-    int btn_h = DesignSystem::ScaleForDpi(32, m.dpi);
+    int search_w = DesignSystem::ScaleForDpi(260, m.dpi);
+    int add_btn_w = DesignSystem::ScaleForDpi(150, m.dpi);
+    int btn_h = DesignSystem::ScaleForDpi(38, m.dpi);
     int by = (bar_h - btn_h) / 2;
 
     int search_x = w - search_w - 16;
     g.search_box_rect = {search_x, by, search_x + search_w, by + btn_h};
-    g.search_sliders_rect = {g.search_box_rect.right - DesignSystem::ScaleForDpi(28, m.dpi), by, g.search_box_rect.right, by + btn_h};
+    g.search_sliders_rect = {g.search_box_rect.right - DesignSystem::ScaleForDpi(36, m.dpi), by, g.search_box_rect.right, by + btn_h};
 
     int add_btn_x = search_x - add_btn_w - 12;
     g.add_download_button_rect = {add_btn_x, by, add_btn_x + add_btn_w, by + btn_h};
@@ -172,20 +172,20 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     }
     g.sidebar_rect = {0, bar_h, 0, bar_h};
 
-    int hdr_h = DesignSystem::ScaleForDpi(34, m.dpi);
-    int sb_h = DesignSystem::ScaleForDpi(34, m.dpi);
+    int hdr_h = DesignSystem::ScaleForDpi(38, m.dpi);
+    int sb_h = DesignSystem::ScaleForDpi(36, m.dpi);
     g.table_header_rect = {0, bar_h, w, bar_h + hdr_h};
     g.table_body_rect = {0, bar_h + hdr_h, w, h - sb_h};
     g.details_panel_rect = {0, h - sb_h, 0, h - sb_h};
     g.status_bar_rect = {0, h - sb_h, w, h};
-    g.status_toggle_off_rect = {16, h - sb_h + (sb_h - 20) / 2, 54, h - sb_h + (sb_h + 20) / 2};
+    g.status_toggle_off_rect = {16, h - sb_h + (sb_h - 24) / 2, 62, h - sb_h + (sb_h + 24) / 2};
 
-    int col_chk_w = 40;
-    int col_size_w = DesignSystem::ScaleForDpi(90, m.dpi);
-    int col_stat_w = DesignSystem::ScaleForDpi(160, m.dpi);
-    int col_dl_w = DesignSystem::ScaleForDpi(120, m.dpi);
-    int col_ul_w = DesignSystem::ScaleForDpi(90, m.dpi);
-    int col_added_w = DesignSystem::ScaleForDpi(130, m.dpi);
+    int col_chk_w = 44;
+    int col_size_w = DesignSystem::ScaleForDpi(100, m.dpi);
+    int col_stat_w = DesignSystem::ScaleForDpi(170, m.dpi);
+    int col_dl_w = DesignSystem::ScaleForDpi(130, m.dpi);
+    int col_ul_w = DesignSystem::ScaleForDpi(100, m.dpi);
+    int col_added_w = DesignSystem::ScaleForDpi(140, m.dpi);
 
     int remaining_w = std::max(100, w - col_chk_w - col_size_w - col_stat_w - col_dl_w - col_ul_w - col_added_w - 32);
     int col_name_w = remaining_w;
@@ -212,7 +212,7 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     g.table_columns.push_back({SortColumn::kProgress, "Progress", {cx, bar_h, cx, bar_h + hdr_h}});
     g.table_columns.push_back({SortColumn::kEta, "ETA", {cx, bar_h, cx, bar_h + hdr_h}});
 
-    int row_h = DesignSystem::ScaleForDpi(50, m.dpi);
+    int row_h = DesignSystem::ScaleForDpi(52, m.dpi);
     size_t max_rows = static_cast<size_t>(std::max(1, g.table_body_rect.height() / row_h));
     auto visible_rows = BuildVisibleTaskRows(scroll_offset, max_rows);
     int ry = g.table_body_rect.top;
@@ -222,9 +222,9 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
         if (ry + row_h > g.table_body_rect.bottom) break;
         RectI row_rc{0, ry, w, ry + row_h};
         RectI fn_rc{16 + col_chk_w, ry, 16 + col_chk_w + col_name_w, ry + row_h};
-        RectI prog_rc{16 + col_chk_w + 22, ry + row_h - 14, 16 + col_chk_w + 160, ry + row_h - 12};
-        RectI act_rc{dl_col_left, ry + (row_h - 18) / 2, dl_col_left + 18, ry + (row_h + 18) / 2};
-        RectI chk_rc{16, ry + (row_h - 18) / 2, 34, ry + (row_h + 18) / 2};
+        RectI prog_rc{16 + col_chk_w + 24, ry + row_h - 14, 16 + col_chk_w + 180, ry + row_h - 11};
+        RectI act_rc{dl_col_left, ry + (row_h - 22) / 2, dl_col_left + 22, ry + (row_h + 22) / 2};
+        RectI chk_rc{16, ry + (row_h - 20) / 2, 36, ry + (row_h + 20) / 2};
         g.task_rows.push_back({r.task_id, row_rc, fn_rc, prog_rc, act_rc, chk_rc, act_rc});
         ry += row_h;
     }
@@ -429,14 +429,12 @@ HitTestResult DesktopView::HandleMouseMove(int x, int y, size_t scroll_offset) {
 }
 
 void DesktopView::SetTheme(std::string_view theme_name, bool os_prefers_light) {
-    (void)os_prefers_light;
-    if (theme_name == "light" || theme_name == "system" || theme_name == "dark") {
+    if (theme_name == "light" || theme_name == "system" || theme_name == "dark" || theme_name == "coral" || theme_name == "redesign") {
         m_theme_name = std::string(theme_name);
     } else {
-        m_theme_name = "dark";
+        m_theme_name = "coral";
     }
-    // Keep the active desktop rendering surface in Minimal Cosmic Dark UI
-    m_palette = DesignSystem::GetDarkPalette();
+    m_palette = DesignSystem::ResolvePalette(m_theme_name, os_prefers_light);
 }
 
 std::string DesktopView::FormatBytes(uint64_t bytes) {
@@ -2762,20 +2760,22 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     FillRectSolid(hdc, client_rc, pal.app_background);
     SetBkMode(hdc, TRANSPARENT);
 
+    const auto& m = view.GetMetrics();
+
     HFONT hFontBody = CreateFontW(
-        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        -m.font_body_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT hFontBold = CreateFontW(
-        -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        -m.font_body_strong_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT hFontSmall = CreateFontW(
-        -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        -m.font_caption_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT hFontSmallBold = CreateFontW(
-        -11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        -m.font_caption_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HGDIOBJ old_font = SelectObject(hdc, hFontBody);
@@ -2787,39 +2787,39 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
 
     // 1.2 Sort Dropdown
     RECT sort_rc = ToWinRect(geom.sort_dropdown_rect);
-    DrawRoundedBoxGdi(hdc, sort_rc, 16, pal.surface_primary, pal.border_subtle, 1);
-    DrawHamburgerGlyphGdi(hdc, sort_rc.left + 12, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2 - 4, 10, 8, pal.text_muted);
-    RECT sort_txt_rc{sort_rc.left + 28, sort_rc.top, sort_rc.right - 18, sort_rc.bottom};
+    DrawRoundedBoxGdi(hdc, sort_rc, 18, pal.surface_primary, pal.border_subtle, 1);
+    DrawHamburgerGlyphGdi(hdc, sort_rc.left + 14, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2 - 5, 12, 10, pal.text_muted);
+    RECT sort_txt_rc{sort_rc.left + 32, sort_rc.top, sort_rc.right - 18, sort_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     SelectObject(hdc, hFontBody);
     DrawTextW(hdc, L"Newest", -1, &sort_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    DrawCaretGlyphGdi(hdc, sort_rc.right - 10, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2, pal.text_muted, false);
+    DrawCaretGlyphGdi(hdc, sort_rc.right - 12, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2, pal.text_muted, false);
 
     // 1.3 Filter Dropdown
     RECT filter_rc = ToWinRect(geom.filter_dropdown_rect);
-    DrawRoundedBoxGdi(hdc, filter_rc, 16, pal.surface_primary, pal.border_subtle, 1);
-    DrawFunnelGlyphGdi(hdc, filter_rc.left + 12, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2 - 4, 10, pal.text_muted);
-    RECT filter_txt_rc{filter_rc.left + 28, filter_rc.top, filter_rc.right - 18, filter_rc.bottom};
+    DrawRoundedBoxGdi(hdc, filter_rc, 18, pal.surface_primary, pal.border_subtle, 1);
+    DrawFunnelGlyphGdi(hdc, filter_rc.left + 14, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2 - 5, 12, pal.text_muted);
+    RECT filter_txt_rc{filter_rc.left + 32, filter_rc.top, filter_rc.right - 18, filter_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     std::wstring wcat = (view.GetSelectedCategory() == SidebarCategory::kAllDownloads) ? L"All files" : Utf8ToW(view.CategoryToLabel(view.GetSelectedCategory()));
     DrawTextW(hdc, wcat.c_str(), -1, &filter_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    DrawCaretGlyphGdi(hdc, filter_rc.right - 10, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2, pal.text_muted, false);
+    DrawCaretGlyphGdi(hdc, filter_rc.right - 12, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2, pal.text_muted, false);
 
     // 1.4 + Add download Pill Button
     RECT add_rc = ToWinRect(geom.add_download_button_rect);
     ColorRgba add_bg = (view.GetHoveredToolbarIndex() == 0) ? pal.accent_hover : pal.accent_primary;
-    DrawRoundedBoxGdi(hdc, add_rc, 18, add_bg, add_bg, 0);
+    DrawRoundedBoxGdi(hdc, add_rc, 20, add_bg, add_bg, 0);
     SelectObject(hdc, hFontBold);
     SetTextColor(hdc, RGB(255, 255, 255));
     DrawTextW(hdc, L"+ Add download", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     // 1.5 Search Capsule
     RECT search_rc = ToWinRect(geom.search_box_rect);
-    DrawRoundedBoxGdi(hdc, search_rc, 18, pal.surface_primary, pal.border_subtle, 1);
-    DrawSearchGlassGdi(hdc, search_rc.left + 12, search_rc.top + (search_rc.bottom - search_rc.top) / 2 - 5, 11, pal.text_muted);
+    DrawRoundedBoxGdi(hdc, search_rc, 20, pal.surface_primary, pal.border_subtle, 1);
+    DrawSearchGlassGdi(hdc, search_rc.left + 14, search_rc.top + (search_rc.bottom - search_rc.top) / 2 - 6, 13, pal.text_muted);
 
     // Ctrl K chip inside search box
-    RECT ctrl_k_rc{search_rc.right - 58, search_rc.top + 6, search_rc.right - 10, search_rc.bottom - 6};
+    RECT ctrl_k_rc{search_rc.right - 64, search_rc.top + 7, search_rc.right - 12, search_rc.bottom - 7};
     DrawRoundedBoxGdi(hdc, ctrl_k_rc, 6, pal.surface_elevated, pal.border_focus, 1);
     SelectObject(hdc, hFontSmallBold);
     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
@@ -2827,7 +2827,7 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
 
     // 1.6 Sliders Button (Settings)
     RECT sliders_rc = ToWinRect(geom.search_sliders_rect);
-    DrawRoundedBoxGdi(hdc, sliders_rc, 18, pal.surface_primary, pal.border_subtle, 1);
+    DrawRoundedBoxGdi(hdc, sliders_rc, 20, pal.surface_primary, pal.border_subtle, 1);
     DrawSlidersGlyphGdi(hdc, sliders_rc, pal.text_secondary);
 
     // 2. Table Column Headers
@@ -2876,13 +2876,15 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             DrawTextW(hdc, widx.c_str(), -1, &idx_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
             int icon_x = idx_rc.right + 8;
-            int icon_y = rrc.top + (rrc.bottom - rrc.top - 20) / 2;
+            int icon_w = DesignSystem::ScaleForDpi(20, m.dpi);
+            int icon_h = DesignSystem::ScaleForDpi(24, m.dpi);
+            int icon_y = rrc.top + (rrc.bottom - rrc.top - icon_h) / 2;
             ColorRgba icon_col = (r.state == TaskState::kDownloading) ? pal.accent_primary : pal.text_secondary;
-            DrawDocFileIconGdi(hdc, icon_x, icon_y, 16, 20, icon_col);
+            DrawDocFileIconGdi(hdc, icon_x, icon_y, icon_w, icon_h, icon_col);
 
             SelectObject(hdc, hFontBold);
             SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-            RECT fn_rc{icon_x + 24, rrc.top + 6, rl.filename_rect.right, rrc.bottom - 12};
+            RECT fn_rc{icon_x + icon_w + 10, rrc.top + 6, rl.filename_rect.right, rrc.bottom - 12};
             std::wstring wfn = Utf8ToW(r.display_filename);
             DrawTextW(hdc, wfn.c_str(), -1, &fn_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -2914,13 +2916,14 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
                 st_rc.top = rrc.top;
                 st_rc.bottom = rrc.bottom;
 
+                int dot_r = DesignSystem::ScaleForDpi(5, m.dpi);
                 int dot_cy = (st_rc.top + st_rc.bottom) / 2;
                 if (r.state == TaskState::kDownloading) {
                     HPEN hDotPen = CreatePen(PS_SOLID, 1, pal.accent_primary.ToWin32ColorRef());
                     HBRUSH hDotBrush = CreateSolidBrush(pal.accent_primary.ToWin32ColorRef());
                     HGDIOBJ op = SelectObject(hdc, hDotPen);
                     HGDIOBJ ob = SelectObject(hdc, hDotBrush);
-                    Ellipse(hdc, st_rc.left, dot_cy - 4, st_rc.left + 8, dot_cy + 4);
+                    Ellipse(hdc, st_rc.left, dot_cy - dot_r, st_rc.left + dot_r * 2, dot_cy + dot_r);
                     SelectObject(hdc, ob);
                     SelectObject(hdc, op);
                     DeleteObject(hDotBrush);
@@ -2930,14 +2933,14 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
                     HPEN hRingPen = CreatePen(PS_SOLID, 1, pal.text_secondary.ToWin32ColorRef());
                     HGDIOBJ op = SelectObject(hdc, hRingPen);
                     HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    Ellipse(hdc, st_rc.left, dot_cy - 4, st_rc.left + 8, dot_cy + 4);
+                    Ellipse(hdc, st_rc.left, dot_cy - dot_r, st_rc.left + dot_r * 2, dot_cy + dot_r);
                     SelectObject(hdc, ob);
                     SelectObject(hdc, op);
                     DeleteObject(hRingPen);
                     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
                 }
 
-                RECT st_txt_rc{st_rc.left + 14, st_rc.top, st_rc.right, st_rc.bottom};
+                RECT st_txt_rc{st_rc.left + dot_r * 2 + 8, st_rc.top, st_rc.right, st_rc.bottom};
                 std::wstring wst = Utf8ToW(r.status_text);
                 DrawTextW(hdc, wst.c_str(), -1, &st_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
@@ -3004,33 +3007,35 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     SetTextColor(hdc, limiter ? RGB(255, 255, 255) : pal.text_secondary.ToWin32ColorRef());
     DrawTextW(hdc, limiter ? L"ON" : L"OFF", -1, &off_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    int timer_cx = off_rc.right + 20;
+    int timer_r = DesignSystem::ScaleForDpi(8, m.dpi);
+    int timer_cx = off_rc.right + DesignSystem::ScaleForDpi(20, m.dpi);
     int timer_cy = (status_rc.top + status_rc.bottom) / 2;
-    DrawTimerClockGdi(hdc, timer_cx, timer_cy, 6, pal.text_secondary);
+    DrawTimerClockGdi(hdc, timer_cx, timer_cy, timer_r, pal.text_secondary);
 
     SelectObject(hdc, hFontBody);
-    RECT dl_stat_rc{timer_cx + 14, status_rc.top, timer_cx + 120, status_rc.bottom};
+    RECT dl_stat_rc{timer_cx + timer_r * 2 + 8, status_rc.top, timer_cx + timer_r * 2 + DesignSystem::ScaleForDpi(120, m.dpi), status_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     auto sb = view.BuildStatusBar();
     std::wstring wstat_dl = std::wstring(L"\x2913 ") + (sb.active_downloads > 0 ? L"4.8 MB/s" : L"0 B/s");
     DrawTextW(hdc, wstat_dl.c_str(), -1, &dl_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + 90, status_rc.bottom};
+    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + DesignSystem::ScaleForDpi(90, m.dpi), status_rc.bottom};
     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
     DrawTextW(hdc, L"\x2912 0 B/s", -1, &ul_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT pri_rc{ul_stat_rc.right + 10, status_rc.top, ul_stat_rc.right + 90, status_rc.bottom};
+    RECT pri_rc{ul_stat_rc.right + 10, status_rc.top, ul_stat_rc.right + DesignSystem::ScaleForDpi(90, m.dpi), status_rc.bottom};
+    int pri_r = DesignSystem::ScaleForDpi(4, m.dpi);
     HPEN hDotPen = CreatePen(PS_SOLID, 1, pal.accent_primary.ToWin32ColorRef());
     HBRUSH hDotBrush = CreateSolidBrush(pal.accent_primary.ToWin32ColorRef());
     HGDIOBJ op = SelectObject(hdc, hDotPen);
     HGDIOBJ ob = SelectObject(hdc, hDotBrush);
-    Ellipse(hdc, pri_rc.left, timer_cy - 3, pri_rc.left + 6, timer_cy + 3);
+    Ellipse(hdc, pri_rc.left, timer_cy - pri_r, pri_rc.left + pri_r * 2, timer_cy + pri_r);
     SelectObject(hdc, ob);
     SelectObject(hdc, op);
     DeleteObject(hDotBrush);
     DeleteObject(hDotPen);
 
-    RECT pri_txt_rc{pri_rc.left + 10, status_rc.top, pri_rc.right, status_rc.bottom};
+    RECT pri_txt_rc{pri_rc.left + pri_r * 2 + 6, status_rc.top, pri_rc.right, status_rc.bottom};
     SelectObject(hdc, hFontSmallBold);
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     DrawTextW(hdc, L"HIGH", -1, &pri_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);

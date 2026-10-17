@@ -63,18 +63,26 @@ jobs:
         run: |
           $helpText = (cmake --help | Out-String)
           $gen = $null
-          if ($helpText -match '\*\s+(Visual Studio \d+ \d+)') {
-              $gen = $Matches[1]
-          } elseif ($helpText -match 'Visual Studio 17 2022') {
+          if ($helpText -match '\*\s+(Visual Studio [^\r\n=]+?)\s*=') {
+              $gen = $Matches[1].Trim()
+              Write-Host "Detected default CMake generator: $gen"
+          } elseif ($env:VisualStudioVersion -like "18*" -or $env:VSINSTALLDIR -like "*\18\*") {
+              $gen = 'Visual Studio 18 2026'
+          } elseif ($env:VisualStudioVersion -like "17*" -or $env:VSINSTALLDIR -like "*2022*") {
               $gen = 'Visual Studio 17 2022'
-          } elseif ($helpText -match 'Visual Studio 18') {
-              $gen = 'Visual Studio 18'
+          } elseif ($helpText -match '(Visual Studio 18 \d+)') {
+              $gen = $Matches[1]
+          } elseif ($helpText -match '(Visual Studio 17 2022)') {
+              $gen = 'Visual Studio 17 2022'
           }
-          if (-not $gen) {
-              throw "No compatible Visual Studio CMake generator found on runner!"
+
+          if ($gen) {
+              Write-Host "Configuring CMake with generator: $gen (x64)"
+              cmake -B build -G "$gen" -A x64 -DCMAKE_BUILD_TYPE=Release
+          } else {
+              Write-Host "Configuring CMake with default x64 generator"
+              cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
           }
-          Write-Host "Configuring CMake with generator: $gen (x64)"
-          cmake -B build -G "$gen" -A x64 -DCMAKE_BUILD_TYPE=Release
 
       - name: Build Windows Targets
         run: |

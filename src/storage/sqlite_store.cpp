@@ -249,20 +249,35 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
     }
 
     if (task.state == TaskState::kCompleted || task.state == TaskState::kCanceled) {
-        ExecSql("DELETE FROM task_segments WHERE task_id = '" + task.task_id + "';");
+        sqlite3_stmt* del_stmt = nullptr;
+        if (sqlite3_prepare_v2(m_db, "DELETE FROM task_segments WHERE task_id = ?;", -1, &del_stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(del_stmt, 1, task.task_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_step(del_stmt);
+            sqlite3_finalize(del_stmt);
+        }
         return Result<void>::Ok();
     }
     return SaveSegmentsLocked(task.task_id, task.segments);
 }
 
 Result<void> SqliteStore::SaveSegmentsLocked(const std::string& task_id, const std::vector<Segment>& segments) {
-    ExecSql("BEGIN IMMEDIATE TRANSACTION;");
-    sqlite3_stmt* del_stmt = nullptr;
-    if (sqlite3_prepare_v2(m_db, "DELETE FROM task_segments WHERE task_id = ?;", -1, &del_stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(del_stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_step(del_stmt);
-        sqlite3_finalize(del_stmt);
+    if (!m_db) return Result<void>::Err("ERR_SQLITE_CLOSED", "Database not open");
+    if (!ExecSql("BEGIN IMMEDIATE TRANSACTION;").ok()) {
+        return Result<void>::Err("ERR_SQLITE_TX", "Failed to begin transaction");
     }
+
+    sqlite3_stmt* del_stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, "DELETE FROM task_segments WHERE task_id = ?;", -1, &del_stmt, nullptr) != SQLITE_OK) {
+        ExecSql("ROLLBACK;");
+        return Result<void>::Err("ERR_SQLITE_PREPARE", sqlite3_errmsg(m_db));
+    }
+    sqlite3_bind_text(del_stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(del_stmt) != SQLITE_DONE) {
+        sqlite3_finalize(del_stmt);
+        ExecSql("ROLLBACK;");
+        return Result<void>::Err("ERR_SQLITE_EXEC", sqlite3_errmsg(m_db));
+    }
+    sqlite3_finalize(del_stmt);
 
     const char* ins_sql = R"SQL(
         INSERT INTO task_segments(task_id, segment_id, start_offset, current_offset, end_offset, completed)
@@ -273,18 +288,23 @@ Result<void> SqliteStore::SaveSegmentsLocked(const std::string& task_id, const s
         ExecSql("ROLLBACK;");
         return Result<void>::Err("ERR_SQLITE_PREPARE", sqlite3_errmsg(m_db));
     }
+
     for (const auto& seg : segments) {
+        sqlite3_reset(ins_stmt);
+        sqlite3_clear_bindings(ins_stmt);
         sqlite3_bind_text(ins_stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(ins_stmt, 2, static_cast<int>(seg.segment_id));
         sqlite3_bind_int64(ins_stmt, 3, static_cast<int64_t>(seg.start_offset));
         sqlite3_bind_int64(ins_stmt, 4, static_cast<int64_t>(seg.current_offset));
         sqlite3_bind_int64(ins_stmt, 5, static_cast<int64_t>(seg.end_offset));
         sqlite3_bind_int(ins_stmt, 6, seg.completed ? 1 : 0);
-        sqlite3_step(ins_stmt);
-        sqlite3_finalize(ins_stmt);
-        sqlite3_prepare_v2(m_db, ins_sql, -1, &ins_stmt, nullptr);
+        if (sqlite3_step(ins_stmt) != SQLITE_DONE) {
+            sqlite3_finalize(ins_stmt);
+            ExecSql("ROLLBACK;");
+            return Result<void>::Err("ERR_SQLITE_STEP", sqlite3_errmsg(m_db));
+        }
     }
-    if (ins_stmt) sqlite3_finalize(ins_stmt);
+    sqlite3_finalize(ins_stmt);
     return ExecSql("COMMIT;");
 }
 

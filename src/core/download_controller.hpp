@@ -139,6 +139,7 @@ private:
     std::map<std::string, std::shared_ptr<ActiveTaskControl>> m_active;
     std::atomic<uint32_t> m_max_concurrent{3};
     std::atomic<uint64_t> m_global_speed_limit_bps{0};
+    std::shared_ptr<brisk::TokenBucketLimiter> m_global_limiter{std::make_shared<brisk::TokenBucketLimiter>()};
     AppSettings m_settings;
     std::thread m_scheduler_thread;
 };

@@ -9,6 +9,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <poll.h>
 #include <sys/socket.h>
@@ -21,9 +22,34 @@ namespace openidm::ipc {
 
 namespace {
 
+#ifdef _WIN32
+std::string GetCurrentUserSidString() {
+    std::string sid_str;
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        DWORD len = 0;
+        GetTokenInformation(hToken, TokenUser, NULL, 0, &len);
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && len > 0) {
+            std::vector<BYTE> buf(len);
+            if (GetTokenInformation(hToken, TokenUser, buf.data(), len, &len)) {
+                TOKEN_USER* pUser = reinterpret_cast<TOKEN_USER*>(buf.data());
+                LPSTR str = nullptr;
+                if (ConvertSidToStringSidA(pUser->User.Sid, &str) && str) {
+                    sid_str = str;
+                    LocalFree(str);
+                }
+            }
+        }
+        CloseHandle(hToken);
+    }
+    return sid_str;
+}
+#endif
+
 json::Value TaskToJson(const TaskModel& t) {
     json::Value obj = json::Object{};
     obj["taskId"] = t.task_id;
+    obj["correlationId"] = t.correlation_id.empty() ? t.task_id : t.correlation_id;
     obj["taskType"] = TaskTypeToString(t.task_type);
     obj["state"] = TaskStateToString(t.state);
     obj["category"] = t.category;
@@ -91,6 +117,15 @@ std::string IpcServer::DefaultSocketPath() {
         if (env_old[0] != '\0') return env_old;
     }
 #ifdef _WIN32
+    std::string user_sid = GetCurrentUserSidString();
+    if (!user_sid.empty()) {
+        return "\\\\.\\pipe\\Flux_IPC_" + user_sid;
+    }
+    char uname[256] = {0};
+    DWORD ulen = sizeof(uname);
+    if (GetUserNameA(uname, &ulen) && uname[0] != '\0') {
+        return "\\\\.\\pipe\\Flux_IPC_" + std::string(uname);
+    }
     return "\\\\.\\pipe\\Flux_IPC_Default";
 #else
     return "/tmp/flux_ipc_" + std::to_string(geteuid()) + ".sock";
@@ -174,6 +209,25 @@ void IpcServer::Stop() {
 void IpcServer::AcceptLoop() {
 #ifdef _WIN32
     std::wstring wpipe(m_socket_path.begin(), m_socket_path.end());
+
+    PSECURITY_DESCRIPTOR pSD = nullptr;
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = FALSE;
+
+    std::string user_sid = GetCurrentUserSidString();
+    std::wstring sddl;
+    if (!user_sid.empty()) {
+        std::wstring wSid(user_sid.begin(), user_sid.end());
+        sddl = L"D:(A;;GA;;;" + wSid + L")(A;;GA;;;BA)";
+    } else {
+        sddl = L"D:(A;;GA;;;OW)(A;;GA;;;BA)";
+    }
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.c_str(), SDDL_REVISION_1, &pSD, nullptr)) {
+        sa.lpSecurityDescriptor = pSD;
+    }
+
     while (m_running.load()) {
         HANDLE hPipe = CreateNamedPipeW(
             wpipe.c_str(),
@@ -183,7 +237,7 @@ void IpcServer::AcceptLoop() {
             65536,
             65536,
             50,
-            nullptr);
+            sa.lpSecurityDescriptor ? &sa : nullptr);
         if (hPipe == INVALID_HANDLE_VALUE) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
@@ -217,6 +271,10 @@ void IpcServer::AcceptLoop() {
             DisconnectNamedPipe(hPipe);
             CloseHandle(hPipe);
         }).detach();
+    }
+    if (pSD) {
+        LocalFree(pSD);
+        pSD = nullptr;
     }
 #else
     while (m_running.load()) {
@@ -321,7 +379,18 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         t.task_type = TaskType::kHttpFile;
         t.url = url;
         t.page_url = params["tabUrl"].as_string();
-        t.file_name = params["filename"].as_string();
+        t.correlation_id = params["correlationId"].as_string();
+        t.file_name = PathSanitizer::SanitizeFileName(params["filename"].as_string());
+        if (params.contains("saveDir")) {
+            std::string sd = params["saveDir"].as_string();
+            if (sd.find("..") != std::string::npos) {
+                json::Value res = json::Object{};
+                res["accepted"] = false;
+                res["reason"] = "ERR_PATH_TRAVERSAL_REJECTED";
+                return MakeRpcResult(id, std::move(res)).dump();
+            }
+            t.save_dir = sd;
+        }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
         bool auto_start = m_controller.GetSettings().auto_start_downloads;

@@ -88,16 +88,32 @@ std::shared_ptr<LiveSegment> SegmentScheduler::AcquireNextOrStealSegment(bool al
 
     uint64_t curr = best_victim->current_offset.load();
     uint64_t old_end = best_victim->end_offset.load();
+    if (old_end <= curr) {
+        return nullptr;
+    }
     uint64_t rem = old_end - curr + 1;
+    if (rem < 2 * m_min_split_bytes) {
+        return nullptr;
+    }
+
     uint64_t raw_mid = curr + (rem / 2);
     // Align split point to 4096-byte page boundary if possible
     uint64_t split_start = (raw_mid + 4095ULL) & ~4095ULL;
-    if (split_start <= curr || split_start > old_end) {
+    if (split_start <= curr + m_min_split_bytes || split_start >= old_end) {
         split_start = raw_mid;
+    }
+    if (split_start <= curr + 4096 || split_start >= old_end) {
+        return nullptr;
     }
 
     // Atomically shrink victim's end_offset to split_start - 1
     best_victim->end_offset.store(split_start - 1);
+
+    // Double check that victim has not concurrently advanced past split_start
+    if (best_victim->current_offset.load() >= split_start) {
+        best_victim->end_offset.store(old_end);
+        return nullptr;
+    }
 
     auto stolen = std::make_shared<LiveSegment>(
         m_next_segment_id++, split_start, split_start, old_end, false);

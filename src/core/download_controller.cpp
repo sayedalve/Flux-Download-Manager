@@ -352,7 +352,8 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                     m_store.UpdateTaskProgressAndSegments(
                         task_id, ep.state, ep.downloaded_bytes, ep.total_bytes, ep.range_supported, ep.segments);
                 }
-            });
+            },
+            m_global_limiter);
         (void)res;
     } else {
         stream::StreamAdapterConfig scfg{

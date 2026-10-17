@@ -112,38 +112,6 @@ private:
 #endif
 };
 
-class TokenBucketLimiter {
-public:
-    void Consume(size_t bytes, std::atomic<uint64_t>& limit_bps, std::atomic<bool>& stop_flag) {
-        uint64_t rate = limit_bps.load(std::memory_order_relaxed);
-        if (rate == 0 || bytes == 0) return;
-
-        std::unique_lock<std::mutex> lock(m_mu);
-        auto now = std::chrono::steady_clock::now();
-        if (m_last_time.time_since_epoch().count() == 0) {
-            m_last_time = now;
-        }
-        double elapsed_sec = std::chrono::duration<double>(now - m_last_time).count();
-        m_last_time = now;
-        m_tokens = std::min<double>(static_cast<double>(rate), m_tokens + elapsed_sec * static_cast<double>(rate));
-
-        m_tokens -= static_cast<double>(bytes);
-        if (m_tokens < 0.0) {
-            double wait_sec = (-m_tokens) / static_cast<double>(rate);
-            lock.unlock();
-            auto sleep_ms = static_cast<int>(wait_sec * 1000.0);
-            for (int slept = 0; slept < sleep_ms && !stop_flag.load(); slept += 10) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(10, sleep_ms - slept)));
-            }
-        }
-    }
-
-private:
-    std::mutex m_mu;
-    std::chrono::steady_clock::time_point m_last_time{};
-    double m_tokens{0.0};
-};
-
 } // namespace
 
 HttpDownloadEngine::HttpDownloadEngine(EngineConfig cfg) : m_cfg(cfg) {}
@@ -154,7 +122,11 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
     std::atomic<bool>& pause_requested,
     std::atomic<bool>& cancel_requested,
     std::atomic<uint64_t>& speed_limit_bps,
-    ProgressCallback on_progress) {
+    ProgressCallback on_progress,
+    std::shared_ptr<TokenBucketLimiter> shared_limiter) {
+
+    auto local_limiter = std::make_shared<TokenBucketLimiter>();
+    TokenBucketLimiter& limiter = shared_limiter ? *shared_limiter : *local_limiter;
 
     std::map<std::string, std::string> req_headers = task.headers;
     for (const auto& [k, v] : task.auth_headers) {
@@ -211,24 +183,42 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         total_bytes = probe_meta.content_length;
     }
 
+    // -------------------------------------------------------------------------
+    // Resource-Aware Resume Validation (COR-03)
+    // -------------------------------------------------------------------------
     bool is_resume = !task.segments.empty() && task.downloaded_bytes > 0;
     if (is_resume) {
+        bool validator_mismatch = false;
+        std::string mismatch_reason;
+
         if (!task.etag.empty() && !probe_meta.etag.empty() &&
             probe_meta.etag.rfind("W/", 0) != 0 && task.etag != probe_meta.etag) {
+            validator_mismatch = true;
+            mismatch_reason = "Remote ETag changed from " + task.etag + " to " + probe_meta.etag;
+        } else if (!task.last_modified.empty() && !probe_meta.last_modified.empty() &&
+                   task.last_modified != probe_meta.last_modified) {
+            validator_mismatch = true;
+            mismatch_reason = "Remote Last-Modified changed from " + task.last_modified + " to " + probe_meta.last_modified;
+        } else if (task.total_bytes > 0 && total_bytes > 0 && task.total_bytes != total_bytes) {
+            validator_mismatch = true;
+            mismatch_reason = "Remote file size changed on resume (expected " +
+                              std::to_string(task.total_bytes) + ", got " + std::to_string(total_bytes) + ")";
+        }
+
+        if (validator_mismatch) {
             task.state = TaskState::kFailed;
             task.error_code = "ERR_HTTP_VALIDATOR_MISMATCH";
-            task.error_message = "Remote ETag changed from " + task.etag + " to " + probe_meta.etag;
+            task.error_message = mismatch_reason;
             task.status_detail = task.error_message;
             return Result<std::filesystem::path>::Err(
                 "ERR_HTTP_VALIDATOR_MISMATCH", task.error_message, false, true);
         }
-        if (task.total_bytes > 0 && total_bytes > 0 && task.total_bytes != total_bytes) {
-            task.state = TaskState::kFailed;
-            task.error_code = "ERR_HTTP_VALIDATOR_MISMATCH";
-            task.error_message = "Remote file size changed on resume";
-            task.status_detail = task.error_message;
-            return Result<std::filesystem::path>::Err(
-                "ERR_HTTP_VALIDATOR_MISMATCH", task.error_message, false, true);
+
+        // Apply If-Range validator if available
+        if (!task.etag.empty() && probe_meta.etag.rfind("W/", 0) != 0) {
+            req_headers["If-Range"] = task.etag;
+        } else if (!task.last_modified.empty()) {
+            req_headers["If-Range"] = task.last_modified;
         }
     }
 
@@ -263,26 +253,79 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
 
     std::error_code ec;
     std::filesystem::create_directories(task.save_dir, ec);
-    std::filesystem::path part_path = std::filesystem::path(task.save_dir) / (task.file_name + ".openidm.part");
-    task.part_path = part_path.string();
+
+    // -------------------------------------------------------------------------
+    // Collision-Resistant Part File Path (COR-01)
+    // -------------------------------------------------------------------------
+    std::filesystem::path part_path;
+    if (!task.part_path.empty() && std::filesystem::exists(task.part_path, ec) &&
+        task.part_path.find(task.task_id) != std::string::npos) {
+        part_path = task.part_path;
+    } else {
+        part_path = std::filesystem::path(task.save_dir) / (task.file_name + "." + task.task_id + ".part");
+        task.part_path = part_path.string();
+    }
+
+    // -------------------------------------------------------------------------
+    // Validate Partial File on Resume (COR-02)
+    // -------------------------------------------------------------------------
+    if (is_resume) {
+        if (!std::filesystem::exists(part_path, ec)) {
+            OPENIDM_LOG_WARN("HttpEngine", "Part file missing on resume; resetting segments to restart from byte 0");
+            is_resume = false;
+            task.segments.clear();
+            task.downloaded_bytes = 0;
+        } else {
+            uint64_t actual_part_sz = std::filesystem::file_size(part_path, ec);
+            bool segments_consistent = !task.segments.empty();
+            uint64_t verified_dl_bytes = 0;
+            for (const auto& s : task.segments) {
+                if (s.start_offset > s.end_offset || (total_bytes > 0 && s.end_offset >= total_bytes) ||
+                    s.current_offset < s.start_offset || s.current_offset > (s.end_offset + 1)) {
+                    segments_consistent = false;
+                    break;
+                }
+                if (s.current_offset > s.start_offset && s.current_offset > actual_part_sz) {
+                    segments_consistent = false;
+                    break;
+                }
+                verified_dl_bytes += (s.current_offset - s.start_offset);
+            }
+            if (!segments_consistent) {
+                OPENIDM_LOG_WARN("HttpEngine", "Segment metadata inconsistent with partial file on disk; resetting segments");
+                is_resume = false;
+                task.segments.clear();
+                task.downloaded_bytes = 0;
+            } else {
+                task.downloaded_bytes = verified_dl_bytes;
+            }
+        }
+    }
 
     PlatformPartFile part_file;
     if (!part_file.Open(part_path)) {
         task.state = TaskState::kFailed;
         task.error_code = "ERR_STORAGE_OPEN";
-        task.error_message = "Failed to open .openidm.part file";
+        task.error_message = "Failed to open part file: " + part_path.string();
         task.status_detail = task.error_message;
         return Result<std::filesystem::path>::Err("ERR_STORAGE_OPEN", task.error_message);
     }
 
-    if (total_bytes > 0 && !is_resume) {
-        if (!part_file.Truncate(total_bytes)) {
-            part_file.Close();
-            task.state = TaskState::kFailed;
-            task.error_code = "ERR_DISK_FULL";
-            task.error_message = "Failed to pre-allocate disk space";
-            task.status_detail = task.error_message;
-            return Result<std::filesystem::path>::Err("ERR_DISK_FULL", task.error_message, false, true);
+    if (total_bytes > 0) {
+        if (!is_resume) {
+            if (!part_file.Truncate(total_bytes)) {
+                part_file.Close();
+                task.state = TaskState::kFailed;
+                task.error_code = "ERR_DISK_FULL";
+                task.error_message = "Failed to pre-allocate disk space";
+                task.status_detail = task.error_message;
+                return Result<std::filesystem::path>::Err("ERR_DISK_FULL", task.error_message, false, true);
+            }
+        } else {
+            uint64_t actual_part_sz = std::filesystem::file_size(part_path, ec);
+            if (actual_part_sz < total_bytes) {
+                part_file.Truncate(total_bytes);
+            }
         }
     }
 
@@ -298,7 +341,6 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         task.status_detail = "Downloading (Single Stream)...";
         part_file.Truncate(0);
         uint64_t written_offset = 0;
-        TokenBucketLimiter limiter;
         auto start_tp = std::chrono::steady_clock::now();
 
         std::atomic<bool> stop_flag{false};
@@ -368,7 +410,6 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         SegmentScheduler scheduler(total_bytes, max_conns, m_cfg.min_split_bytes);
         scheduler.Initialize(is_resume ? task.segments : std::vector<Segment>{});
 
-        TokenBucketLimiter limiter;
         std::atomic<bool> fatal_abort{false};
         std::atomic<bool> disable_splitting{false};
         std::mutex err_mu;
@@ -382,6 +423,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                 }
 
                 int retries = 0;
+                uint64_t last_progress_offset = seg->current_offset.load();
                 while (!fatal_abort.load() && !pause_requested.load() && !cancel_requested.load()) {
                     uint64_t curr = seg->current_offset.load();
                     uint64_t end = seg->end_offset.load();
@@ -403,6 +445,12 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         m_cfg.allow_loopback_redirect,
                         req_cancel,
                         [&](const HttpResponseMeta& meta) -> bool {
+                            if (meta.status_code == 416) {
+                                std::lock_guard<std::mutex> lk(err_mu);
+                                fatal_error = Error{"ERR_HTTP_RANGE_NOT_SATISFIABLE", "HTTP 416 Range Not Satisfiable", false, true};
+                                fatal_abort.store(true);
+                                return false;
+                            }
                             if (meta.status_code != 206 || !meta.is_partial_content || meta.range_start != curr) {
                                 server_ignored_range = true;
                                 disable_splitting.store(true);
@@ -424,8 +472,12 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 return false;
                             }
 
-                            uint64_t max_writable = current_end - write_pos + 1;
-                            size_t to_write = static_cast<size_t>(std::min<uint64_t>(len, max_writable));
+                            uint64_t max_writable = (current_end >= write_pos) ? (current_end - write_pos + 1) : 0;
+                            if (max_writable == 0) {
+                                req_cancel.store(true);
+                                return false;
+                            }
+                            size_t to_write = static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(len), max_writable));
 
                             limiter.Consume(to_write, speed_limit_bps, req_cancel);
 
@@ -467,6 +519,13 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         break;
                     }
 
+                    // Forward progress check (NET-01): reset retries if bytes moved forward
+                    uint64_t cur_pos = seg->current_offset.load();
+                    if (cur_pos > last_progress_offset) {
+                        last_progress_offset = cur_pos;
+                        retries = 0;
+                    }
+
                     if (!res.ok()) {
                         if (res.error->code == "ERR_HTTP_429_RATE_LIMITED") {
                             disable_splitting.store(true);
@@ -484,7 +543,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         OPENIDM_LOG_INFO("BriskEngine", "Resetting stalled/failed segment connection #" +
                             std::to_string(seg->segment_id) + " at offset " + std::to_string(seg->current_offset.load()) +
                             " (retry " + std::to_string(retries) + ")");
-                        int backoff_ms = std::min(2000, 50 * (1 << std::min(retries, 5)));
+                        int backoff_ms = std::min(3000, (50 * (1 << std::min(retries, 5))) + (std::rand() % 100));
                         std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
                     }
                 }
@@ -587,7 +646,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         }
     }
 
-    auto commit_res = PathSanitizer::CommitPartFile(part_path, task.save_dir, task.file_name, ConflictPolicy::kAutoRename);
+    auto commit_res = PathSanitizer::CommitPartFile(part_path, task.save_dir, task.file_name, ConflictPolicy::kAutoRename, task.total_bytes);
     if (!commit_res.ok()) {
         task.state = TaskState::kFailed;
         task.error_code = commit_res.error->code;

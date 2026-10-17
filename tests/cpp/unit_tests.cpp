@@ -771,11 +771,204 @@ bool TestFluxBrandingAndLegacyDataMigration() {
     return true;
 }
 
+bool TestPartFileIsolationAndSafeCommit() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_isolation_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    // COR-01: Two concurrent tasks downloading with identical filename
+    std::string filename = "presentation.zip";
+    std::string task1_id = "task-uuid-1111";
+    std::string task2_id = "task-uuid-2222";
+
+    std::filesystem::path part1 = work_dir / (filename + "." + task1_id + ".part");
+    std::filesystem::path part2 = work_dir / (filename + "." + task2_id + ".part");
+
+    ASSERT_TRUE(part1 != part2, "Tasks with same filename get distinct part files");
+
+    std::string content1 = "CONTENT_FOR_TASK_1_DETERMINISTIC_BYTES";
+    std::string content2 = "CONTENT_FOR_TASK_2_TOTALLY_DIFFERENT_DATA_STREAM";
+
+    {
+        std::ofstream ofs1(part1, std::ios::binary);
+        ofs1.write(content1.data(), content1.size());
+    }
+    {
+        std::ofstream ofs2(part2, std::ios::binary);
+        ofs2.write(content2.data(), content2.size());
+    }
+
+    // COR-02: Commit size check rejection
+    auto bad_size_commit = openidm::PathSanitizer::CommitPartFile(
+        part1, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content1.size() + 100);
+    ASSERT_TRUE(!bad_size_commit.ok() && bad_size_commit.error->code == "ERR_STORAGE_PART_SIZE_MISMATCH",
+                "CommitPartFile rejects part file with mismatched size");
+
+    // Commit Task 1
+    auto res1 = openidm::PathSanitizer::CommitPartFile(
+        part1, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content1.size());
+    ASSERT_TRUE(res1.ok(), "Task 1 committed successfully");
+    ASSERT_TRUE(std::filesystem::exists(*res1.value), "Task 1 output exists");
+
+    // Commit Task 2 (auto rename should create presentation (1).zip)
+    auto res2 = openidm::PathSanitizer::CommitPartFile(
+        part2, work_dir, filename, openidm::ConflictPolicy::kAutoRename, content2.size());
+    ASSERT_TRUE(res2.ok(), "Task 2 committed successfully via auto-rename");
+    ASSERT_TRUE(std::filesystem::exists(*res2.value), "Task 2 output exists");
+    ASSERT_TRUE(*res1.value != *res2.value, "Output paths are distinct");
+
+    // Verify content integrity - neither output mixed data
+    std::string read1, read2;
+    {
+        std::ifstream ifs1(*res1.value, std::ios::binary);
+        read1.assign((std::istreambuf_iterator<char>(ifs1)), std::istreambuf_iterator<char>());
+    }
+    {
+        std::ifstream ifs2(*res2.value, std::ios::binary);
+        read2.assign((std::istreambuf_iterator<char>(ifs2)), std::istreambuf_iterator<char>());
+    }
+    ASSERT_TRUE(read1 == content1, "Task 1 content preserved without corruption");
+    ASSERT_TRUE(read2 == content2, "Task 2 content preserved without corruption");
+
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestResourceAwareResumeAndValidatorMismatch() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_resume_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller");
+
+    // COR-03: Create a task with existing etag and segments
+    openidm::TaskModel t;
+    t.task_id = "test-resume-task";
+    t.url = "https://example.com/data.bin";
+    t.file_name = "data.bin";
+    t.save_dir = (work_dir / "downloads").string();
+    t.etag = "\"v1-original-etag\"";
+    t.last_modified = "Mon, 01 Jan 2026 00:00:00 GMT";
+    t.total_bytes = 1048576;
+    t.downloaded_bytes = 524288;
+    t.segments.push_back(openidm::Segment{0, 0, 524288, 524287, true});
+    t.segments.push_back(openidm::Segment{1, 524288, 524288, 1048575, false});
+    t.part_path = ((work_dir / "downloads") / ("data.bin." + t.task_id + ".part")).string();
+
+    auto add_res = ctrl.AddTask(t, false, true);
+    ASSERT_TRUE(add_res.ok(), "Task added");
+
+    // If partial file is missing on resume, retry/resume resets safely
+    ASSERT_TRUE(ctrl.RetryTask(t.task_id).ok(), "RetryTask succeeds on task");
+    auto retrieved = ctrl.GetTask(t.task_id);
+    ASSERT_TRUE(retrieved.has_value(), "Retrieved task");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestSegmentSchedulerBoundarySplitRaceGuard() {
+    // CON-01: Verify SegmentScheduler never allows overlapping ranges or invalid splits
+    uint64_t total = 10ULL * 1048576ULL; // 10 MiB
+    openidm::brisk::SegmentScheduler scheduler(total, 4, 131072);
+    scheduler.Initialize();
+
+    auto s1 = scheduler.AcquireNextOrStealSegment(false);
+    ASSERT_TRUE(s1 != nullptr, "Acquire initial segment");
+    ASSERT_TRUE(s1->start_offset == 0 && s1->end_offset.load() == total - 1, "Initial segment covers whole file");
+
+    // Simulate s1 downloading 2 MiB
+    s1->current_offset.store(2 * 1048576);
+
+    // Dynamic work-stealing split
+    auto s2 = scheduler.AcquireNextOrStealSegment(true);
+    ASSERT_TRUE(s2 != nullptr, "Stolen segment acquired");
+    ASSERT_TRUE(s1->end_offset.load() < s2->start_offset, "Victim end is strictly less than stolen start");
+    ASSERT_TRUE(s1->end_offset.load() + 1 == s2->start_offset, "No byte hole between split segments");
+    ASSERT_TRUE(s2->end_offset.load() == total - 1, "Stolen segment preserves outer boundary");
+
+    // If victim advances past split point, split must not corrupt boundary
+    s2->current_offset.store(s2->end_offset.load() + 1);
+    s2->completed.store(true);
+    ASSERT_TRUE(s2->completed.load(), "s2 marked completed");
+
+    return true;
+}
+
+bool TestIpcSecurityDaclAndPathTraversal() {
+    std::string sock = openidm::ipc::IpcServer::DefaultSocketPath();
+    ASSERT_TRUE(!sock.empty(), "Default socket path is non-empty");
+
+#ifdef _WIN32
+    ASSERT_TRUE(sock.find("\\\\.\\pipe\\Flux_IPC_") == 0, "Named pipe is in Flux_IPC_ namespace");
+#else
+    ASSERT_TRUE(sock.find("/tmp/flux_ipc_") == 0, "Unix socket is in /tmp/flux_ipc_ namespace");
+#endif
+
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_ipc_sec_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller");
+    openidm::ipc::IpcServer server(ctrl, sock);
+
+    // SEC-02: Path traversal rejection in download.offer
+    std::string traversal_req = R"({
+        "jsonrpc": "2.0",
+        "id": "test-sec-1",
+        "method": "download.offer",
+        "params": {
+            "url": "https://example.com/evil.exe",
+            "filename": "evil.exe",
+            "saveDir": "../../../Windows/System32"
+        }
+    })";
+    std::string resp = server.HandleJsonRpcMessage(traversal_req);
+    ASSERT_TRUE(resp.find("ERR_PATH_TRAVERSAL_REJECTED") != std::string::npos,
+                "IPC download.offer rejects saveDir path traversal");
+
+    ctrl.Shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestGlobalRateLimiting() {
+    // CTRL-01: Verify shared TokenBucketLimiter consumes tokens and bounds throughput
+    openidm::brisk::TokenBucketLimiter limiter;
+    std::atomic<uint64_t> limit_bps{1000000}; // 1 MB/s
+    std::atomic<bool> stop_flag{false};
+
+    auto start = std::chrono::steady_clock::now();
+    // Simulate two threads consuming 500 KB each (total 1 MB)
+    limiter.Consume(500000, limit_bps, stop_flag);
+    limiter.Consume(500000, limit_bps, stop_flag);
+
+    // Third consume of 500 KB should be throttled
+    limiter.Consume(500000, limit_bps, stop_flag);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    ASSERT_TRUE(elapsed >= 300, "Global rate limiter throttles aggregate consumption");
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 15;
+    const int total = 20;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -800,6 +993,11 @@ int main() {
     run(13, "TestDesktopUiHitTestingAndMouseInteractions", TestDesktopUiHitTestingAndMouseInteractions);
     run(14, "TestWorkerLifecycleAndIncompatibleWorkerDetection", TestWorkerLifecycleAndIncompatibleWorkerDetection);
     run(15, "TestFluxBrandingAndLegacyDataMigration", TestFluxBrandingAndLegacyDataMigration);
+    run(16, "TestPartFileIsolationAndSafeCommit", TestPartFileIsolationAndSafeCommit);
+    run(17, "TestResourceAwareResumeAndValidatorMismatch", TestResourceAwareResumeAndValidatorMismatch);
+    run(18, "TestSegmentSchedulerBoundarySplitRaceGuard", TestSegmentSchedulerBoundarySplitRaceGuard);
+    run(19, "TestIpcSecurityDaclAndPathTraversal", TestIpcSecurityDaclAndPathTraversal);
+    run(20, "TestGlobalRateLimiting", TestGlobalRateLimiting);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

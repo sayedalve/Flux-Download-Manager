@@ -130,6 +130,7 @@ struct TaskModel {
     std::string file_name;
     std::string save_dir;
     std::string part_path;
+    std::string correlation_id;
     uint64_t total_bytes{0};
     uint64_t downloaded_bytes{0};
     uint64_t speed_bps{0};

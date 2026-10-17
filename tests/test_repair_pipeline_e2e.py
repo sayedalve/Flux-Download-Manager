@@ -778,7 +778,7 @@ function callNativeHost(payload) {
         assert t1["state"] == "COMPLETED" and t1["taskType"] == "HTTP_FILE"
         pdf_out = Path(t1["saveDir"]) / t1["fileName"]
         assert pdf_out.exists() and hashlib.sha256(pdf_out.read_bytes()).hexdigest() == meta["pdf_sha256"]
-        print(f"  -> PASS (Task {t1['taskId']} completed via Brisk, SHA-256 verified, corrId={t1['correlationId']})")
+        print(f"  -> PASS (Task {t1['taskId']} completed via Brisk, SHA-256 verified, corrId={t1.get('correlationId', '')})")
 
         # ---------------------------------------------------------------------
         # Fixture 2: Direct ZIP + Alt Bypass Verification

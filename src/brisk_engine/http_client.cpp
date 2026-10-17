@@ -185,6 +185,8 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
     std::function<bool(const uint8_t* data, size_t len)> on_chunk) {
 
     std::string current_url = initial_url;
+    std::map<std::string, std::string> current_headers = headers;
+    ParsedUrl initial_pu;
     bool started_on_public_host = false;
 
     for (int redirect_hop = 0; redirect_hop <= 10; ++redirect_hop) {
@@ -198,11 +200,28 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         }
         ParsedUrl pu = *parsed_res.value;
         if (redirect_hop == 0) {
+            initial_pu = pu;
             started_on_public_host = !pu.is_loopback_or_private;
-        } else if (started_on_public_host && pu.is_loopback_or_private && !allow_loopback_redirect) {
-            return Result<HttpResponseMeta>::Err(
-                "ERR_NET_UNSAFE_REDIRECT",
-                "Blocked unsafe redirect from public host to loopback/private address: " + current_url);
+        } else {
+            if (started_on_public_host && pu.is_loopback_or_private && !allow_loopback_redirect) {
+                return Result<HttpResponseMeta>::Err(
+                    "ERR_NET_UNSAFE_REDIRECT",
+                    "Blocked unsafe redirect from public host to loopback/private address: " + current_url);
+            }
+            // Cross-origin redirect credential stripping (SEC-01)
+            bool origin_changed = (pu.scheme != initial_pu.scheme ||
+                                   ToLower(pu.host) != ToLower(initial_pu.host) ||
+                                   pu.port != initial_pu.port);
+            if (origin_changed) {
+                for (auto it = current_headers.begin(); it != current_headers.end();) {
+                    std::string kl = ToLower(it->first);
+                    if (kl == "authorization" || kl == "cookie" || kl == "proxy-authorization") {
+                        it = current_headers.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
         }
 
 #ifdef _WIN32
@@ -248,7 +267,11 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         };
 
         std::ostringstream hdr_stream;
-        for (const auto& [k, v] : headers) {
+        for (const auto& [k, v] : current_headers) {
+            if (k.find('\r') != std::string::npos || k.find('\n') != std::string::npos ||
+                v.find('\r') != std::string::npos || v.find('\n') != std::string::npos) {
+                continue; // Prevent CRLF header injection (SEC-04)
+            }
             if (ToLower(k) == "range" || ToLower(k) == "host" || ToLower(k) == "connection") continue;
             hdr_stream << k << ": " << v << "\r\n";
         }
@@ -422,11 +445,25 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
                 cleanup_conn();
                 return Result<HttpResponseMeta>::Err("ERR_TLS_INIT", "SSL_CTX_new failed");
             }
+            SSL_CTX_set_default_verify_paths(ssl_ctx);
+            SSL_CTX_set_verify(ssl_ctx, SSL_VERIFY_PEER, nullptr);
+            X509_VERIFY_PARAM* param = SSL_CTX_get0_param(ssl_ctx);
+            if (param) {
+                X509_VERIFY_PARAM_set1_host(param, pu.host.c_str(), pu.host.size());
+            }
+
             ssl = SSL_new(ssl_ctx);
             SSL_set_tlsext_host_name(ssl, pu.host.c_str());
             SSL_set_fd(ssl, sock);
             if (SSL_connect(ssl) != 1) {
+                long verify_err = SSL_get_verify_result(ssl);
                 cleanup_conn();
+                if (verify_err != X509_V_OK) {
+                    return Result<HttpResponseMeta>::Err(
+                        "ERR_TLS_CERT_INVALID",
+                        std::string("TLS Certificate verification failed: ") + X509_verify_cert_error_string(verify_err),
+                        false, false);
+                }
                 return Result<HttpResponseMeta>::Err("ERR_TLS_HANDSHAKE", "TLS handshake failed", true);
             }
         }
@@ -457,7 +494,11 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         req << "Connection: close\r\n";
 
         bool has_ua = false;
-        for (const auto& [k, v] : headers) {
+        for (const auto& [k, v] : current_headers) {
+            if (k.find('\r') != std::string::npos || k.find('\n') != std::string::npos ||
+                v.find('\r') != std::string::npos || v.find('\n') != std::string::npos) {
+                continue;
+            }
             if (ToLower(k) == "user-agent") has_ua = true;
             if (ToLower(k) == "range" || ToLower(k) == "host" || ToLower(k) == "connection") continue;
             req << k << ": " << v << "\r\n";

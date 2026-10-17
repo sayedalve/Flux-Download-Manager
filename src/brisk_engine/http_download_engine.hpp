@@ -45,6 +45,38 @@ struct EngineConfig {
     bool allow_loopback_redirect{false};
 };
 
+class TokenBucketLimiter {
+public:
+    void Consume(size_t bytes, std::atomic<uint64_t>& limit_bps, std::atomic<bool>& stop_flag) {
+        uint64_t rate = limit_bps.load(std::memory_order_relaxed);
+        if (rate == 0 || bytes == 0) return;
+
+        std::unique_lock<std::mutex> lock(m_mu);
+        auto now = std::chrono::steady_clock::now();
+        if (m_last_time.time_since_epoch().count() == 0) {
+            m_last_time = now;
+        }
+        double elapsed_sec = std::chrono::duration<double>(now - m_last_time).count();
+        m_last_time = now;
+        m_tokens = std::min<double>(static_cast<double>(rate), m_tokens + elapsed_sec * static_cast<double>(rate));
+
+        m_tokens -= static_cast<double>(bytes);
+        if (m_tokens < 0.0) {
+            double wait_sec = (-m_tokens) / static_cast<double>(rate);
+            lock.unlock();
+            auto sleep_ms = static_cast<int>(wait_sec * 1000.0);
+            for (int slept = 0; slept < sleep_ms && !stop_flag.load(); slept += 10) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(10, sleep_ms - slept)));
+            }
+        }
+    }
+
+private:
+    std::mutex m_mu;
+    std::chrono::steady_clock::time_point m_last_time{};
+    double m_tokens{0.0};
+};
+
 class HttpDownloadEngine {
 public:
     explicit HttpDownloadEngine(EngineConfig cfg = {});
@@ -59,7 +91,8 @@ public:
         std::atomic<bool>& pause_requested,
         std::atomic<bool>& cancel_requested,
         std::atomic<uint64_t>& speed_limit_bps,
-        ProgressCallback on_progress);
+        ProgressCallback on_progress,
+        std::shared_ptr<TokenBucketLimiter> shared_limiter = nullptr);
 
 private:
     EngineConfig m_cfg;

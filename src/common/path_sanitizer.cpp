@@ -345,10 +345,20 @@ Result<std::filesystem::path> PathSanitizer::CommitPartFile(
     const std::filesystem::path& part_file,
     const std::filesystem::path& save_dir,
     std::string_view final_filename,
-    ConflictPolicy policy) {
+    ConflictPolicy policy,
+    uint64_t expected_bytes) {
     std::error_code ec;
     if (!std::filesystem::exists(part_file, ec)) {
         return Result<std::filesystem::path>::Err("ERR_STORAGE_PART_MISSING", "Part file does not exist: " + part_file.string());
+    }
+
+    if (expected_bytes > 0) {
+        uint64_t actual_size = std::filesystem::file_size(part_file, ec);
+        if (!ec && actual_size != expected_bytes) {
+            return Result<std::filesystem::path>::Err(
+                "ERR_STORAGE_PART_SIZE_MISMATCH",
+                "Part file size (" + std::to_string(actual_size) + ") does not match expected size (" + std::to_string(expected_bytes) + ")");
+        }
     }
 
     auto resolved = ResolveSafeOutputPath(save_dir, final_filename, policy);

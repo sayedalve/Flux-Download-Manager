@@ -27,12 +27,13 @@ public:
         std::string_view candidate_filename,
         ConflictPolicy policy = ConflictPolicy::kAutoRename);
 
-    // Atomically commits a .openidm.part file to its final destination path
+    // Atomically commits a .part file to its final destination path with optional size verification
     static Result<std::filesystem::path> CommitPartFile(
         const std::filesystem::path& part_file,
         const std::filesystem::path& save_dir,
         std::string_view final_filename,
-        ConflictPolicy policy = ConflictPolicy::kAutoRename);
+        ConflictPolicy policy = ConflictPolicy::kAutoRename,
+        uint64_t expected_bytes = 0);
 
     // Resolves the directory containing the running Flux executable (GetModuleFileNameW / /proc/self/exe)
     static std::filesystem::path GetExecutableDir(const char* argv0 = nullptr);

@@ -1450,30 +1450,56 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         return res;
     }
 
-    // 4. If cipher extraction or site extraction is required (or video_url is still empty), try external yt-dlp worker
+    // 4. If cipher extraction, YouTube host, or site extraction is required (or video_url is empty), use external yt-dlp worker
     std::filesystem::path ytdlp_bin = PathSanitizer::FindWorkerBinary("yt-dlp", PathSanitizer::GetExecutableDir());
-    if ((video_url.empty() || requires_cipher) && std::filesystem::exists(ytdlp_bin, ec)) {
+    bool is_youtube_host = (watch_url.find("youtube.com") != std::string::npos || watch_url.find("youtu.be") != std::string::npos ||
+                            task.url.find("youtube.com") != std::string::npos || task.url.find("youtu.be") != std::string::npos ||
+                            task.page_url.find("youtube.com") != std::string::npos || task.page_url.find("youtu.be") != std::string::npos);
+    bool should_use_ytdlp = std::filesystem::exists(ytdlp_bin, ec) && (is_youtube_host || video_url.empty() || requires_cipher);
+    if (should_use_ytdlp) {
         task.state = TaskState::kDownloading;
         task.status_detail = "Extracting & downloading via yt-dlp...";
 
-        std::string out_tmpl = muxed_output.string();
-        std::string ytdlp_fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
+        std::filesystem::path yt_cfg_file = task_tmp_dir / "yt_config.txt";
+        std::string cookie_str;
+        if (task.auth_headers.count("Cookie")) cookie_str = task.auth_headers.at("Cookie");
+        else if (task.headers.count("Cookie")) cookie_str = task.headers.at("Cookie");
+        else if (task.headers.count("cookie")) cookie_str = task.headers.at("cookie");
+        if (!cookie_str.empty()) {
+            std::ofstream cfs(yt_cfg_file, std::ios::trunc);
+            if (cfs) {
+                cfs << "--add-header \"Cookie: " << cookie_str << "\"\n";
+            }
+        }
+
+        std::string out_tmpl = (task_tmp_dir / ("output.%(ext)s")).string();
+        std::string ytdlp_fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best";
         if (wants_audio_only) {
-            ytdlp_fmt = "bestaudio[ext=m4a]/bestaudio";
+            ytdlp_fmt = "bestaudio[ext=m4a]/bestaudio/best";
         } else if (target_height > 0) {
             std::string hs = std::to_string(target_height);
-            ytdlp_fmt = "bestvideo[height<=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/best[height<=" + hs + "][ext=mp4]/best[height<=" + hs + "]";
+            ytdlp_fmt = "bestvideo[height<=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=" + hs + "]+bestaudio/best[height<=" + hs + "]/best";
         }
         std::vector<std::string> yt_args = {
             "--newline",
             "--no-playlist",
             "--no-warnings",
+            "--extractor-args", "youtube:player_client=android,ios,mweb",
             "--ffmpeg-location", m_cfg.ffmpeg_binary_path.string(),
             "-f", ytdlp_fmt,
             "--merge-output-format", fmt,
-            "-o", out_tmpl,
-            watch_url
+            "-o", out_tmpl
         };
+        if (std::filesystem::exists(yt_cfg_file, ec)) {
+            yt_args.push_back("--config-locations");
+            yt_args.push_back(yt_cfg_file.string());
+        }
+        std::filesystem::path node_bin = PathSanitizer::FindWorkerBinary("node", PathSanitizer::GetExecutableDir());
+        if (std::filesystem::exists(node_bin, ec)) {
+            yt_args.push_back("--js-runtimes");
+            yt_args.push_back("node:" + node_bin.string());
+        }
+        yt_args.push_back(watch_url);
 
         static const std::regex kYtDlpProgRe(R"(\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([0-9.]+)(KiB|MiB|GiB))");
         std::string last_yt_err;
@@ -1551,6 +1577,10 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             char rbuf[4096];
             ssize_t n = 0;
             while ((n = ::read(pipefd[0], rbuf, sizeof(rbuf))) > 0) {
+                if (cancel_requested.load()) {
+                    kill(pid, SIGTERM);
+                    break;
+                }
                 line_buf.append(rbuf, static_cast<size_t>(n));
                 size_t nl;
                 while ((nl = line_buf.find_first_of("\r\n")) != std::string::npos) {
@@ -1594,6 +1624,10 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 char rbuf[4096];
                 DWORD got = 0;
                 while (ReadFile(hReadPipe, rbuf, sizeof(rbuf), &got, nullptr) && got > 0) {
+                    if (cancel_requested.load()) {
+                        TerminateProcess(pi.hProcess, 1);
+                        break;
+                    }
                     line_buf.append(rbuf, got);
                     size_t nl;
                     while ((nl = line_buf.find_first_of("\r\n")) != std::string::npos) {
@@ -1602,7 +1636,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                     }
                 }
                 if (!line_buf.empty()) parse_yt_line(line_buf);
-                WaitForSingleObject(pi.hProcess, 60000);
+                WaitForSingleObject(pi.hProcess, 15000);
                 DWORD wcode = 1;
                 GetExitCodeProcess(pi.hProcess, &wcode);
                 yt_exit = static_cast<int>(wcode);
@@ -1614,15 +1648,39 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             CloseHandle(hReadPipe);
         }
 #endif
-        if (yt_exit == 0 && std::filesystem::exists(muxed_output, ec) &&
-            std::filesystem::file_size(muxed_output, ec) > 0 &&
-            VerifyContainerMagicBytes(muxed_output, fmt)) {
-            uint64_t final_size = std::filesystem::file_size(muxed_output, ec);
+        if (std::filesystem::exists(yt_cfg_file, ec)) {
+            std::ofstream cfs(yt_cfg_file, std::ios::binary | std::ios::trunc);
+            cfs << std::string(512, '\0');
+            cfs.close();
+            std::filesystem::remove(yt_cfg_file, ec);
+        }
+
+        if (cancel_requested.load()) {
+            std::filesystem::remove_all(task_tmp_dir, ec);
+            task.state = TaskState::kCanceled;
+            task.status_detail = "Canceled";
+            return Result<std::filesystem::path>::Err("ERR_CANCELED", "YouTube download canceled by user");
+        }
+
+        std::filesystem::path actual_output = task_tmp_dir / ("output." + fmt);
+        if (!std::filesystem::exists(actual_output, ec) || std::filesystem::file_size(actual_output, ec) == 0) {
+            for (const auto& entry : std::filesystem::directory_iterator(task_tmp_dir, ec)) {
+                if (entry.is_regular_file() && entry.path().stem() == "output" && std::filesystem::file_size(entry.path(), ec) > 0) {
+                    actual_output = entry.path();
+                    break;
+                }
+            }
+        }
+
+        if (yt_exit == 0 && std::filesystem::exists(actual_output, ec) &&
+            std::filesystem::file_size(actual_output, ec) > 0 &&
+            VerifyContainerMagicBytes(actual_output, fmt)) {
+            uint64_t final_size = std::filesystem::file_size(actual_output, ec);
             task.downloaded_bytes = final_size;
             task.total_bytes = final_size;
             task.stream_percent = 100.0;
             std::string desired_final_name = base_stem + "." + fmt;
-            auto commit_res = PathSanitizer::CommitPartFile(muxed_output, task.save_dir, desired_final_name, task.conflict_policy);
+            auto commit_res = PathSanitizer::CommitPartFile(actual_output, task.save_dir, desired_final_name, task.conflict_policy);
             std::filesystem::remove_all(task_tmp_dir, ec);
             if (!commit_res.ok()) {
                 task.state = TaskState::kFailed;
@@ -1640,11 +1698,16 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             return commit_res;
         }
 
-        if (video_url.empty()) {
+        if (video_url.empty() || is_youtube_host) {
             std::filesystem::remove_all(task_tmp_dir, ec);
             task.state = TaskState::kFailed;
-            task.error_code = "ERR_YOUTUBE_EXTRACTION_FAILED";
-            task.error_message = last_yt_err.empty() ? "yt-dlp failed to extract playable YouTube stream" : last_yt_err;
+            if (last_yt_err.find("DRM") != std::string::npos || last_yt_err.find("protected") != std::string::npos) {
+                task.error_code = "ERR_STREAM_DRM_PROTECTED";
+                task.error_message = "Stream uses unsupported DRM protection. Flux does not circumvent DRM.";
+            } else {
+                task.error_code = "ERR_YOUTUBE_EXTRACTION_FAILED";
+                task.error_message = last_yt_err.empty() ? ("yt-dlp exited with code " + std::to_string(yt_exit)) : last_yt_err;
+            }
             task.status_detail = task.error_message;
             return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
         }

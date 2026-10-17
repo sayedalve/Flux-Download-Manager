@@ -490,12 +490,22 @@ async function onDownloadCreatedHandler(
   const isAttachment = Boolean(netMeta && netMeta.isAttachment);
   const wasExplicitLinkClick = Boolean(clickedInfo);
 
-  // In Chromium, onDeterminingFilename always fires right after onCreated for every download.
-  if (phase === "created") {
-    // If this download URL was already pre-intercepted at link-click time, cancel competing download immediately
-    const normTarget = normalizeCorrelationUrl(targetUrl);
-    const normOrig = normalizeCorrelationUrl(downloadItem.url || "");
-    if (G.handledDownloadUrls && (G.handledDownloadUrls.has(normTarget) || G.handledDownloadUrls.has(normOrig))) {
+  const normTarget = normalizeCorrelationUrl(targetUrl);
+  const normOrig = normalizeCorrelationUrl(downloadItem.url || "");
+  const now = Date.now();
+  if (!customTransport && G.handledDownloadUrls) {
+    const isHandled = (u) => {
+      if (!u) return false;
+      if (G.handledDownloadUrls instanceof Map) {
+        const ts = G.handledDownloadUrls.get(u);
+        if (ts && (now - ts) < 15000) return true;
+        if (ts) G.handledDownloadUrls.delete(u);
+        return false;
+      }
+      return false;
+    };
+    if (isHandled(normTarget) || isHandled(normOrig)) {
+      invokeSuggestIfNeeded();
       if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
         chrome.downloads.cancel(downloadItem.id, () => {
           if (chrome.downloads.erase) chrome.downloads.erase({ id: downloadItem.id }, () => {});
@@ -503,7 +513,10 @@ async function onDownloadCreatedHandler(
       }
       return { intercepted: true, reason: "ALREADY_INTERCEPTED_VIA_CLICK" };
     }
+  }
 
+  // In Chromium, onDeterminingFilename always fires right after onCreated for every download.
+  if (phase === "created") {
     // Immediately pause browser download so it cannot complete or download competing bytes
     if (typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
       try {
@@ -607,6 +620,19 @@ async function onDownloadCreatedHandler(
           taskId: result.taskId,
           fileName: result.fileName
         });
+
+        // Record target & original URLs so subsequent browser events for this download are suppressed
+        if (!G.handledDownloadUrls || !(G.handledDownloadUrls instanceof Map)) {
+          G.handledDownloadUrls = new Map();
+        }
+        G.handledDownloadUrls.set(normTarget, Date.now());
+        G.handledDownloadUrls.set(normOrig, Date.now());
+
+        // CRITICAL FOR BRAVE / CHROMIUM: Must invoke suggest() before calling chrome.downloads.cancel()!
+        // Calling cancel() during onDeterminingFilename without resolving suggest throws:
+        // "Cannot cancel a download while determining filename", causing timeout and fallback to native browser manager.
+        invokeSuggestIfNeeded();
+
         if (cancelBrowserDownloadFn) {
           await cancelBrowserDownloadFn(downloadItem.id);
         } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
@@ -1247,6 +1273,74 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
   if (msg.action === "linkClicked") {
     const rec = recordClickedLink(tabId, msg);
     sendResponse({ success: true, correlationId: rec ? rec.correlationId : "" });
+    return true;
+  }
+
+  if (msg.action === "interceptDownloadClick") {
+    const rec = recordClickedLink(tabId, msg);
+    const correlationId = (rec && rec.correlationId) || generateCorrelationId("dl");
+
+    if (!G.enableCapture || isSiteDisabled(msg.referrer || msg.url)) {
+      sendResponse({ accepted: false, reason: "CAPTURE_DISABLED", correlationId });
+      return true;
+    }
+
+    (async () => {
+      try {
+        const targetUrl = msg.url;
+        const rawFilename = msg.filename || "";
+        const cleanFilename = rawFilename ? rawFilename.split(/[/\\]/).pop() : "";
+
+        // Collect request headers (Referer, Cookie)
+        const headers = {};
+        if (msg.referrer) headers.Referer = msg.referrer;
+        if (typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+          try {
+            const cookieList = await new Promise((resolve) => {
+              chrome.cookies.getAll({ url: targetUrl }, (cList) => {
+                if (chrome.runtime) void chrome.runtime.lastError;
+                resolve(cList || []);
+              });
+            });
+            if (cookieList && cookieList.length > 0) {
+              headers.Cookie = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
+            }
+          } catch (_) {}
+        }
+
+        const result = await sendNativeRpc("download.offer", {
+          url: targetUrl,
+          originalUrl: targetUrl,
+          filename: cleanFilename,
+          fileSize: 0,
+          mime: "",
+          tabUrl: msg.referrer || "",
+          bypassModifier: false,
+          correlationId,
+          headers
+        });
+
+        if (result && result.accepted) {
+          if (!G.handledDownloadUrls || !(G.handledDownloadUrls instanceof Map)) {
+            G.handledDownloadUrls = new Map();
+          }
+          G.handledDownloadUrls.set(normalizeCorrelationUrl(targetUrl), Date.now());
+          if (msg.url) G.handledDownloadUrls.set(normalizeCorrelationUrl(msg.url), Date.now());
+
+          logPipelineStage(correlationId, "DOWNLOAD_ACCEPTED_BY_FLUX", {
+            url: targetUrl,
+            taskId: result.taskId,
+            fileName: result.fileName
+          });
+
+          sendResponse({ accepted: true, taskId: result.taskId, fileName: result.fileName, correlationId });
+        } else {
+          sendResponse({ accepted: false, reason: (result && result.reason) || "DECLINED_BY_DESKTOP", correlationId });
+        }
+      } catch (err) {
+        sendResponse({ accepted: false, error: err ? err.message : String(err), correlationId });
+      }
+    })();
     return true;
   }
 

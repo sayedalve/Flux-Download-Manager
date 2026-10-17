@@ -22,6 +22,7 @@ var G = {
   bypassNextDownload: false,
   lastClickedLink: null,
   handledDownloadIds: new Set(),
+  handledDownloadUrls: new Map(),
   tabUrlMap: new Map(),
   playerErrors: new Map(),
 

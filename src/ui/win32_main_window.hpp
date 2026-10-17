@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -144,6 +145,7 @@ struct WindowLayoutGeometry {
     RectI sort_dropdown_rect;
     RectI filter_dropdown_rect;
     RectI add_download_button_rect;
+    RectI settings_button_rect;
     RectI search_sliders_rect;
     RectI status_toggle_off_rect;
     std::vector<ToolbarButtonLayout> toolbar_buttons;
@@ -361,9 +363,15 @@ public:
     static std::string TruncateFilenameGracefully(std::string_view filename, size_t max_chars = 38);
     static std::string FormatFriendlyTime(int64_t epoch_ms);
     static std::string FormatSizePretty(uint64_t bytes);
+    static std::string FormatSpeedKbps(uint64_t bps);
 
     bool IsSelectAllChecked() const { return m_select_all_checked; }
-    void ToggleSelectAll() { m_select_all_checked = !m_select_all_checked; }
+    void ToggleSelectAll();
+    bool IsTaskChecked(const std::string& task_id) const { return m_checked_task_ids.count(task_id) > 0; }
+    void ToggleTaskChecked(const std::string& task_id);
+    void SetTaskChecked(const std::string& task_id, bool checked);
+    void ClearCheckedTasks() { m_checked_task_ids.clear(); }
+    const std::set<std::string>& GetCheckedTaskIds() const { return m_checked_task_ids; }
     void CycleSortDropdown();
     void CycleFilterDropdown();
     bool IsSpeedLimiterActive() const { return m_speed_limiter_active; }
@@ -500,6 +508,7 @@ private:
     int m_hovered_row_index{-1};
     std::string m_active_tooltip;
     bool m_select_all_checked{false};
+    std::set<std::string> m_checked_task_ids;
     bool m_speed_limiter_active{false};
 };
 

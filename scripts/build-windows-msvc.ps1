@@ -149,8 +149,9 @@ Write-Host "`n==> [5/7] Provisioning and verifying upstream stream workers..."
 New-Item -ItemType Directory -Force -Path $ToolsWinDir | Out-Null
 $NmExe = Join-Path $ToolsWinDir "N_m3u8DL-RE.exe"
 $FfExe = Join-Path $ToolsWinDir "ffmpeg.exe"
+$YtExe = Join-Path $ToolsWinDir "yt-dlp.exe"
 
-if (-not $SkipWorkerFetch -and (-not (Test-Path $NmExe) -or -not (Test-Path $FfExe))) {
+if (-not $SkipWorkerFetch -and (-not (Test-Path $NmExe) -or -not (Test-Path $FfExe) -or -not (Test-Path $YtExe))) {
     & (Join-Path $PSScriptRoot "fetch-workers.ps1") -TargetDir $ToolsWinDir
 }
 
@@ -160,14 +161,19 @@ if (-not (Test-Path $NmExe)) {
 if (-not (Test-Path $FfExe)) {
     throw "FFmpeg.exe missing from $ToolsWinDir!"
 }
+if (-not (Test-Path $YtExe)) {
+    throw "yt-dlp.exe missing from $ToolsWinDir!"
+}
 
 Verify-PeBinary $NmExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 Verify-PeBinary $FfExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+Verify-PeBinary $YtExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 
 $RootTools = Join-Path $RepoRoot "tools"
 New-Item -ItemType Directory -Force -Path $RootTools | Out-Null
 Copy-Item -Force $NmExe (Join-Path $RootTools "N_m3u8DL-RE.exe")
 Copy-Item -Force $FfExe (Join-Path $RootTools "ffmpeg.exe")
+Copy-Item -Force $YtExe (Join-Path $RootTools "yt-dlp.exe")
 
 # -----------------------------------------------------------------------------
 # 6. Stage Portable Distribution at dist/Flux.exe (No Installer / No MSI)
@@ -178,11 +184,14 @@ Get-Process | Where-Object {
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 200
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools\win-x64") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools") | Out-Null
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "Flux.exe")
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe")
 Copy-Item -Force (Join-Path $BuildDir "flux-nmh.exe") (Join-Path $DistDir "flux-nmh.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistDir "tools\win-x64\yt-dlp.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistDir "tools\yt-dlp.exe")
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "extension") | Out-Null
 Copy-Item -Recurse -Force (Join-Path $RepoRoot "extension\*") (Join-Path $DistDir "extension\")
 
@@ -190,7 +199,8 @@ $CheckFiles = @(
     (Join-Path $DistDir "Flux.exe"),
     (Join-Path $DistDir "flux-nmh.exe"),
     (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe"),
-    (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
+    (Join-Path $DistDir "tools\win-x64\ffmpeg.exe"),
+    (Join-Path $DistDir "tools\win-x64\yt-dlp.exe")
 )
 
 $ChecksumReport = Join-Path $DistDir "SHA256SUMS.txt"

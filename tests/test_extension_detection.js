@@ -284,13 +284,37 @@ async function runTests() {
     target: { closest: (tag) => (tag === "a" ? fakeZipAnchor : null) }
   };
   handleLinkClick(fakeZipEvent);
-  assert.strictEqual(sentLinkMessages.length, 1);
+  assert.strictEqual(sentLinkMessages.length, 2);
   assert.strictEqual(sentLinkMessages[0].action, "linkClicked");
   assert.strictEqual(sentLinkMessages[0].url, "https://files.example.com/downloads/archive.zip");
   assert.strictEqual(sentLinkMessages[0].filename, "archive.zip");
+  assert.strictEqual(sentLinkMessages[1].action, "interceptDownloadClick");
+  assert.strictEqual(sentLinkMessages[1].url, "https://files.example.com/downloads/archive.zip");
+
+  // Fallback verification when Flux rejects or is offline
+  let fallbackClicked = false;
+  const fakeFallbackAnchor = {
+    pathname: "/downloads/archive.zip",
+    href: "https://files.example.com/downloads/archive.zip",
+    download: "archive.zip",
+    hasAttribute: (attr) => attr === "download",
+    dataset: {},
+    click: () => { fallbackClicked = true; }
+  };
+  globalThis.chrome.runtime.sendMessage = (msg, cb) => {
+    if (msg.action === "interceptDownloadClick" && typeof cb === "function") {
+      cb({ accepted: false, reason: "NMH_OFFLINE" });
+    }
+  };
+  handleLinkClick({
+    altKey: false,
+    target: { closest: () => fakeFallbackAnchor }
+  });
+  assert.strictEqual(fallbackClicked, true, "Safe browser fallback triggers anchor.click() when desktop rejects or is offline");
 
   // Alt-key bypass modifier click
   sentLinkMessages = [];
+  globalThis.chrome.runtime.sendMessage = (msg) => { sentLinkMessages.push(msg); };
   const fakeAltEvent = {
     altKey: true,
     target: { closest: () => fakeZipAnchor }

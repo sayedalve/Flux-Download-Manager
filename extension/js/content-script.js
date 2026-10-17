@@ -274,6 +274,12 @@ function handleLinkClick(ev) {
     const anchor = ev.target && typeof ev.target.closest === "function" ? ev.target.closest("a") : null;
     if (!anchor || !anchor.href) return;
 
+    // Check if this anchor was already marked for browser fallback
+    if (anchor.dataset && anchor.dataset.fluxBypass === "true") {
+      delete anchor.dataset.fluxBypass;
+      return;
+    }
+
     const href = anchor.href;
     if (href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("mailto:")) return;
 
@@ -288,18 +294,60 @@ function handleLinkClick(ev) {
       "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav"
     ]);
 
-    if (hasDownloadAttr || interceptExts.has(ext) || pathname.includes("/redirect") || pathname.includes("/download")) {
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({
-          action: "linkClicked",
-          url: href,
-          filename: anchor.download || "",
-          hasDownloadAttr,
-          referrer: (typeof location !== "undefined" ? location.href : ""),
-          pageTitle: (typeof document !== "undefined" ? document.title : ""),
-          bypass: false
-        });
-      }
+    const isEligible = hasDownloadAttr || interceptExts.has(ext) || pathname.includes("/redirect") || pathname.includes("/download");
+    if (!isEligible) return;
+
+    // Record link click metadata for correlation
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({
+        action: "linkClicked",
+        url: href,
+        filename: anchor.download || "",
+        hasDownloadAttr,
+        referrer: (typeof location !== "undefined" ? location.href : ""),
+        pageTitle: (typeof document !== "undefined" ? document.title : ""),
+        bypass: false
+      });
+    }
+
+    // Intercept click prior to browser's default download action
+    // If not a modified click (Ctrl/Cmd/Shift), prevent default and offer to Flux
+    if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey && typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+      if (typeof ev.preventDefault === "function") ev.preventDefault();
+      if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+
+      chrome.runtime.sendMessage({
+        action: "interceptDownloadClick",
+        url: href,
+        filename: anchor.download || "",
+        hasDownloadAttr,
+        referrer: (typeof location !== "undefined" ? location.href : ""),
+        pageTitle: (typeof document !== "undefined" ? document.title : "")
+      }, (response) => {
+        if (chrome.runtime && chrome.runtime.lastError) {
+          // Native host unreachable: fallback to native browser download
+          triggerBrowserFallback(anchor, href);
+          return;
+        }
+        if (!response || !response.accepted) {
+          // Flux declined or capture disabled: fallback to native browser download
+          triggerBrowserFallback(anchor, href);
+        }
+      });
+    }
+  } catch (_) {}
+}
+
+function triggerBrowserFallback(anchor, href) {
+  try {
+    if (anchor && anchor.dataset) anchor.dataset.fluxBypass = "true";
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({ action: "bypassNextDownload", url: href });
+    }
+    if (anchor && typeof anchor.click === "function") {
+      anchor.click();
+    } else if (typeof location !== "undefined" && location.assign) {
+      location.assign(href);
     }
   } catch (_) {}
 }

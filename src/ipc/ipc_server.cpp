@@ -484,11 +484,25 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
 
         TaskModel t;
-        t.task_type = TaskType::kHttpFile;
+        std::string tab_url = params["tabUrl"].as_string();
+        bool is_youtube = (url.find("youtube.com") != std::string::npos || url.find("youtu.be") != std::string::npos ||
+                           tab_url.find("youtube.com") != std::string::npos || tab_url.find("youtu.be") != std::string::npos);
+        if (is_youtube || url.find(".m3u8") != std::string::npos || url.find(".mpd") != std::string::npos) {
+            t.task_type = (url.find(".mpd") != std::string::npos) ? TaskType::kStreamDash : TaskType::kStreamHls;
+            t.category = "Video";
+            t.stream_options.video_filter = "best";
+            t.stream_options.audio_filter = "all";
+            t.stream_options.output_format = "mp4";
+        } else {
+            t.task_type = TaskType::kHttpFile;
+        }
         t.url = url;
-        t.page_url = params["tabUrl"].as_string();
+        t.page_url = tab_url;
         t.correlation_id = params["correlationId"].as_string();
         t.file_name = PathSanitizer::SanitizeFileName(params["filename"].as_string());
+        if (t.file_name.empty() && is_youtube) {
+            t.file_name = "youtube_video.mp4";
+        }
         if (params.contains("saveDir")) {
             std::string sd = params["saveDir"].as_string();
             if (sd.find("..") != std::string::npos) {

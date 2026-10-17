@@ -124,22 +124,27 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     int filt_x = g.sort_dropdown_rect.right + 10;
     g.filter_dropdown_rect = {filt_x, sort_y, filt_x + filt_w, sort_y + sort_h};
 
-    int search_w = DesignSystem::ScaleForDpi(260, m.dpi);
-    int add_btn_w = DesignSystem::ScaleForDpi(150, m.dpi);
-    int btn_h = DesignSystem::ScaleForDpi(38, m.dpi);
+    int btn_h = DesignSystem::ScaleForDpi(36, m.dpi);
     int by = (bar_h - btn_h) / 2;
 
-    int search_x = w - search_w - 16;
-    g.search_box_rect = {search_x, by, search_x + search_w, by + btn_h};
-    g.search_sliders_rect = {g.search_box_rect.right - DesignSystem::ScaleForDpi(36, m.dpi), by, g.search_box_rect.right, by + btn_h};
-
-    int add_btn_x = search_x - add_btn_w - 12;
+    int add_btn_w = DesignSystem::ScaleForDpi(145, m.dpi);
+    int add_btn_x = w - add_btn_w - 16;
     g.add_download_button_rect = {add_btn_x, by, add_btn_x + add_btn_w, by + btn_h};
+
+    int settings_btn_w = btn_h;
+    int settings_btn_x = add_btn_x - settings_btn_w - 10;
+    g.settings_button_rect = {settings_btn_x, by, settings_btn_x + settings_btn_w, by + btn_h};
+    g.search_sliders_rect = g.settings_button_rect;
+
+    int search_max_w = DesignSystem::ScaleForDpi(260, m.dpi);
+    int search_w = std::min(search_max_w, std::max(140, settings_btn_x - filt_x - filt_w - 20));
+    int search_x = settings_btn_x - search_w - 12;
+    g.search_box_rect = {search_x, by, search_x + search_w, by + btn_h};
 
     auto tb = ComputeToolbarState();
     struct BtnDef { ToolbarActionId id; const char* label; bool enabled; bool primary; int base_w; };
     const BtnDef defs[] = {
-        {ToolbarActionId::kAddUrl,       "+ Add download", tb.can_add_url,       true,  130},
+        {ToolbarActionId::kAddUrl,       "+ Add download", tb.can_add_url,       true,  145},
         {ToolbarActionId::kStart,        "Start",          tb.can_start,         false, 62},
         {ToolbarActionId::kPause,        "Pause",          tb.can_pause,         false, 62},
         {ToolbarActionId::kResume,       "Resume",         tb.can_resume,        false, 68},
@@ -148,11 +153,18 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
         {ToolbarActionId::kRemove,       "Remove",         tb.can_remove,        false, 68},
         {ToolbarActionId::kClearHistory, "Clear History",  tb.can_clear_history, false, 96},
         {ToolbarActionId::kOpenFolder,   "Open Folder",    tb.can_open_folder,   false, 92},
-        {ToolbarActionId::kSettings,     "Settings",       tb.can_open_settings, false, 72}
+        {ToolbarActionId::kSettings,     "Settings",       tb.can_open_settings, false, 36}
     };
     for (size_t i = 0; i < 10; ++i) {
         const auto& d = defs[i];
-        RectI brc = (i == 0) ? g.add_download_button_rect : RectI{w + static_cast<int>(i * 50), 0, w + static_cast<int>(i * 50 + 40), 30};
+        RectI brc;
+        if (i == 0) {
+            brc = g.add_download_button_rect;
+        } else if (i == 9) {
+            brc = g.settings_button_rect;
+        } else {
+            brc = RectI{w + static_cast<int>(i * 50), 0, w + static_cast<int>(i * 50 + 40), 30};
+        }
         g.toolbar_buttons.push_back({d.id, d.label, d.enabled, d.primary, brc});
     }
 
@@ -377,6 +389,7 @@ bool DesktopView::HandleMouseClick(int x, int y, bool double_click, size_t scrol
             return true;
         }
         case HitTargetType::kRowCheckbox: {
+            ToggleTaskChecked(hit.task_id);
             SelectTask(hit.task_id);
             return true;
         }
@@ -551,6 +564,58 @@ std::string DesktopView::FormatSizePretty(uint64_t bytes) {
         std::snprintf(buf, sizeof(buf), "%llu B", static_cast<unsigned long long>(bytes));
     }
     return std::string(buf);
+}
+
+std::string DesktopView::FormatSpeedKbps(uint64_t bps) {
+    if (bps == 0) return "0 KB/s";
+    uint64_t kbps = (bps + 512) / 1024;
+    if (kbps == 0 && bps > 0) kbps = 1;
+    return std::to_string(kbps) + " KB/s";
+}
+
+void DesktopView::ToggleSelectAll() {
+    auto visible = GetFilteredAndSortedTasks();
+    if (visible.empty()) {
+        m_checked_task_ids.clear();
+        m_select_all_checked = false;
+        return;
+    }
+    bool all_checked = true;
+    for (const auto& t : visible) {
+        if (m_checked_task_ids.find(t.task_id) == m_checked_task_ids.end()) {
+            all_checked = false;
+            break;
+        }
+    }
+    if (all_checked) {
+        m_checked_task_ids.clear();
+        m_select_all_checked = false;
+    } else {
+        for (const auto& t : visible) {
+            m_checked_task_ids.insert(t.task_id);
+        }
+        m_select_all_checked = true;
+    }
+}
+
+void DesktopView::ToggleTaskChecked(const std::string& task_id) {
+    if (m_checked_task_ids.count(task_id)) {
+        m_checked_task_ids.erase(task_id);
+    } else {
+        m_checked_task_ids.insert(task_id);
+    }
+    auto visible = GetFilteredAndSortedTasks();
+    m_select_all_checked = (!visible.empty() && m_checked_task_ids.size() >= visible.size());
+}
+
+void DesktopView::SetTaskChecked(const std::string& task_id, bool checked) {
+    if (checked) {
+        m_checked_task_ids.insert(task_id);
+    } else {
+        m_checked_task_ids.erase(task_id);
+    }
+    auto visible = GetFilteredAndSortedTasks();
+    m_select_all_checked = (!visible.empty() && m_checked_task_ids.size() >= visible.size());
 }
 
 void DesktopView::CycleSortDropdown() {
@@ -887,34 +952,54 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
         }
 
         uint64_t effective_size = (t.total_bytes > 0) ? t.total_bytes : t.downloaded_bytes;
-        row.size_text = FormatSizePretty(effective_size);
+        row.size_text = (effective_size > 0) ? FormatSizePretty(effective_size) : "Unknown";
         row.added_time_text = FormatFriendlyTime(t.created_at_ms);
-        row.upload_speed_text = "0 B/s";
-        row.checked = m_select_all_checked;
+        row.upload_speed_text = "0 KB/s";
+        row.checked = (m_checked_task_ids.count(t.task_id) > 0);
 
         if (t.state == TaskState::kDownloading) {
             double pct = (t.total_bytes > 0)
                 ? std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0)
-                : 0.0;
+                : (row.is_stream && t.total_segments > 0
+                    ? std::clamp((static_cast<double>(t.completed_segments) * 100.0) / static_cast<double>(t.total_segments), 0.0, 100.0)
+                    : 0.0);
             int ipct = static_cast<int>(pct);
-            row.status_text = "Downloading " + std::to_string(ipct) + "%";
+            row.status_text = (t.total_bytes > 0 || (row.is_stream && t.total_segments > 0)) ? ("Downloading " + std::to_string(ipct) + "%") : "Downloading...";
             row.status_indicator_color = {0xFF, 0x47, 0x57, 255};
+        } else if (t.state == TaskState::kProbing) {
+            row.status_text = "Connecting...";
+            row.status_indicator_color = {0x8B, 0x5C, 0xF6, 255};
+        } else if (t.state == TaskState::kMuxing) {
+            row.status_text = "Merging (FFmpeg)...";
+            row.status_indicator_color = {0x8B, 0x5C, 0xF6, 255};
+        } else if (t.state == TaskState::kVerifying) {
+            row.status_text = "Verifying...";
+            row.status_indicator_color = {0x8B, 0x5C, 0xF6, 255};
         } else if (t.state == TaskState::kPaused) {
-            double pct = (t.total_bytes > 0)
-                ? std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0)
-                : 0.0;
-            int ipct = static_cast<int>(pct);
-            row.status_text = (ipct > 0) ? ("Paused " + std::to_string(ipct) + "%") : "Paused";
+            if (t.scheduled) {
+                row.status_text = "Scheduled (" + t.schedule_time_local + ")";
+            } else if (t.total_bytes > 0) {
+                double pct = std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0);
+                row.status_text = "Paused " + std::to_string(static_cast<int>(pct)) + "%";
+            } else {
+                row.status_text = "Paused";
+            }
             row.status_indicator_color = {0x9E, 0x9E, 0xA8, 255};
+        } else if (t.state == TaskState::kQueued) {
+            row.status_text = "Queued";
+            row.status_indicator_color = {0x72, 0x73, 0x7A, 255};
         } else if (t.state == TaskState::kCompleted) {
             row.status_text = "Completed";
             row.status_indicator_color = {0x8E, 0x8E, 0x98, 255};
         } else if (t.state == TaskState::kFailed) {
-            row.status_text = "Failed";
+            row.status_text = t.error_code.empty() ? "Failed" : ("Failed (" + t.error_code + ")");
+            row.status_indicator_color = {0xEF, 0x44, 0x44, 255};
+        } else if (t.state == TaskState::kCanceled) {
+            row.status_text = "Canceled";
             row.status_indicator_color = {0xEF, 0x44, 0x44, 255};
         }
 
-        row.speed_text = FormatSpeed(t.speed_bps);
+        row.speed_text = (t.state == TaskState::kDownloading) ? FormatSpeedKbps(t.speed_bps) : "0 KB/s";
         uint64_t rem_bytes = (t.total_bytes > t.downloaded_bytes) ? (t.total_bytes - t.downloaded_bytes) : 0;
         row.eta_text = (t.state == TaskState::kDownloading) ? FormatEta(rem_bytes, t.speed_bps) : "—";
 
@@ -1773,20 +1858,32 @@ Result<TaskModel> DesktopView::SubmitAddDownloadDialog(const AddDownloadDialogIn
     t.scheduled = input.scheduled;
     t.schedule_time_local = input.schedule_time_local;
 
-    if (input.is_stream || input.url.find(".m3u8") != std::string::npos) {
+    bool is_youtube = (input.url.find("youtube.com") != std::string::npos || input.url.find("youtu.be") != std::string::npos);
+    if (input.is_stream || is_youtube || input.url.find(".m3u8") != std::string::npos) {
         t.task_type = TaskType::kStreamHls;
+        t.category = "Video";
         t.stream_options.video_filter = input.video_filter.empty() ? "best" : input.video_filter;
         t.stream_options.audio_filter = input.audio_filter.empty() ? "all" : input.audio_filter;
         t.stream_options.subtitle_filter = input.subtitle_filter.empty() ? "all" : input.subtitle_filter;
         t.stream_options.output_format = (input.output_format == "mkv") ? "mkv" : "mp4";
     } else if (input.url.find(".mpd") != std::string::npos) {
         t.task_type = TaskType::kStreamDash;
+        t.category = "Video";
         t.stream_options.video_filter = input.video_filter.empty() ? "best" : input.video_filter;
         t.stream_options.audio_filter = input.audio_filter.empty() ? "all" : input.audio_filter;
         t.stream_options.subtitle_filter = input.subtitle_filter.empty() ? "all" : input.subtitle_filter;
         t.stream_options.output_format = (input.output_format == "mkv") ? "mkv" : "mp4";
     } else {
         t.task_type = TaskType::kHttpFile;
+    }
+
+    if (t.file_name.empty()) {
+        if (is_youtube) {
+            t.file_name = "youtube_video.mp4";
+        } else {
+            auto derived = PathSanitizer::ExtractFromUrl(t.url);
+            t.file_name = derived.empty() ? "download" : derived;
+        }
     }
 
     auto res = m_controller.AddTask(std::move(t), input.start_immediately, false);
@@ -1897,64 +1994,100 @@ Result<void> DesktopView::TriggerRowPrimaryAction(const std::string& task_id) {
 }
 
 Result<void> DesktopView::ActionStartSelected() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    auto r = m_controller.StartTask(m_selected_task_id);
-    m_last_feedback_message = r.ok() ? "Started selected task" : r.error->message;
-    return r;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.StartTask(id);
+        if (!r.ok()) last_res = r;
+    }
+    m_last_feedback_message = last_res.ok() ? "Started task(s)" : last_res.error->message;
+    return last_res;
 }
 
 Result<void> DesktopView::ActionPauseSelected() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    auto r = m_controller.PauseTask(m_selected_task_id);
-    m_last_feedback_message = r.ok() ? "Paused selected task" : r.error->message;
-    return r;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.PauseTask(id);
+        if (!r.ok()) last_res = r;
+    }
+    m_last_feedback_message = last_res.ok() ? "Paused task(s)" : last_res.error->message;
+    return last_res;
 }
 
 Result<void> DesktopView::ActionResumeSelected() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    auto r = m_controller.ResumeTask(m_selected_task_id);
-    m_last_feedback_message = r.ok() ? "Resumed selected task" : r.error->message;
-    return r;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.ResumeTask(id);
+        if (!r.ok()) last_res = r;
+    }
+    m_last_feedback_message = last_res.ok() ? "Resumed task(s)" : last_res.error->message;
+    return last_res;
 }
 
 Result<void> DesktopView::ActionRetrySelected() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    auto r = m_controller.RetryTask(m_selected_task_id);
-    m_last_feedback_message = r.ok() ? "Retrying selected task" : r.error->message;
-    return r;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.RetryTask(id);
+        if (!r.ok()) last_res = r;
+    }
+    m_last_feedback_message = last_res.ok() ? "Retrying task(s)" : last_res.error->message;
+    return last_res;
 }
 
 Result<void> DesktopView::ActionCancelSelected() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    auto r = m_controller.CancelTask(m_selected_task_id);
-    m_last_feedback_message = r.ok() ? "Canceled selected task" : r.error->message;
-    return r;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.CancelTask(id);
+        if (!r.ok()) last_res = r;
+    }
+    m_last_feedback_message = last_res.ok() ? "Canceled task(s)" : last_res.error->message;
+    return last_res;
 }
 
 Result<void> DesktopView::ActionRemoveSelectedFromList() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    std::string id = m_selected_task_id;
-    auto r = m_controller.RemoveTask(id, false);
-    if (r.ok()) {
-        SelectFirstRow();
-        m_last_feedback_message = "Removed task from list (completed file kept on disk)";
-    } else {
-        m_last_feedback_message = r.error->message;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.RemoveTask(id, false);
+        if (!r.ok()) last_res = r;
     }
-    return r;
+    m_checked_task_ids.clear();
+    m_select_all_checked = false;
+    SelectFirstRow();
+    m_last_feedback_message = "Removed task(s) from list (completed file kept on disk)";
+    return last_res;
 }
 
 Result<void> DesktopView::ActionDeleteSelectedWithFile() {
-    if (m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
-    std::string id = m_selected_task_id;
-    auto r = m_controller.RemoveTask(id, true);
-    if (r.ok()) {
-        SelectFirstRow();
-        m_last_feedback_message = "Deleted task and removed output file from disk";
-    } else {
-        m_last_feedback_message = r.error->message;
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto r = m_controller.RemoveTask(id, true);
+        if (!r.ok()) last_res = r;
     }
-    return r;
+    m_checked_task_ids.clear();
+    m_select_all_checked = false;
+    SelectFirstRow();
+    m_last_feedback_message = "Deleted task(s) and removed output file from disk";
+    return last_res;
 }
 
 Result<int> DesktopView::ActionClearCompletedHistory() {
@@ -2325,43 +2458,392 @@ bool SelectFolderWithDialogWin32(HWND hwnd, std::string& io_folder) {
     return false;
 }
 
-void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController& controller) {
-    std::string clip_url;
-    if (OpenClipboard(hwnd)) {
+struct NewDownloadDialogContext {
+    DesktopView* view{nullptr};
+    DownloadController* controller{nullptr};
+    HWND hDlg{nullptr};
+    HWND hUrlEdit{nullptr};
+    HWND hFilenameEdit{nullptr};
+    HWND hSaveDirEdit{nullptr};
+    HWND hBrowseBtn{nullptr};
+    HWND hQualityCombo{nullptr};
+    HWND hSpaceLabel{nullptr};
+    HWND hStartChk{nullptr};
+    HWND hDownloadBtn{nullptr};
+    HWND hCancelBtn{nullptr};
+    HFONT hFontBody{nullptr};
+    HFONT hFontBold{nullptr};
+    HFONT hFontTitle{nullptr};
+    HFONT hFontSmall{nullptr};
+    HBRUSH hBgBrush{nullptr};
+    HBRUSH hEditBrush{nullptr};
+    bool submitted{false};
+};
+
+LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<NewDownloadDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = static_cast<NewDownloadDialogContext*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    if (!ctx) return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    switch (msg) {
+        case WM_CREATE: {
+            ctx->hDlg = hwnd;
+            ctx->hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontTitle = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hBgBrush = CreateSolidBrush(RGB(0x16, 0x16, 0x18));
+            ctx->hEditBrush = CreateSolidBrush(RGB(0x22, 0x22, 0x26));
+
+            HINSTANCE hInst = GetModuleHandleW(nullptr);
+
+            // URL Edit
+            ctx->hUrlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                24, 78, 532, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5001)), hInst, nullptr);
+            SendMessageW(ctx->hUrlEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            SendMessageW(ctx->hUrlEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Paste or enter download URL (HTTP, HTTPS, FTP, or video link)..."));
+
+            // Filename Edit
+            ctx->hFilenameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                24, 138, 532, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5002)), hInst, nullptr);
+            SendMessageW(ctx->hFilenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            SendMessageW(ctx->hFilenameEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"File name (leave blank to auto-detect from server)"));
+
+            // Save Dir Edit
+            auto s = ctx->controller->GetSettings();
+            std::wstring def_dir = Utf8ToW(s.default_download_dir);
+            ctx->hSaveDirEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def_dir.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                24, 198, 420, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5003)), hInst, nullptr);
+            SendMessageW(ctx->hSaveDirEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+
+            // Browse Button
+            ctx->hBrowseBtn = CreateWindowExW(0, L"BUTTON", L"Browse...",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                456, 198, 100, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5004)), hInst, nullptr);
+            SendMessageW(ctx->hBrowseBtn, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+
+            // Quality / Format Combobox
+            ctx->hQualityCombo = CreateWindowExW(0, L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                24, 258, 280, 180, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5005)), hInst, nullptr);
+            SendMessageW(ctx->hQualityCombo, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Best Available Quality"));
+            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"1080p (Full HD)"));
+            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"720p (HD)"));
+            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"480p (Standard)"));
+            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"360p (Low)"));
+            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Audio Only (MP3 / M4A)"));
+            SendMessageW(ctx->hQualityCombo, CB_SETCURSEL, 0, 0);
+
+            // Disk Space Label
+            std::string space_text = "Disk space: Checking...";
+            auto space_res = PathSanitizer::CheckAvailableDiskSpace(s.default_download_dir, 1024);
+            if (space_res.ok() && space_res.value.has_value()) {
+                space_text = "Free space: " + DesktopView::FormatSizePretty(*space_res.value) + " available on destination drive";
+            }
+            ctx->hSpaceLabel = CreateWindowExW(0, L"STATIC", Utf8ToW(space_text).c_str(),
+                WS_CHILD | WS_VISIBLE,
+                24, 298, 532, 20, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5006)), hInst, nullptr);
+            SendMessageW(ctx->hSpaceLabel, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontSmall), TRUE);
+
+            // Start Immediately Checkbox
+            ctx->hStartChk = CreateWindowExW(0, L"BUTTON", L"Start download immediately",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                24, 328, 260, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5007)), hInst, nullptr);
+            SendMessageW(ctx->hStartChk, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            SendMessageW(ctx->hStartChk, BM_SETCHECK, s.auto_start_downloads ? BST_CHECKED : BST_UNCHECKED, 0);
+
+            // Download Button
+            ctx->hDownloadBtn = CreateWindowExW(0, L"BUTTON", L"Download",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                326, 368, 120, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5008)), hInst, nullptr);
+            SendMessageW(ctx->hDownloadBtn, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBold), TRUE);
+
+            // Cancel Button
+            ctx->hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                456, 368, 100, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5009)), hInst, nullptr);
+            SendMessageW(ctx->hCancelBtn, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+
+            return 0;
+        }
+        case WM_CTLCOLOREDIT: {
+            HDC hdcEdit = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdcEdit, RGB(0xF2, 0xF2, 0xF3));
+            SetBkColor(hdcEdit, RGB(0x22, 0x22, 0x26));
+            return reinterpret_cast<LRESULT>(ctx->hEditBrush);
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC hdcStatic = reinterpret_cast<HDC>(wParam);
+            HWND hCtl = reinterpret_cast<HWND>(lParam);
+            if (hCtl == ctx->hSpaceLabel) {
+                SetTextColor(hdcStatic, RGB(0x8E, 0x8E, 0x98));
+            } else {
+                SetTextColor(hdcStatic, RGB(0xA4, 0xA5, 0xAC));
+            }
+            SetBkColor(hdcStatic, RGB(0x16, 0x16, 0x18));
+            return reinterpret_cast<LRESULT>(ctx->hBgBrush);
+        }
+        case WM_CTLCOLORBTN: {
+            return reinterpret_cast<LRESULT>(ctx->hBgBrush);
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, ctx->hBgBrush);
+
+            SetBkMode(hdc, TRANSPARENT);
+            SelectObject(hdc, ctx->hFontTitle);
+            SetTextColor(hdc, RGB(0xF2, 0xF2, 0xF3));
+            TextOutW(hdc, 24, 16, L"New Download", 12);
+
+            RECT accent_rc{24, 44, 556, 46};
+            HBRUSH hAccent = CreateSolidBrush(RGB(0xFF, 0x4F, 0x57));
+            FillRect(hdc, &accent_rc, hAccent);
+            DeleteObject(hAccent);
+
+            SelectObject(hdc, ctx->hFontBold);
+            SetTextColor(hdc, RGB(0xA4, 0xA5, 0xAC));
+            TextOutW(hdc, 24, 58, L"Download URL:", 13);
+            TextOutW(hdc, 24, 118, L"File Name:", 10);
+            TextOutW(hdc, 24, 178, L"Save Location:", 14);
+            TextOutW(hdc, 24, 238, L"Quality / Format:", 17);
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            int code = HIWORD(wParam);
+
+            if (id == 5001 && code == EN_CHANGE) {
+                wchar_t url_buf[1024]{};
+                GetWindowTextW(ctx->hUrlEdit, url_buf, 1023);
+                std::string u = WToUtf8(url_buf);
+                wchar_t fn_buf[512]{};
+                GetWindowTextW(ctx->hFilenameEdit, fn_buf, 511);
+                std::string cur_fn = WToUtf8(fn_buf);
+
+                if (cur_fn.empty() || cur_fn == "youtube_video.mp4" || cur_fn == "download") {
+                    if (u.find("youtube.com") != std::string::npos || u.find("youtu.be") != std::string::npos) {
+                        SetWindowTextW(ctx->hFilenameEdit, L"youtube_video.mp4");
+                    } else if (!u.empty()) {
+                        auto derived = PathSanitizer::ExtractFromUrl(u);
+                        if (!derived.empty()) {
+                            SetWindowTextW(ctx->hFilenameEdit, Utf8ToW(derived).c_str());
+                        }
+                    }
+                }
+                return 0;
+            }
+
+            if (id == 5004 && code == BN_CLICKED) { // Browse
+                wchar_t dir_buf[MAX_PATH]{};
+                GetWindowTextW(ctx->hSaveDirEdit, dir_buf, MAX_PATH - 1);
+                std::string chosen_dir = WToUtf8(dir_buf);
+                if (SelectFolderWithDialogWin32(hwnd, chosen_dir)) {
+                    SetWindowTextW(ctx->hSaveDirEdit, Utf8ToW(chosen_dir).c_str());
+                    auto space_res = PathSanitizer::CheckAvailableDiskSpace(chosen_dir, 1024);
+                    if (space_res.ok() && space_res.value.has_value()) {
+                        std::string space_text = "Free space: " + DesktopView::FormatSizePretty(*space_res.value) + " available on destination drive";
+                        SetWindowTextW(ctx->hSpaceLabel, Utf8ToW(space_text).c_str());
+                    }
+                }
+                return 0;
+            }
+
+            if (id == 5008 && code == BN_CLICKED) { // Download
+                wchar_t url_buf[2048]{};
+                GetWindowTextW(ctx->hUrlEdit, url_buf, 2047);
+                std::string u = WToUtf8(url_buf);
+                while (!u.empty() && (u.front() == ' ' || u.front() == '\t')) u.erase(0, 1);
+                while (!u.empty() && (u.back() == ' ' || u.back() == '\t')) u.pop_back();
+
+                if (u.empty()) {
+                    MessageBoxW(hwnd, L"Please enter a valid download URL.", L"Missing URL", MB_OK | MB_ICONWARNING);
+                    SetFocus(ctx->hUrlEdit);
+                    return 0;
+                }
+
+                wchar_t fn_buf[512]{};
+                GetWindowTextW(ctx->hFilenameEdit, fn_buf, 511);
+                std::string fn = WToUtf8(fn_buf);
+
+                wchar_t dir_buf[MAX_PATH]{};
+                GetWindowTextW(ctx->hSaveDirEdit, dir_buf, MAX_PATH - 1);
+                std::string sd = WToUtf8(dir_buf);
+                if (sd.empty()) sd = ctx->controller->GetSettings().default_download_dir;
+
+                int cur_sel = static_cast<int>(SendMessageW(ctx->hQualityCombo, CB_GETCURSEL, 0, 0));
+                std::string vfilter = "best";
+                if (cur_sel == 1) vfilter = "1080p";
+                else if (cur_sel == 2) vfilter = "720p";
+                else if (cur_sel == 3) vfilter = "480p";
+                else if (cur_sel == 4) vfilter = "360p";
+                else if (cur_sel == 5) vfilter = "audio";
+
+                bool start_now = (SendMessageW(ctx->hStartChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+                AddDownloadDialogInput in;
+                in.url = u;
+                in.custom_filename = fn;
+                in.save_dir = sd;
+                in.max_connections = ctx->controller->GetSettings().default_connections_per_task;
+                in.start_immediately = start_now;
+                in.video_filter = vfilter;
+                bool is_yt = (u.find("youtube.com") != std::string::npos || u.find("youtu.be") != std::string::npos);
+                if (is_yt || u.find(".m3u8") != std::string::npos || u.find(".mpd") != std::string::npos) {
+                    in.is_stream = true;
+                }
+
+                auto res = ctx->view->SubmitAddDownloadDialog(in);
+                if (!res.ok()) {
+                    std::wstring err = L"Could not add download:\n" + Utf8ToW(res.error->message);
+                    MessageBoxW(hwnd, err.c_str(), L"Error Adding Download", MB_OK | MB_ICONERROR);
+                    return 0;
+                }
+
+                ctx->submitted = true;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+
+            if (id == 5009 && code == BN_CLICKED) { // Cancel
+                DestroyWindow(hwnd);
+                return 0;
+            }
+
+            return 0;
+        }
+        case WM_DESTROY: {
+            if (ctx->hFontBody) DeleteObject(ctx->hFontBody);
+            if (ctx->hFontBold) DeleteObject(ctx->hFontBold);
+            if (ctx->hFontTitle) DeleteObject(ctx->hFontTitle);
+            if (ctx->hFontSmall) DeleteObject(ctx->hFontSmall);
+            if (ctx->hBgBrush) DeleteObject(ctx->hBgBrush);
+            if (ctx->hEditBrush) DeleteObject(ctx->hEditBrush);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+void ShowNewDownloadDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadController& controller, const std::string& initial_url) {
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    static bool class_registered = false;
+    if (!class_registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = NewDownloadDlgProc;
+        wc.hInstance = hInst;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wc.lpszClassName = L"Flux_NewDownloadDlgClass";
+        RegisterClassExW(&wc);
+        class_registered = true;
+    }
+
+    NewDownloadDialogContext ctx;
+    ctx.view = &view;
+    ctx.controller = &controller;
+
+    std::string candidate_url = initial_url;
+    if (candidate_url.empty() && OpenClipboard(hwnd_parent)) {
         HANDLE hData = GetClipboardData(CF_UNICODETEXT);
         if (hData) {
             const wchar_t* wtxt = static_cast<const wchar_t*>(GlobalLock(hData));
             if (wtxt) {
-                std::string candidate = WToUtf8(wtxt);
-                if (candidate.rfind("http://", 0) == 0 || candidate.rfind("https://", 0) == 0) {
-                    clip_url = candidate;
+                std::string s = WToUtf8(wtxt);
+                if (s.rfind("http://", 0) == 0 || s.rfind("https://", 0) == 0 || s.rfind("ftp://", 0) == 0) {
+                    candidate_url = s;
                 }
                 GlobalUnlock(hData);
             }
         }
         CloseClipboard();
     }
-    if (clip_url.empty()) {
-        MessageBoxW(
-            hwnd,
-            L"Copy an http:// or https:// download or stream (.m3u8 / .mpd) URL to your clipboard and click '+ Add URL' (or press Ctrl+N), or capture media directly from your browser via the Flux Browser Extension.",
-            L"Flux — Add Download",
-            MB_OK | MB_ICONINFORMATION);
-        return;
+
+    RECT parent_rc{};
+    GetWindowRect(hwnd_parent, &parent_rc);
+    int dlg_w = 600;
+    int dlg_h = 470;
+    int dlg_x = parent_rc.left + (parent_rc.right - parent_rc.left - dlg_w) / 2;
+    int dlg_y = parent_rc.top + (parent_rc.bottom - parent_rc.top - dlg_h) / 2;
+
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        L"Flux_NewDownloadDlgClass",
+        L"New Download — Flux",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        dlg_x, dlg_y, dlg_w, dlg_h,
+        hwnd_parent, nullptr, hInst, &ctx);
+
+    if (!hDlg) return;
+    ctx.hDlg = hDlg;
+
+    BOOL use_dark = TRUE;
+    DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark, sizeof(use_dark));
+
+    if (!candidate_url.empty()) {
+        SetWindowTextW(ctx.hUrlEdit, Utf8ToW(candidate_url).c_str());
+        SendMessageW(ctx.hUrlEdit, EM_SETSEL, 0, -1);
+        if (candidate_url.find("youtube.com") != std::string::npos || candidate_url.find("youtu.be") != std::string::npos) {
+            SetWindowTextW(ctx.hFilenameEdit, L"youtube_video.mp4");
+        } else {
+            auto derived = PathSanitizer::ExtractFromUrl(candidate_url);
+            if (!derived.empty()) {
+                SetWindowTextW(ctx.hFilenameEdit, Utf8ToW(derived).c_str());
+            }
+        }
     }
 
-    auto s = controller.GetSettings();
-    std::wstring prompt = L"Add download from clipboard URL?\n\nURL: " + Utf8ToW(clip_url) +
-                          L"\nDestination: " + Utf8ToW(s.default_download_dir) +
-                          L"\nConnections: " + std::to_wstring(s.default_connections_per_task);
-    if (MessageBoxW(hwnd, prompt.c_str(), L"Flux — Add Download", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
-        AddDownloadDialogInput in;
-        in.url = clip_url;
-        in.save_dir = s.default_download_dir;
-        in.max_connections = s.default_connections_per_task;
-        in.start_immediately = s.auto_start_downloads;
-        view.SubmitAddDownloadDialog(in);
+    EnableWindow(hwnd_parent, FALSE);
+    SetForegroundWindow(hDlg);
+    SetFocus(ctx.hUrlEdit);
+
+    MSG msg{};
+    while (IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_ESCAPE) {
+                DestroyWindow(hDlg);
+                break;
+            } else if (msg.wParam == VK_RETURN && GetFocus() != ctx.hBrowseBtn && GetFocus() != ctx.hCancelBtn) {
+                SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(5008, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hDownloadBtn));
+                break;
+            }
+        }
+        if (!IsDialogMessageW(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
+
+    EnableWindow(hwnd_parent, TRUE);
+    SetForegroundWindow(hwnd_parent);
+    InvalidateRect(hwnd_parent, nullptr, TRUE);
+}
+
+void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController& controller) {
+    ShowNewDownloadDialogWin32(hwnd, view, controller, "");
 }
 
 void PaintCosmicBackgroundStars(HDC hdc, const DesktopView& view) {
@@ -2538,6 +3020,159 @@ void DrawDocFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba col) {
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
     DeleteObject(hPen);
+}
+
+void DrawVideoFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Film sheet frame with coral red accent and centered play triangle
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2 - 1;
+    int cy = y + h / 2 + 2;
+    int sz = 4;
+    POINT tri[3] = {
+        {cx - sz + 1, cy - sz},
+        {cx + sz + 1, cy},
+        {cx - sz + 1, cy + sz}
+    };
+    HPEN hPen = CreatePen(PS_SOLID, 1, accent.ToWin32ColorRef());
+    HBRUSH hBrush = CreateSolidBrush(accent.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hPen);
+    HGDIOBJ ob = SelectObject(hdc, hBrush);
+    Polygon(hdc, tri, 3);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(hBrush);
+    DeleteObject(hPen);
+}
+
+void DrawAudioFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Violet sheet outline with 3 vertical equalizer lines
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2;
+    int cy = y + h / 2 + 2;
+    HPEN hPen = CreatePen(PS_SOLID, 2, accent.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hPen);
+    // Bar 1
+    MoveToEx(hdc, cx - 4, cy + 3, nullptr);
+    LineTo(hdc, cx - 4, cy - 3);
+    // Bar 2 (center, tallest)
+    MoveToEx(hdc, cx, cy + 5, nullptr);
+    LineTo(hdc, cx, cy - 5);
+    // Bar 3
+    MoveToEx(hdc, cx + 4, cy + 4, nullptr);
+    LineTo(hdc, cx + 4, cy - 2);
+    SelectObject(hdc, op);
+    DeleteObject(hPen);
+}
+
+void DrawArchiveFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Amber sheet outline with zipper pattern in center
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2;
+    int cy = y + h / 2 + 2;
+    HPEN hPen = CreatePen(PS_SOLID, 1, accent.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hPen);
+    for (int dy = -4; dy <= 4; dy += 2) {
+        int tooth_w = ((dy % 4) == 0) ? 3 : 2;
+        MoveToEx(hdc, cx - tooth_w, cy + dy, nullptr);
+        LineTo(hdc, cx + tooth_w, cy + dy);
+    }
+    SelectObject(hdc, op);
+    DeleteObject(hPen);
+}
+
+void DrawPdfFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Crimson sheet outline with solid red fold badge
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2;
+    int cy = y + h / 2 + 2;
+    RECT badge{cx - 6, cy - 3, cx + 6, cy + 4};
+    HBRUSH hBrush = CreateSolidBrush(accent.ToWin32ColorRef());
+    FillRect(hdc, &badge, hBrush);
+    DeleteObject(hBrush);
+}
+
+void DrawImageFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Cyan sheet with sun and two mountains
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2;
+    int cy = y + h / 2 + 2;
+    HPEN hPen = CreatePen(PS_SOLID, 1, accent.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hPen);
+    // Sun
+    Ellipse(hdc, cx + 1, cy - 4, cx + 5, cy);
+    // Mountain 1 (larger)
+    POINT m1[3] = {{cx - 6, cy + 5}, {cx - 2, cy - 1}, {cx + 2, cy + 5}};
+    Polyline(hdc, m1, 3);
+    // Mountain 2 (smaller)
+    POINT m2[3] = {{cx, cy + 5}, {cx + 3, cy + 1}, {cx + 6, cy + 5}};
+    Polyline(hdc, m2, 3);
+    SelectObject(hdc, op);
+    DeleteObject(hPen);
+}
+
+void DrawExecutableFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Emerald window frame with titlebar
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2;
+    int cy = y + h / 2 + 2;
+    HPEN hPen = CreatePen(PS_SOLID, 1, accent.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hPen);
+    RECT win_rc{cx - 5, cy - 4, cx + 5, cy + 5};
+    Rectangle(hdc, win_rc.left, win_rc.top, win_rc.right, win_rc.bottom);
+    MoveToEx(hdc, win_rc.left, cy - 2, nullptr);
+    LineTo(hdc, win_rc.right, cy - 2);
+    SelectObject(hdc, op);
+    DeleteObject(hPen);
+}
+
+void DrawDocumentFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    // Slate blue sheet with text lines
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+    int cx = x + w / 2;
+    int cy = y + h / 2 + 2;
+    HPEN hPen = CreatePen(PS_SOLID, 1, accent.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hPen);
+    MoveToEx(hdc, cx - 4, cy - 3, nullptr); LineTo(hdc, cx + 4, cy - 3);
+    MoveToEx(hdc, cx - 4, cy, nullptr);     LineTo(hdc, cx + 4, cy);
+    MoveToEx(hdc, cx - 4, cy + 3, nullptr); LineTo(hdc, cx + 2, cy + 3);
+    SelectObject(hdc, op);
+    DeleteObject(hPen);
+}
+
+void DrawGenericFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba accent) {
+    DrawDocFileIconGdi(hdc, x, y, w, h, accent);
+}
+
+void DrawFileTypeIconGdi(HDC hdc, int x, int y, int w, int h, const FormattedTaskRow& r, const ThemePalette& pal) {
+    std::string name = ToLower(r.full_filename_tooltip.empty() ? r.display_filename : r.full_filename_tooltip);
+    auto ext_pos = name.rfind('.');
+    std::string ext = (ext_pos != std::string::npos) ? name.substr(ext_pos) : "";
+
+    if (r.is_stream || r.category == "Video" || ext == ".mp4" || ext == ".mkv" || ext == ".webm" ||
+        ext == ".avi" || ext == ".mov" || ext == ".flv" || ext == ".ts" || ext == ".m4v" || ext == ".m3u8" || ext == ".mpd") {
+        DrawVideoFileIconGdi(hdc, x, y, w, h, pal.accent_primary);
+    } else if (r.category == "Audio" || ext == ".mp3" || ext == ".m4a" || ext == ".aac" ||
+               ext == ".flac" || ext == ".wav" || ext == ".ogg" || ext == ".opus") {
+        DrawAudioFileIconGdi(hdc, x, y, w, h, ColorRgba{0x8B, 0x5C, 0xF6, 255});
+    } else if (r.category == "Compressed" || ext == ".zip" || ext == ".rar" || ext == ".7z" ||
+               ext == ".tar" || ext == ".gz" || ext == ".bz2" || ext == ".xz" || ext == ".iso") {
+        DrawArchiveFileIconGdi(hdc, x, y, w, h, ColorRgba{0xF5, 0x9E, 0x0B, 255});
+    } else if (r.category == "PDF" || ext == ".pdf") {
+        DrawPdfFileIconGdi(hdc, x, y, w, h, ColorRgba{0xEF, 0x44, 0x44, 255});
+    } else if (r.category == "Image" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
+               ext == ".gif" || ext == ".webp" || ext == ".svg" || ext == ".bmp" || ext == ".ico") {
+        DrawImageFileIconGdi(hdc, x, y, w, h, ColorRgba{0x06, 0xB6, 0xD4, 255});
+    } else if (r.category == "Programs" || ext == ".exe" || ext == ".msi" || ext == ".dll" ||
+               ext == ".bat" || ext == ".cmd" || ext == ".ps1") {
+        DrawExecutableFileIconGdi(hdc, x, y, w, h, ColorRgba{0x10, 0xB9, 0x81, 255});
+    } else if (r.category == "Documents" || ext == ".txt" || ext == ".doc" || ext == ".docx" ||
+               ext == ".xls" || ext == ".xlsx" || ext == ".ppt" || ext == ".pptx" || ext == ".csv" ||
+               ext == ".md" || ext == ".json" || ext == ".xml" || ext == ".cpp" || ext == ".h" ||
+               ext == ".hpp" || ext == ".js" || ext == ".ts" || ext == ".py") {
+        DrawDocumentFileIconGdi(hdc, x, y, w, h, ColorRgba{0x60, 0xA5, 0xFA, 255});
+    } else {
+        DrawGenericFileIconGdi(hdc, x, y, w, h, pal.text_secondary);
+    }
 }
 
 void DrawPauseGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
@@ -2797,7 +3432,28 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     RECT sort_txt_rc{sort_rc.left + 32, sort_rc.top, sort_rc.right - 18, sort_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     SelectObject(hdc, hFontBody);
-    DrawTextW(hdc, L"Newest", -1, &sort_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    std::wstring sort_label = L"Newest";
+    switch (view.GetSortColumn()) {
+        case SortColumn::kCreatedAt:
+            sort_label = view.IsSortAscending() ? L"Oldest" : L"Newest";
+            break;
+        case SortColumn::kFileName:
+            sort_label = view.IsSortAscending() ? L"Name (A-Z)" : L"Name (Z-A)";
+            break;
+        case SortColumn::kSize:
+            sort_label = view.IsSortAscending() ? L"Size (Small)" : L"Size (Large)";
+            break;
+        case SortColumn::kStatus:
+            sort_label = L"Status";
+            break;
+        case SortColumn::kSpeed:
+            sort_label = L"Speed";
+            break;
+        default:
+            sort_label = L"Newest";
+            break;
+    }
+    DrawTextW(hdc, sort_label.c_str(), -1, &sort_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawCaretGlyphGdi(hdc, sort_rc.right - 12, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2, pal.text_muted, false);
 
     // 1.3 Filter Dropdown
@@ -2872,125 +3528,136 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             FillRectSolid(hdc, row_div, ColorRgba{0x20, 0x20, 0x24, 255});
 
             RECT chk_rc = ToWinRect(rl.checkbox_rect);
-            DrawCheckboxGdi(hdc, chk_rc, r.checked || r.selected, pal.surface_primary, pal.border_subtle, pal.accent_primary);
+            DrawCheckboxGdi(hdc, chk_rc, r.checked, pal.surface_primary, pal.border_subtle, pal.accent_primary);
 
-            RECT idx_rc{chk_rc.right + 6, rrc.top, chk_rc.right + 26, rrc.bottom};
+            RECT idx_rc{chk_rc.right + 4, rrc.top, chk_rc.right + 24, rrc.bottom};
             SelectObject(hdc, hFontBody);
             SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
             std::wstring widx = std::to_wstring(i + 1);
             DrawTextW(hdc, widx.c_str(), -1, &idx_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-            int icon_x = idx_rc.right + 8;
+            int icon_x = idx_rc.right + 6;
             int icon_w = DesignSystem::ScaleForDpi(20, m.dpi);
             int icon_h = DesignSystem::ScaleForDpi(24, m.dpi);
             int icon_y = rrc.top + (rrc.bottom - rrc.top - icon_h) / 2;
-            ColorRgba icon_col = (r.state == TaskState::kDownloading) ? pal.accent_primary : pal.text_secondary;
-            DrawDocFileIconGdi(hdc, icon_x, icon_y, icon_w, icon_h, icon_col);
+            DrawFileTypeIconGdi(hdc, icon_x, icon_y, icon_w, icon_h, r, pal);
 
             SelectObject(hdc, hFontBold);
             SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-            RECT fn_rc{icon_x + icon_w + 10, rrc.top + 6, rl.filename_rect.right, rrc.bottom - 12};
+            RECT fn_rc{icon_x + icon_w + 10, rrc.top + 7, rl.filename_rect.right - 10, rrc.top + 27};
             std::wstring wfn = Utf8ToW(r.display_filename);
             DrawTextW(hdc, wfn.c_str(), -1, &fn_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-            if (r.state == TaskState::kDownloading) {
-                SIZE fn_sz{};
-                GetTextExtentPoint32W(hdc, wfn.c_str(), static_cast<int>(wfn.size()), &fn_sz);
-                int underline_w = std::max<int>(60, std::min<int>(static_cast<int>(fn_sz.cx), static_cast<int>(fn_rc.right - fn_rc.left)));
-                int fill_w = static_cast<int>(static_cast<double>(underline_w) * r.progress_fraction);
-                RECT u_track{fn_rc.left, rrc.bottom - 8, fn_rc.left + underline_w, rrc.bottom - 6};
-                FillRectSolid(hdc, u_track, pal.progress_track);
-                if (fill_w > 0) {
-                    RECT u_fill{fn_rc.left, rrc.bottom - 8, fn_rc.left + fill_w, rrc.bottom - 6};
-                    FillRectSolid(hdc, u_fill, pal.accent_primary);
-                }
+            // Sleek horizontal linear progress bar with explicit percentage display
+            int bar_x = icon_x + icon_w + 10;
+            int bar_y = rrc.top + 33;
+            int bar_max_w = std::min(160, std::max(60, rl.filename_rect.right - bar_x - 70));
+            int bar_h = 5;
+            RECT track_rc{bar_x, bar_y, bar_x + bar_max_w, bar_y + bar_h};
+            FillRectSolid(hdc, track_rc, pal.progress_track);
+            int fill_w = static_cast<int>(static_cast<double>(bar_max_w) * std::clamp(r.progress_fraction, 0.0, 1.0));
+            if (fill_w > 0) {
+                RECT fill_rc{bar_x, bar_y, bar_x + fill_w, bar_y + bar_h};
+                FillRectSolid(hdc, fill_rc, r.progress_fill_color);
             }
+            RECT pct_rc{bar_x + bar_max_w + 8, bar_y - 6, bar_x + bar_max_w + 70, bar_y + bar_h + 6};
+            SelectObject(hdc, hFontSmall);
+            SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+            std::wstring wpct;
+            if (r.state == TaskState::kCompleted) wpct = L"100%";
+            else if (r.state == TaskState::kQueued) wpct = L"0%";
+            else {
+                char pbuf[32];
+                std::snprintf(pbuf, sizeof(pbuf), "%.1f%%", r.progress_fraction * 100.0);
+                wpct = Utf8ToW(pbuf);
+            }
+            DrawTextW(hdc, wpct.c_str(), -1, &pct_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            SelectObject(hdc, hFontBody);
-            SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-            if (geom.table_columns.size() > 2) {
-                RECT sz_rc = ToWinRect(geom.table_columns[2].rect);
+            // Column 1: Size
+            if (geom.table_columns.size() > 1) {
+                RECT sz_rc = ToWinRect(geom.table_columns[1].rect);
                 sz_rc.top = rrc.top;
                 sz_rc.bottom = rrc.bottom;
+                SelectObject(hdc, hFontBody);
+                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
                 std::wstring wsz = Utf8ToW(r.size_text);
                 DrawTextW(hdc, wsz.c_str(), -1, &sz_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
 
-            if (geom.table_columns.size() > 3) {
-                RECT st_rc = ToWinRect(geom.table_columns[3].rect);
+            // Column 2: Status
+            if (geom.table_columns.size() > 2) {
+                RECT st_rc = ToWinRect(geom.table_columns[2].rect);
                 st_rc.top = rrc.top;
                 st_rc.bottom = rrc.bottom;
 
-                int dot_r = DesignSystem::ScaleForDpi(5, m.dpi);
+                int dot_r = DesignSystem::ScaleForDpi(4, m.dpi);
                 int dot_cy = (st_rc.top + st_rc.bottom) / 2;
-                if (r.state == TaskState::kDownloading) {
-                    HPEN hDotPen = CreatePen(PS_SOLID, 1, pal.accent_primary.ToWin32ColorRef());
-                    HBRUSH hDotBrush = CreateSolidBrush(pal.accent_primary.ToWin32ColorRef());
-                    HGDIOBJ op = SelectObject(hdc, hDotPen);
-                    HGDIOBJ ob = SelectObject(hdc, hDotBrush);
-                    Ellipse(hdc, st_rc.left, dot_cy - dot_r, st_rc.left + dot_r * 2, dot_cy + dot_r);
-                    SelectObject(hdc, ob);
-                    SelectObject(hdc, op);
-                    DeleteObject(hDotBrush);
-                    DeleteObject(hDotPen);
-                    SetTextColor(hdc, pal.accent_primary.ToWin32ColorRef());
-                } else {
-                    HPEN hRingPen = CreatePen(PS_SOLID, 1, pal.text_secondary.ToWin32ColorRef());
-                    HGDIOBJ op = SelectObject(hdc, hRingPen);
-                    HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    Ellipse(hdc, st_rc.left, dot_cy - dot_r, st_rc.left + dot_r * 2, dot_cy + dot_r);
-                    SelectObject(hdc, ob);
-                    SelectObject(hdc, op);
-                    DeleteObject(hRingPen);
-                    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-                }
+                HPEN hDotPen = CreatePen(PS_SOLID, 1, r.status_indicator_color.ToWin32ColorRef());
+                HBRUSH hDotBrush = CreateSolidBrush(r.status_indicator_color.ToWin32ColorRef());
+                HGDIOBJ op = SelectObject(hdc, hDotPen);
+                HGDIOBJ ob = SelectObject(hdc, hDotBrush);
+                Ellipse(hdc, st_rc.left, dot_cy - dot_r, st_rc.left + dot_r * 2, dot_cy + dot_r);
+                SelectObject(hdc, ob);
+                SelectObject(hdc, op);
+                DeleteObject(hDotBrush);
+                DeleteObject(hDotPen);
 
-                RECT st_txt_rc{st_rc.left + dot_r * 2 + 8, st_rc.top, st_rc.right, st_rc.bottom};
+                RECT st_txt_rc{st_rc.left + dot_r * 2 + 8, st_rc.top, st_rc.right - 4, st_rc.bottom};
+                SelectObject(hdc, hFontBody);
+                SetTextColor(hdc, r.status_indicator_color.ToWin32ColorRef());
                 std::wstring wst = Utf8ToW(r.status_text);
-                DrawTextW(hdc, wst.c_str(), -1, &st_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(hdc, wst.c_str(), -1, &st_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
 
-            if (geom.table_columns.size() > 4) {
-                RECT dl_rc = ToWinRect(geom.table_columns[4].rect);
+            // Column 3: Download Speed strictly in KB/s
+            if (geom.table_columns.size() > 3) {
+                RECT dl_rc = ToWinRect(geom.table_columns[3].rect);
                 dl_rc.top = rrc.top;
                 dl_rc.bottom = rrc.bottom;
 
-                if (r.state == TaskState::kDownloading) {
-                    RECT act_rc = ToWinRect(rl.action_icon_rect);
+                RECT act_rc = ToWinRect(rl.action_icon_rect);
+                if (r.state == TaskState::kDownloading || r.state == TaskState::kProbing) {
                     DrawRoundedBoxGdi(hdc, act_rc, 6, pal.surface_primary, pal.border_subtle, 1);
                     DrawPauseGlyphGdi(hdc, act_rc, pal.accent_primary);
 
                     RECT spd_rc{act_rc.right + 8, dl_rc.top, dl_rc.right, dl_rc.bottom};
+                    SelectObject(hdc, hFontBody);
                     SetTextColor(hdc, pal.accent_primary.ToWin32ColorRef());
                     std::wstring wspd = Utf8ToW(r.speed_text);
                     DrawTextW(hdc, wspd.c_str(), -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                } else if (r.state == TaskState::kPaused) {
-                    RECT act_rc = ToWinRect(rl.action_icon_rect);
+                } else if (r.state == TaskState::kPaused || r.state == TaskState::kQueued) {
                     DrawRoundedBoxGdi(hdc, act_rc, 6, pal.surface_primary, pal.border_subtle, 1);
                     DrawPlayGlyphGdi(hdc, act_rc, pal.text_secondary);
 
                     RECT spd_rc{act_rc.right + 8, dl_rc.top, dl_rc.right, dl_rc.bottom};
+                    SelectObject(hdc, hFontBody);
                     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-                    DrawTextW(hdc, L"0 B/s", -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    DrawTextW(hdc, L"0 KB/s", -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 } else {
+                    RECT spd_rc{act_rc.left, dl_rc.top, dl_rc.right, dl_rc.bottom};
+                    SelectObject(hdc, hFontBody);
                     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-                    DrawTextW(hdc, L"0 B/s", -1, &dl_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                    DrawTextW(hdc, L"0 KB/s", -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 }
             }
 
-            if (geom.table_columns.size() > 5) {
-                RECT ul_rc = ToWinRect(geom.table_columns[5].rect);
+            // Column 4: Upload Speed strictly in KB/s
+            if (geom.table_columns.size() > 4) {
+                RECT ul_rc = ToWinRect(geom.table_columns[4].rect);
                 ul_rc.top = rrc.top;
                 ul_rc.bottom = rrc.bottom;
+                SelectObject(hdc, hFontBody);
                 SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
                 std::wstring wul = Utf8ToW(r.upload_speed_text);
                 DrawTextW(hdc, wul.c_str(), -1, &ul_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
 
-            if (geom.table_columns.size() > 6) {
-                RECT add_time_rc = ToWinRect(geom.table_columns[6].rect);
+            // Column 5: Added Timestamp
+            if (geom.table_columns.size() > 5) {
+                RECT add_time_rc = ToWinRect(geom.table_columns[5].rect);
                 add_time_rc.top = rrc.top;
                 add_time_rc.bottom = rrc.bottom;
+                SelectObject(hdc, hFontBody);
                 SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
                 std::wstring wadd = Utf8ToW(r.added_time_text);
                 DrawTextW(hdc, wadd.c_str(), -1, &add_time_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -3078,6 +3745,34 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     EndPaint(hwnd, &ps);
 }
 
+static void InitWin32DarkMode(HWND hwnd) {
+    BOOL use_dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &use_dark, sizeof(use_dark));
+    COLORREF titlebar_col = RGB(0x16, 0x16, 0x18);
+    DwmSetWindowAttribute(hwnd, 35 /* DWMWA_CAPTION_COLOR */, &titlebar_col, sizeof(titlebar_col));
+    COLORREF titletext_col = RGB(0xFF, 0xFF, 0xFF);
+    DwmSetWindowAttribute(hwnd, 36 /* DWMWA_TEXT_COLOR */, &titletext_col, sizeof(titletext_col));
+
+    HMODULE hUxTheme = LoadLibraryW(L"uxtheme.dll");
+    if (hUxTheme) {
+        using fnSetPreferredAppMode = int(WINAPI*)(int mode);
+        auto pfnSetPreferredAppMode = reinterpret_cast<fnSetPreferredAppMode>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(135)));
+        if (pfnSetPreferredAppMode) {
+            pfnSetPreferredAppMode(2 /* ForceDark */);
+        }
+        using fnAllowDarkModeForWindow = BOOL(WINAPI*)(HWND, BOOL);
+        auto pfnAllowDarkModeForWindow = reinterpret_cast<fnAllowDarkModeForWindow>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(133)));
+        if (pfnAllowDarkModeForWindow) {
+            pfnAllowDarkModeForWindow(hwnd, TRUE);
+        }
+        using fnFlushMenuThemes = void(WINAPI*)();
+        auto pfnFlushMenuThemes = reinterpret_cast<fnFlushMenuThemes>(GetProcAddress(hUxTheme, MAKEINTRESOURCEA(136)));
+        if (pfnFlushMenuThemes) {
+            pfnFlushMenuThemes();
+        }
+    }
+}
+
 LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<Win32WindowContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_NCCREATE) {
@@ -3092,6 +3787,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     switch (msg) {
         case WM_CREATE: {
+            InitWin32DarkMode(hwnd);
             DragAcceptFiles(hwnd, TRUE);
             HICON hAppIcon = CreateFluxAppIcon();
             if (hAppIcon) {
@@ -3217,6 +3913,62 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, 0);
                 InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+
+            if (hit.type == HitTargetType::kSortDropdown) {
+                auto geom = ctx->view->ComputeLayoutGeometry(0);
+                POINT pt{geom.sort_dropdown_rect.left, geom.sort_dropdown_rect.bottom + 2};
+                ClientToScreen(hwnd, &pt);
+                HMENU hMenu = CreatePopupMenu();
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kCreatedAt && !ctx->view->IsSortAscending() ? MF_CHECKED : 0), 101, L"Newest (Default)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kCreatedAt && ctx->view->IsSortAscending() ? MF_CHECKED : 0), 102, L"Oldest");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kFileName && ctx->view->IsSortAscending() ? MF_CHECKED : 0), 103, L"Name (A-Z)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kFileName && !ctx->view->IsSortAscending() ? MF_CHECKED : 0), 104, L"Name (Z-A)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kSize && !ctx->view->IsSortAscending() ? MF_CHECKED : 0), 105, L"Size (Largest)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kSize && ctx->view->IsSortAscending() ? MF_CHECKED : 0), 106, L"Size (Smallest)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kStatus ? MF_CHECKED : 0), 107, L"Status");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kSpeed ? MF_CHECKED : 0), 108, L"Speed (Fastest)");
+                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                DestroyMenu(hMenu);
+                if (cmd == 101) ctx->view->SetSort(SortColumn::kCreatedAt, false);
+                else if (cmd == 102) ctx->view->SetSort(SortColumn::kCreatedAt, true);
+                else if (cmd == 103) ctx->view->SetSort(SortColumn::kFileName, true);
+                else if (cmd == 104) ctx->view->SetSort(SortColumn::kFileName, false);
+                else if (cmd == 105) ctx->view->SetSort(SortColumn::kSize, false);
+                else if (cmd == 106) ctx->view->SetSort(SortColumn::kSize, true);
+                else if (cmd == 107) ctx->view->SetSort(SortColumn::kStatus, true);
+                else if (cmd == 108) ctx->view->SetSort(SortColumn::kSpeed, false);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+
+            if (hit.type == HitTargetType::kFilterDropdown) {
+                auto geom = ctx->view->ComputeLayoutGeometry(0);
+                POINT pt{geom.filter_dropdown_rect.left, geom.filter_dropdown_rect.bottom + 2};
+                ClientToScreen(hwnd, &pt);
+                HMENU hMenu = CreatePopupMenu();
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSelectedCategory() == SidebarCategory::kAllDownloads ? MF_CHECKED : 0), 201, L"All files");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSelectedCategory() == SidebarCategory::kInProgress ? MF_CHECKED : 0), 202, L"In Progress");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSelectedCategory() == SidebarCategory::kCompleted ? MF_CHECKED : 0), 203, L"Completed");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSelectedCategory() == SidebarCategory::kQueued ? MF_CHECKED : 0), 204, L"Queued");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSelectedCategory() == SidebarCategory::kVideoDownloads ? MF_CHECKED : 0), 205, L"Video Downloads");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSelectedCategory() == SidebarCategory::kScheduled ? MF_CHECKED : 0), 206, L"Scheduled");
+                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                DestroyMenu(hMenu);
+                if (cmd == 201) ctx->view->SelectCategory(SidebarCategory::kAllDownloads);
+                else if (cmd == 202) ctx->view->SelectCategory(SidebarCategory::kInProgress);
+                else if (cmd == 203) ctx->view->SelectCategory(SidebarCategory::kCompleted);
+                else if (cmd == 204) ctx->view->SelectCategory(SidebarCategory::kQueued);
+                else if (cmd == 205) ctx->view->SelectCategory(SidebarCategory::kVideoDownloads);
+                else if (cmd == 206) ctx->view->SelectCategory(SidebarCategory::kScheduled);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+
+            if (hit.type == HitTargetType::kSearchBox && ctx->hSearchEdit) {
+                SetFocus(ctx->hSearchEdit);
+                SendMessageW(ctx->hSearchEdit, EM_SETSEL, 0, -1);
                 return 0;
             }
 

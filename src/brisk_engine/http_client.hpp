@@ -70,6 +70,18 @@ public:
     static Result<ParsedUrl> ParseUrl(std::string_view url);
     static std::string ResolveRedirectTarget(const ParsedUrl& base, const std::string& loc);
 
+    // Validates whether an IPv4 address (host byte order) belongs to private, loopback,
+    // link-local, carrier-grade NAT, multicast, reserved, or broadcast ranges.
+    static bool IsPrivateOrLoopbackIp(uint32_t ip);
+
+    // Validates whether an IPv6 address (16 raw network bytes) belongs to loopback,
+    // unspecified, link-local, unique-local (ULA), multicast, or IPv4-mapped private ranges.
+    static bool IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]);
+
+    // Performs DNS resolution on the hostname and returns true if any resolved address
+    // belongs to a private, loopback, or internal address space.
+    static bool CheckHostResolvesToPrivate(const std::string& host);
+
     // Executes an HTTP/HTTPS GET request with optional byte range [range_start, range_end].
     // Calls on_headers once response headers arrive; if on_headers returns false, aborts before reading body.
     // Calls on_chunk for each body chunk; if on_chunk returns false or cancel_flag becomes true, aborts immediately.

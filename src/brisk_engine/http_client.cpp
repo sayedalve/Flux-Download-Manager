@@ -46,25 +46,41 @@ std::string Trim(std::string_view sv) {
     return std::string(sv);
 }
 
-bool IsPrivateOrLoopbackIp(uint32_t ip) {
-    // 0.0.0.0/8
+} // namespace
+
+bool HttpClient::IsPrivateOrLoopbackIp(uint32_t ip) {
+    // 0.0.0.0/8 (Current network)
     if ((ip >> 24) == 0) return true;
-    // 127.0.0.0/8 (Loopback)
-    if ((ip >> 24) == 127) return true;
     // 10.0.0.0/8 (RFC 1918)
     if ((ip >> 24) == 10) return true;
-    // 172.16.0.0/12 (RFC 1918: 172.16.0.0 - 172.31.255.255)
-    if (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) return true;
-    // 192.168.0.0/16 (RFC 1918: 192.168.0.0 - 192.168.255.255)
-    if (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) return true;
+    // 100.64.0.0/10 (Carrier-Grade NAT / Shared Address Space RFC 6598)
+    if (ip >= 0x64400000 && ip <= 0x647FFFFF) return true;
+    // 127.0.0.0/8 (Loopback)
+    if ((ip >> 24) == 127) return true;
     // 169.254.0.0/16 (Link-Local APIPA)
     if (ip >= 0xA9FE0000 && ip <= 0xA9FEFFFF) return true;
+    // 172.16.0.0/12 (RFC 1918: 172.16.0.0 - 172.31.255.255)
+    if (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) return true;
+    // 192.0.0.0/24 (IETF Protocol Assignments RFC 6890)
+    if (ip >= 0xC0000000 && ip <= 0xC00000FF) return true;
+    // 192.0.2.0/24 (TEST-NET-1)
+    if (ip >= 0xC0000200 && ip <= 0xC00002FF) return true;
+    // 192.168.0.0/16 (RFC 1918: 192.168.0.0 - 192.168.255.255)
+    if (ip >= 0xC0A80000 && ip <= 0xC0A8FFFF) return true;
+    // 198.18.0.0/15 (Network Interconnect Device Benchmark RFC 2544)
+    if (ip >= 0xC6120000 && ip <= 0xC613FFFF) return true;
+    // 198.51.100.0/24 (TEST-NET-2)
+    if (ip >= 0xC6336400 && ip <= 0xC63364FF) return true;
+    // 203.0.113.0/24 (TEST-NET-3)
+    if (ip >= 0xCB007100 && ip <= 0xCB0071FF) return true;
     // 224.0.0.0/4 (Multicast / Reserved)
     if ((ip >> 24) >= 224) return true;
+    // 255.255.255.255 (Limited Broadcast)
+    if (ip == 0xFFFFFFFF) return true;
     return false;
 }
 
-bool IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]) {
+bool HttpClient::IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]) {
     // ::1 (Loopback)
     bool is_loopback = true;
     for (int i = 0; i < 15; ++i) {
@@ -82,8 +98,27 @@ bool IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]) {
     // fe80::/10 (Link-Local)
     if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;
 
-    // fc00::/7 (Unique Local Address ULA)
+    // fc00::/7 (Unique Local Address ULA: fc00:: to fdff::)
     if ((bytes[0] & 0xFE) == 0xFC) return true;
+
+    // ff00::/8 (IPv6 Multicast)
+    if (bytes[0] == 0xFF) return true;
+
+    // 2001:db8::/32 (Documentation)
+    if (bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8) return true;
+
+    // 64:ff9b::/96 (IPv4/IPv6 translation)
+    if (bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xFF && bytes[3] == 0x9B) {
+        bool mid_zero = true;
+        for (int i = 4; i < 12; ++i) if (bytes[i] != 0) mid_zero = false;
+        if (mid_zero) {
+            uint32_t ip4 = (static_cast<uint32_t>(bytes[12]) << 24) |
+                           (static_cast<uint32_t>(bytes[13]) << 16) |
+                           (static_cast<uint32_t>(bytes[14]) << 8) |
+                           static_cast<uint32_t>(bytes[15]);
+            return HttpClient::IsPrivateOrLoopbackIp(ip4);
+        }
+    }
 
     // IPv4-mapped IPv6 ::ffff:0:0/96
     bool is_ipv4_mapped = true;
@@ -95,13 +130,13 @@ bool IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]) {
                        (static_cast<uint32_t>(bytes[13]) << 16) |
                        (static_cast<uint32_t>(bytes[14]) << 8) |
                        static_cast<uint32_t>(bytes[15]);
-        return IsPrivateOrLoopbackIp(ip4);
+        return HttpClient::IsPrivateOrLoopbackIp(ip4);
     }
 
     return false;
 }
 
-bool CheckHostResolvesToPrivate(const std::string& host) {
+bool HttpClient::CheckHostResolvesToPrivate(const std::string& host) {
 #ifdef _WIN32
     static bool wsa_init = false;
     if (!wsa_init) {
@@ -110,6 +145,9 @@ bool CheckHostResolvesToPrivate(const std::string& host) {
         wsa_init = true;
     }
 #endif
+    std::string h = ToLower(host);
+    if (h == "localhost" || h == "127.0.0.1" || h == "::1") return true;
+
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -123,14 +161,14 @@ bool CheckHostResolvesToPrivate(const std::string& host) {
         if (p->ai_family == AF_INET) {
             auto* sin = reinterpret_cast<struct sockaddr_in*>(p->ai_addr);
             uint32_t ip = ntohl(sin->sin_addr.s_addr);
-            if (IsPrivateOrLoopbackIp(ip)) {
+            if (HttpClient::IsPrivateOrLoopbackIp(ip)) {
                 is_private = true;
                 break;
             }
         } else if (p->ai_family == AF_INET6) {
             auto* sin6 = reinterpret_cast<struct sockaddr_in6*>(p->ai_addr);
             const uint8_t* b = reinterpret_cast<const uint8_t*>(&sin6->sin6_addr);
-            if (IsPrivateOrLoopbackIpv6(b)) {
+            if (HttpClient::IsPrivateOrLoopbackIpv6(b)) {
                 is_private = true;
                 break;
             }
@@ -139,6 +177,8 @@ bool CheckHostResolvesToPrivate(const std::string& host) {
     freeaddrinfo(res);
     return is_private;
 }
+
+namespace {
 
 bool IsLoopbackHost(std::string_view host) {
     std::string h = ToLower(host);
@@ -532,11 +572,12 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             return Result<HttpResponseMeta>::Err(parsed_res.error->code, parsed_res.error->message);
         }
         ParsedUrl pu = *parsed_res.value;
+        bool host_is_private = pu.is_loopback_or_private || HttpClient::CheckHostResolvesToPrivate(pu.host);
         if (redirect_hop == 0) {
             initial_pu = pu;
-            started_on_public_host = !pu.is_loopback_or_private;
+            started_on_public_host = !host_is_private;
         } else {
-            if (started_on_public_host && pu.is_loopback_or_private && !allow_loopback_redirect) {
+            if (started_on_public_host && host_is_private && !allow_loopback_redirect) {
                 return Result<HttpResponseMeta>::Err(
                     "ERR_NET_UNSAFE_REDIRECT",
                     "Blocked unsafe redirect from public host to loopback/private address: " + current_url);

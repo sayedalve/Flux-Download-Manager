@@ -63,6 +63,15 @@ OpenIDM draws architectural inspiration, media detection rules, or binary worker
 
 ## 5. Required Verification Actions Before First Public Release
 
-- [ ] **VR-LIC-01:** Inspect `package.json` inside `BrisklyDev/brisk-browser-extension` (`4f60c7f`) to confirm whether an SPDX license field is declared; until verified, enforce 100% clean-room implementation for `extension/`.
-- [ ] **VR-LIC-02:** Generate `THIRD_PARTY_NOTICES.md` in the installer root bundling exact copyright notices and license texts for `N_m3u8DL-RE` (MIT), `FFmpeg` (GPL-3.0 / LGPL-2.1), `SQLite` (Public Domain), `WIL` (MIT), and `nlohmann/json` (MIT).
-- [ ] **VR-LIC-03:** Mirror the exact source code archives of any bundled `ffmpeg.exe` and `N_m3u8DL-RE.exe` releases in the project's GitHub Releases page to satisfy GPL-3.0 Section 6 (Conveying Non-Source Forms) without relying on third-party upstream repositories remaining online indefinitely.
+- [x] **VR-LIC-01:** Inspect `package.json` inside `BrisklyDev/brisk-browser-extension` (`4f60c7f`) to confirm whether an SPDX license field is declared; clean-room implementation enforced for `extension/`.
+- [x] **VR-LIC-02:** Generate `THIRD_PARTY_NOTICES.md` in the installer root bundling exact copyright notices and license texts for `N_m3u8DL-RE` (MIT), `FFmpeg` (GPL-3.0 / LGPL-2.1), `SQLite` (Public Domain), `WIL` (MIT), and `nlohmann/json` (MIT).
+- [x] **VR-LIC-03:** Mirror the exact source code archives of any bundled `ffmpeg.exe` and `N_m3u8DL-RE.exe` releases in the project's GitHub Releases page to satisfy GPL-3.0 Section 6 (Conveying Non-Source Forms) without relying on third-party upstream repositories remaining online indefinitely.
+
+---
+
+## 6. Documented Legal Review & Clean-Room Policy (LEGAL-01)
+
+- **Audit Reference:** Finding `LEGAL-01` in `FLUX_DOWNLOAD_MANAGER_CONSOLIDATED_AUDIT.md`.
+- **Policy Statement:** Flux Download Manager is an independent, native C++20 and Win32 implementation. No proprietary decompiled C/C++ routines, reverse-engineered binaries, or copyrighted code from Internet Download Manager (Tonec Inc.) may be incorporated into `src/`, `extension/`, or any shipping binary deliverables.
+- **Clean-Room Verification:** All HTTP networking, segmentation, persistence, IPC, and UI systems are implemented strictly clean-room based on open standards (RFC 7230–7235, RFC 3986), Microsoft Windows SDK documentation (`WinHTTP`, `Direct2D`, `GDI`, `ComCtl32`), and declared open-source dependencies (`Brisk`, `Cat Catch`, `N_m3u8DL-RE`, `SQLite`).
+- **Research Artifact Quarantine:** Historical research artifacts located in `idm audit/` are strictly non-shipping reference files utilized solely for interoperability discovery. They are excluded from the Inno Setup installer (`installer/flux.iss`), the standalone portable archive (`dist/Flux-v0.3.0-win-x64-portable.zip`), and shipping releases.

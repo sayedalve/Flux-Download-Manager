@@ -278,13 +278,38 @@ void DownloadController::ScheduleLoop() {
             }
         }
 
+        // 1. Check for scheduled tasks that reached their local schedule time
+        auto now_time_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::tm local_tm{};
+#ifdef _WIN32
+        localtime_s(&local_tm, &now_time_t);
+#else
+        localtime_r(&now_time_t, &local_tm);
+#endif
+        char time_str[16] = {0};
+        std::strftime(time_str, sizeof(time_str), "%H:%M", &local_tm);
+        std::string cur_hh_mm(time_str);
+
+        for (auto& [id, t] : m_tasks) {
+            if (t.scheduled && t.state == TaskState::kPaused && !t.schedule_time_local.empty()) {
+                if (cur_hh_mm >= t.schedule_time_local) {
+                    t.scheduled = false;
+                    t.state = TaskState::kQueued;
+                    t.status_detail = "Queued (Schedule Started)";
+                    m_store.UpsertTask(t);
+                }
+            }
+        }
+
         uint32_t max_conc = m_max_concurrent.load();
         while (m_active.size() < max_conc) {
             std::string next_id;
+            int32_t min_order = INT32_MAX;
             int64_t oldest_ts = INT64_MAX;
             for (const auto& [id, t] : m_tasks) {
                 if (t.state == TaskState::kQueued && m_active.find(id) == m_active.end()) {
-                    if (t.created_at_ms < oldest_ts) {
+                    if (t.queue_order < min_order || (t.queue_order == min_order && t.created_at_ms < oldest_ts)) {
+                        min_order = t.queue_order;
                         oldest_ts = t.created_at_ms;
                         next_id = id;
                     }

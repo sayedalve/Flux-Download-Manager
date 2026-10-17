@@ -570,7 +570,11 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         if (!hSession) {
             return Result<HttpResponseMeta>::Err("ERR_NET_INIT", "WinHttpOpen failed", true);
         }
-        WinHttpSetTimeouts(hSession, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
+        int resolve_timeout = std::max(timeout_ms, 15000);
+        int connect_timeout = std::max(timeout_ms, 15000);
+        int send_timeout = std::max(timeout_ms, 10000);
+        int recv_timeout = timeout_ms;
+        WinHttpSetTimeouts(hSession, resolve_timeout, connect_timeout, send_timeout, recv_timeout);
 
         std::wstring whost = Utf8ToWide(pu.host);
         HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), pu.port, 0);

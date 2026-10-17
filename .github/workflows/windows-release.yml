@@ -14,7 +14,7 @@ permissions:
 jobs:
   build-and-test:
     name: Build & Verify Windows x64
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Checkout Code

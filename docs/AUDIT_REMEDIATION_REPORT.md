@@ -180,5 +180,6 @@ All changes have been implemented in production C++20 code, accompanied by unit 
 ## 6. Build & Deployment Verification
 
 - **MSVC Build:** Native x64 Release builds of `flux.exe`, `flux-nmh.exe`, and `flux_unit_tests.exe` completed with 0 errors.
+- **CI Workflow (BUILD-01):** Pinned `runs-on: windows-2022` in `.github/workflows/windows-release.yml` guaranteeing Visual Studio 17 2022 availability on GitHub Actions runners.
 - **Git State:** All remediation commits pushed to remote `origin/fix/audit-remediation` and fast-forward merged to `origin/main`.
 - **UI Design System:** Dark UI matte charcoal theme preserved with zero regressions.

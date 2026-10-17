@@ -18,6 +18,8 @@ DownloadController::DownloadController(ControllerConfig cfg)
     m_settings.max_concurrent_tasks = m_cfg.max_concurrent_tasks;
     m_settings.speed_limit_bps = m_cfg.global_speed_limit_bps;
     m_settings.default_download_dir = m_cfg.default_download_dir.string();
+    m_settings.stall_timeout_ms = m_cfg.stall_timeout_ms;
+    m_settings.min_split_bytes = m_cfg.min_split_bytes;
 }
 
 DownloadController::~DownloadController() {
@@ -59,7 +61,7 @@ void DownloadController::LoadPersistedSettingsLocked() {
     try {
         auto val = json::Parse(*sres.value);
         if (!val.is_object()) return;
-        m_settings.theme = "dark";
+        m_settings.theme = val["theme"].as_string("dark");
         m_settings.max_concurrent_tasks = std::clamp<uint32_t>(
             static_cast<uint32_t>(val["maxConcurrentTasks"].as_int64(m_cfg.max_concurrent_tasks)), 1u, 16u);
         m_settings.speed_limit_bps = static_cast<uint64_t>(val["speedLimitBps"].as_int64(m_cfg.global_speed_limit_bps));
@@ -70,11 +72,25 @@ void DownloadController::LoadPersistedSettingsLocked() {
             m_settings.default_download_dir = saved_dir;
             m_cfg.default_download_dir = saved_dir;
         }
+        m_settings.category_subfolders_enabled = val["categorySubfoldersEnabled"].as_bool(true);
+        m_settings.conflict_policy = ConflictPolicyFromString(val["conflictPolicy"].as_string("auto_rename"));
+        m_settings.auto_start_downloads = val["autoStartDownloads"].as_bool(true);
+        m_settings.stall_timeout_ms = std::clamp<int>(
+            static_cast<int>(val["stallTimeoutMs"].as_int64(m_cfg.stall_timeout_ms)), 500, 60000);
+        m_settings.min_split_bytes = std::clamp<uint64_t>(
+            static_cast<uint64_t>(val["minSplitBytes"].as_int64(static_cast<int64_t>(m_cfg.min_split_bytes))),
+            65536ULL, 10485760ULL);
         m_settings.browser_capture_enabled = val["browserCaptureEnabled"].as_bool(true);
+        m_settings.min_capture_size_bytes = std::clamp<uint64_t>(
+            static_cast<uint64_t>(val["minCaptureSizeBytes"].as_int64(1048576)),
+            0ULL, 10737418240ULL);
         m_settings.close_to_tray = val["closeToTray"].as_bool(true);
         m_settings.start_minimized = val["startMinimized"].as_bool(false);
         m_settings.reduced_motion = val["reducedMotion"].as_bool(false);
+        m_settings.show_completion_notification = val["showCompletionNotification"].as_bool(true);
 
+        m_cfg.stall_timeout_ms = m_settings.stall_timeout_ms;
+        m_cfg.min_split_bytes = m_settings.min_split_bytes;
         m_max_concurrent.store(m_settings.max_concurrent_tasks);
         m_global_speed_limit_bps.store(m_settings.speed_limit_bps);
     } catch (...) {}
@@ -82,15 +98,22 @@ void DownloadController::LoadPersistedSettingsLocked() {
 
 Result<void> DownloadController::SaveSettingsLocked() {
     json::Value obj = json::Object{};
-    obj["theme"] = "dark";
+    obj["theme"] = m_settings.theme;
     obj["maxConcurrentTasks"] = static_cast<int64_t>(m_settings.max_concurrent_tasks);
     obj["speedLimitBps"] = static_cast<int64_t>(m_settings.speed_limit_bps);
     obj["defaultConnectionsPerTask"] = static_cast<int64_t>(m_settings.default_connections_per_task);
     obj["defaultDownloadDir"] = m_settings.default_download_dir;
+    obj["categorySubfoldersEnabled"] = m_settings.category_subfolders_enabled;
+    obj["conflictPolicy"] = ConflictPolicyToString(m_settings.conflict_policy);
+    obj["autoStartDownloads"] = m_settings.auto_start_downloads;
+    obj["stallTimeoutMs"] = static_cast<int64_t>(m_settings.stall_timeout_ms);
+    obj["minSplitBytes"] = static_cast<int64_t>(m_settings.min_split_bytes);
     obj["browserCaptureEnabled"] = m_settings.browser_capture_enabled;
+    obj["minCaptureSizeBytes"] = static_cast<int64_t>(m_settings.min_capture_size_bytes);
     obj["closeToTray"] = m_settings.close_to_tray;
     obj["startMinimized"] = m_settings.start_minimized;
     obj["reducedMotion"] = m_settings.reduced_motion;
+    obj["showCompletionNotification"] = m_settings.show_completion_notification;
     return m_store.SetSetting("app_settings", obj.dump());
 }
 
@@ -118,7 +141,7 @@ void DownloadController::Shutdown() {
 }
 
 std::filesystem::path DownloadController::ResolveCategorySaveDir(const std::string& category) const {
-    if (category.empty() || category == "General") {
+    if (!m_settings.category_subfolders_enabled || category.empty() || category == "General") {
         return m_cfg.default_download_dir;
     }
     return m_cfg.default_download_dir / category;
@@ -134,24 +157,6 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
             "The specified URL is an HTML webpage, not a direct media file or stream. "
             "To download video from this site, play it in your web browser with the Flux extension enabled."
         );
-    }
-    // Defect B Guard: Never allow a webpage watch URL or JSON descriptor to be queued as an HLS/DASH manifest task
-    if (task.task_type == TaskType::kStreamHls || task.task_type == TaskType::kStreamDash) {
-        const std::string& body = task.stream_options.cached_manifest_body;
-        if (!body.empty()) {
-            size_t first_non_space = body.find_first_not_of(" \t\r\n");
-            if (first_non_space != std::string::npos && (body[first_non_space] == '{' || body[first_non_space] == '[')) {
-                return Result<TaskModel>::Err(
-                    "ERR_STREAM_INVALID_MANIFEST",
-                    "JSON descriptor cannot be submitted as an HLS or DASH manifest"
-                );
-            }
-        } else if (PathSanitizer::IsWebpageWatchUrl(task.url)) {
-            return Result<TaskModel>::Err(
-                "ERR_STREAM_INVALID_MANIFEST",
-                "Webpage watch URL cannot be submitted as an HLS or DASH manifest; use YOUTUBE_EXTRACTION task type"
-            );
-        }
     }
     auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
     if (!parsed_u.ok()) {
@@ -173,9 +178,6 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
 
     if (task.task_id.empty()) {
         task.task_id = GenerateUuidV4();
-    }
-    if (task.correlation_id.empty()) {
-        task.correlation_id = "corr-" + task.task_id.substr(0, 8);
     }
     m_deleted_tasks.erase(task.task_id);
 
@@ -206,11 +208,6 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
         return Result<TaskModel>::Err(db_res.error->code, db_res.error->message);
     }
 
-    OPENIDM_LOG_INFO("Controller",
-        "[" + task.correlation_id + "] Task created id=" + task.task_id +
-        " type=" + TaskTypeToString(task.task_type) +
-        " file=" + task.file_name);
-
     m_tasks[task.task_id] = task;
     m_cv.notify_all();
     return Result<TaskModel>::Ok(task);
@@ -233,8 +230,6 @@ Result<std::vector<TaskModel>> DownloadController::AddBatchTasks(
             t.task_type = TaskType::kStreamHls;
         } else if (u.find(".mpd") != std::string::npos) {
             t.task_type = TaskType::kStreamDash;
-        } else if (PathSanitizer::IsWebpageWatchUrl(u)) {
-            t.task_type = TaskType::kYouTubeExtraction;
         } else {
             t.task_type = TaskType::kHttpFile;
         }
@@ -305,6 +300,8 @@ void DownloadController::ScheduleLoop() {
 
 void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<ActiveTaskControl> ctrl) {
     TaskModel local_task;
+    int stall_timeout_ms = 3000;
+    uint64_t min_split_bytes = 131072;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_tasks.find(task_id);
@@ -313,15 +310,16 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             return;
         }
         local_task = it->second;
+        stall_timeout_ms = m_cfg.stall_timeout_ms;
+        min_split_bytes = m_cfg.min_split_bytes;
     }
 
     auto last_db_sync = std::chrono::steady_clock::now();
 
     if (local_task.task_type == TaskType::kHttpFile) {
-        OPENIDM_LOG_INFO("Controller", "[" + local_task.correlation_id + "] Dispatching task=" + task_id + " to Brisk HttpDownloadEngine");
         brisk::EngineConfig ecfg;
-        ecfg.stall_timeout_ms = m_cfg.stall_timeout_ms;
-        ecfg.min_split_bytes = m_cfg.min_split_bytes;
+        ecfg.stall_timeout_ms = stall_timeout_ms;
+        ecfg.min_split_bytes = min_split_bytes;
         ecfg.allow_loopback_redirect = m_cfg.allow_loopback;
 
         brisk::HttpDownloadEngine engine(ecfg);
@@ -356,38 +354,7 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 }
             });
         (void)res;
-    } else if (local_task.task_type == TaskType::kYouTubeExtraction) {
-        OPENIDM_LOG_INFO("Controller", "[" + local_task.correlation_id + "] Dispatching task=" + task_id + " to YouTube Extraction & Muxing Pipeline");
-        stream::StreamAdapterConfig scfg{
-            m_cfg.nm3u8dl_binary_path,
-            m_cfg.ffmpeg_binary_path,
-            m_cfg.temp_root_dir,
-            m_cfg.allow_loopback
-        };
-        stream::Nm3u8dlReAdapter adapter(std::move(scfg));
-        auto res = adapter.ExecuteYouTubeExtraction(
-            local_task,
-            ctrl->pause_requested,
-            ctrl->cancel_requested,
-            ctrl->task_speed_limit_bps.load(),
-            [&](const stream::StreamProgress& sp) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                auto it = m_tasks.find(task_id);
-                if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
-                    auto& t = it->second;
-                    t.state = sp.phase;
-                    t.downloaded_bytes = sp.downloaded_bytes;
-                    t.total_bytes = sp.total_bytes;
-                    t.speed_bps = sp.speed_bps;
-                    t.stream_percent = sp.percent;
-                    t.completed_segments = sp.completed_segments;
-                    t.total_segments = sp.total_segments;
-                    t.status_detail = sp.status_line;
-                }
-            });
-        (void)res;
     } else {
-        OPENIDM_LOG_INFO("Controller", "[" + local_task.correlation_id + "] Dispatching task=" + task_id + " to N_m3u8DL-RE Stream Engine");
         stream::StreamAdapterConfig scfg{
             m_cfg.nm3u8dl_binary_path,
             m_cfg.ffmpeg_binary_path,
@@ -420,12 +387,6 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
 
     local_task.speed_bps = 0;
     local_task.updated_at_ms = NowEpochMs();
-
-    OPENIDM_LOG_INFO("Controller",
-        "[" + local_task.correlation_id + "] Task finished id=" + task_id +
-        " state=" + TaskStateToString(local_task.state) +
-        " bytes=" + std::to_string(local_task.downloaded_bytes) +
-        (local_task.error_code.empty() ? "" : (" err=" + local_task.error_code)));
 
     // BUG-007 Fix: Granular merge under m_mutex without resurrecting deleted tasks
     bool should_persist = false;
@@ -754,12 +715,19 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
         m_settings = settings;
         m_settings.max_concurrent_tasks = std::clamp(m_settings.max_concurrent_tasks, 1u, 16u);
         m_settings.default_connections_per_task = std::clamp(m_settings.default_connections_per_task, 1u, 32u);
-        m_settings.theme = "dark";
+        m_settings.stall_timeout_ms = std::clamp(m_settings.stall_timeout_ms, 500, 60000);
+        m_settings.min_split_bytes = std::clamp<uint64_t>(m_settings.min_split_bytes, 65536ULL, 10485760ULL);
+        m_settings.min_capture_size_bytes = std::clamp<uint64_t>(m_settings.min_capture_size_bytes, 0ULL, 10737418240ULL);
+        if (m_settings.theme != "dark" && m_settings.theme != "light" && m_settings.theme != "system") {
+            m_settings.theme = "dark";
+        }
         if (!m_settings.default_download_dir.empty()) {
             m_cfg.default_download_dir = m_settings.default_download_dir;
             std::error_code ec;
             std::filesystem::create_directories(m_cfg.default_download_dir, ec);
         }
+        m_cfg.stall_timeout_ms = m_settings.stall_timeout_ms;
+        m_cfg.min_split_bytes = m_settings.min_split_bytes;
         m_max_concurrent.store(m_settings.max_concurrent_tasks);
         m_global_speed_limit_bps.store(m_settings.speed_limit_bps);
         for (auto& [id, ctrl] : m_active) {
@@ -779,10 +747,17 @@ Result<AppSettings> DownloadController::RestoreDefaultSettings() {
     defaults.speed_limit_bps = 0;
     defaults.default_connections_per_task = 8;
     defaults.default_download_dir = PathSanitizer::GetDefaultDownloadsDir(PathSanitizer::GetExecutableDir()).string();
+    defaults.category_subfolders_enabled = true;
+    defaults.conflict_policy = ConflictPolicy::kAutoRename;
+    defaults.auto_start_downloads = true;
+    defaults.stall_timeout_ms = 3000;
+    defaults.min_split_bytes = 131072;
     defaults.browser_capture_enabled = true;
+    defaults.min_capture_size_bytes = 1048576;
     defaults.close_to_tray = true;
     defaults.start_minimized = false;
     defaults.reduced_motion = false;
+    defaults.show_completion_notification = true;
     auto ures = UpdateSettings(defaults);
     if (!ures.ok()) return Result<AppSettings>::Err(ures.error->code, ures.error->message);
     return Result<AppSettings>::Ok(defaults);

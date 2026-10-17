@@ -173,6 +173,10 @@ Copy-Item -Force $FfExe (Join-Path $RootTools "ffmpeg.exe")
 # 6. Stage Portable Distribution at dist/Flux.exe (No Installer / No MSI)
 # -----------------------------------------------------------------------------
 Write-Host "`n==> [6/7] Staging Portable Distribution at dist/Flux.exe..."
+Get-Process | Where-Object {
+    try { $_.Path -and $_.Path.StartsWith($DistDir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
+} | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 200
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools\win-x64") | Out-Null
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "Flux.exe")
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe")

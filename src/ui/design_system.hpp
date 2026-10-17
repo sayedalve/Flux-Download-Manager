@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Flux Download Manager — Minimal Cosmic Dark UI Design System, Star-Field Engine,
-// Typography Ramp, High-DPI Layout Metrics & Accessible Geometric Glyphs.
+// Flux Download Manager — Minimal Cosmic Dark UI Design System, Starfield Engine & High-DPI Metrics
+// Defines the Cosmic Dark color palette, 4px spacing grid, Segoe UI typography ramp,
+// High-DPI scaling math, minimum window constraints, geometric vector icons, and
+// a zero-allocation 3-layer Cosmic Starfield with reduced-motion and hidden-window suspension.
 #pragma once
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -37,13 +38,11 @@ enum class IconId {
     kCheckCircle,
     kWarningTriangle,
     kErrorCircle,
-    kBrowserConnected
-};
-
-enum class CosmicRenderMode {
-    kAnimatedDrift,
-    kStaticFallback,
-    kSuspendedHidden
+    kBrowserConnected,
+    kCosmicStar,
+    kSpeedLimit,
+    kFolderRule,
+    kDiagnostics
 };
 
 struct RectI {
@@ -69,82 +68,52 @@ struct ColorRgba {
         return static_cast<uint32_t>(r) | (static_cast<uint32_t>(g) << 8) | (static_cast<uint32_t>(b) << 16);
     }
 
+    constexpr ColorRgba BlendOver(const ColorRgba& bg, uint8_t override_alpha = 255) const {
+        uint32_t eff_a = (static_cast<uint32_t>(a) * static_cast<uint32_t>(override_alpha)) / 255u;
+        uint32_t inv_a = 255u - eff_a;
+        return ColorRgba{
+            static_cast<uint8_t>((r * eff_a + bg.r * inv_a) / 255u),
+            static_cast<uint8_t>((g * eff_a + bg.g * inv_a) / 255u),
+            static_cast<uint8_t>((b * eff_a + bg.b * inv_a) / 255u),
+            255
+        };
+    }
+
     std::string ToCssHex() const {
         char buf[8];
         std::snprintf(buf, sizeof(buf), "#%02X%02X%02X", r, g, b);
         return std::string(buf);
     }
-
-    static constexpr ColorRgba BlendOver(ColorRgba bg, ColorRgba fg, uint8_t alpha) {
-        uint32_t a = alpha;
-        uint32_t inv_a = 255u - a;
-        return ColorRgba{
-            static_cast<uint8_t>((bg.r * inv_a + fg.r * a) / 255u),
-            static_cast<uint8_t>((bg.g * inv_a + fg.g * a) / 255u),
-            static_cast<uint8_t>((bg.b * inv_a + fg.b * a) / 255u),
-            255
-        };
-    }
 };
 
 struct ThemePalette {
     ThemeMode mode{ThemeMode::kDark};
-    ColorRgba cosmic_void;         // Deepest space obsidian backdrop (#060913)
-    ColorRgba app_background;      // Main window deep space charcoal canvas (#090D16)
-    ColorRgba cosmic_atmosphere;   // Subtle navy-indigo atmospheric band (#0C1322)
-    ColorRgba surface_primary;     // Sidebar, header, details pane (#0F172A)
-    ColorRgba surface_elevated;    // Elevated controls, badges, table headers (#172033)
-    ColorRgba surface_hover;       // Interactive row/button hover state (#1E293B)
-    ColorRgba surface_selected;    // Selected row/category state (#172554)
-    ColorRgba border_subtle;       // 1px restrained structural hairlines (#1E293B)
-    ColorRgba border_strong;       // Control & input border (#26334D)
-    ColorRgba border_focus;        // 2px keyboard focus ring (#38BDF8)
-    ColorRgba text_primary;        // High-contrast starlight off-white (#F8FAFC)
-    ColorRgba text_secondary;      // Atmospheric slate metadata & headers (#94A3B8)
-    ColorRgba text_muted;          // Disabled controls & subtle hints (#64748B)
-    ColorRgba accent_primary;      // Restrained cosmic blue primary action (#2563EB)
-    ColorRgba accent_hover;        // Luminous blue hover state (#3B82F6)
-    ColorRgba accent_cyan;         // Celestial cyan highlight (#38BDF8)
-    ColorRgba accent_indigo;       // Atmospheric indigo accent (#6366F1)
-    ColorRgba badge_stream;        // HLS/DASH/YouTube stream indicator (#8B5CF6)
-    ColorRgba badge_file;          // Direct segmented HTTP file indicator (#2563EB)
-    ColorRgba status_success;      // Completed emerald (#10B981)
-    ColorRgba status_warning;      // Paused / Retrying amber (#F59E0B)
-    ColorRgba status_danger;       // Failed / Error crimson (#EF4444)
-    ColorRgba status_queued;       // Queued / Scheduled indigo (#6366F1)
-    ColorRgba progress_track;      // Unfilled progress bar track (#131C2E)
-    ColorRgba star_bright;         // Delicate bright star point (#E2E8F0)
-    ColorRgba star_cool;           // Cool cyan-blue star point (#93C5FD)
-    ColorRgba star_violet;         // Understated violet star point (#C4B5FD)
-    ColorRgba star_dim;            // Distant faint star dust (#475569)
-};
-
-struct CosmicLayerTransform {
-    uint8_t layer_index{0};
-    int period_ms{180000};
-    double offset_x_px{0.0};
-    double offset_y_px{0.0};
-    uint8_t opacity_scale{255};
-};
-
-struct CosmicStarPoint {
-    int x_px{0};
-    int y_px{0};
-    int size_px{1};
-    uint8_t opacity{100};
-    uint8_t layer{0};
-    bool has_celestial_cross{false};
-    ColorRgba color;
-};
-
-struct CosmicBackgroundState {
-    CosmicRenderMode mode{CosmicRenderMode::kAnimatedDrift};
-    bool animation_active{true};
-    bool reduced_motion{false};
-    bool window_hidden_or_minimized{false};
-    int64_t sample_time_ms{0};
-    std::vector<CosmicLayerTransform> layers;
-    std::vector<CosmicStarPoint> stars;
+    ColorRgba app_background;      // Main window canvas (#0F172A Deep Space Slate)
+    ColorRgba cosmic_void;         // Deep space charcoal void (#070B14)
+    ColorRgba cosmic_nebula;       // Subtle atmospheric navy tone (#111A2E)
+    ColorRgba cosmic_indigo;       // Deep indigo atmospheric accent (#1E1B4B)
+    ColorRgba surface_primary;     // Sidebar, toolbar, details pane (#1E293B)
+    ColorRgba surface_elevated;    // Dialogs, dropdowns, cards (#334155)
+    ColorRgba surface_hover;       // Row/button hover state (#475569)
+    ColorRgba surface_selected;    // Selected row/category state (#1E3A8A)
+    ColorRgba border_subtle;       // 1px hairlines and dividers (#334155)
+    ColorRgba border_focus;        // 2px keyboard focus ring (#38BDF8 / #60A5FA)
+    ColorRgba text_primary;        // High-contrast body & filenames (#F8FAFC)
+    ColorRgba text_secondary;      // Metadata, column headers, sizes (#94A3B8)
+    ColorRgba text_muted;          // Disabled controls & placeholders (#64748B)
+    ColorRgba accent_primary;      // Restrained blue primary action (#2563EB)
+    ColorRgba accent_hover;        // Blue hover state (#3B82F6)
+    ColorRgba accent_cyan;         // Restrained cosmic cyan accent (#06B6D4)
+    ColorRgba accent_violet;       // Celestial violet accent (#8B5CF6)
+    ColorRgba badge_stream;        // HLS/DASH stream indicator (#8B5CF6)
+    ColorRgba badge_file;          // Ordinary HTTP file indicator (#2563EB)
+    ColorRgba status_success;      // Completed (#22C55E)
+    ColorRgba status_warning;      // Paused / Retrying (#F59E0B)
+    ColorRgba status_danger;       // Failed / Error (#EF4444)
+    ColorRgba progress_track;      // Unfilled progress bar background (#1E293B)
+    ColorRgba star_bright;         // Foreground celestial star point (#E2E8F0)
+    ColorRgba star_mid;            // Mid-field star point (#94A3B8)
+    ColorRgba star_dim;            // Deep dust star point (#38BDF8)
 };
 
 struct LayoutMetrics {
@@ -174,10 +143,6 @@ struct LayoutMetrics {
     int corner_radius{6};
     int focus_ring_width{2};
 
-    // Settings center dimensions
-    int settings_sidebar_width{210};
-    int settings_row_height{48};
-
     // Typography ramp (in pixels at current DPI)
     int font_caption_px{11};
     int font_body_px{13};
@@ -186,18 +151,176 @@ struct LayoutMetrics {
     int font_title_px{18};
 };
 
+// Pre-rendered deterministic star node (zero dynamic allocations or per-frame RNG)
+struct StarNode {
+    uint16_t norm_x{0};      // 0..999 normalized X coordinate
+    uint16_t norm_y{0};      // 0..999 normalized Y coordinate
+    uint8_t layer{0};        // 0 = deep dust (120s), 1 = mid-field (90s), 2 = foreground (60s)
+    uint8_t base_size_px{1}; // 1 or 2 base pixel diameter
+    uint8_t base_alpha{90};  // 40..195 restrained opacity so text contrast is never compromised
+    uint8_t tint_index{0};   // 0 = starlight white, 1 = ice blue, 2 = cosmic cyan, 3 = soft violet
+    uint16_t phase_ms{0};    // 0..59999 phase offset for subtle opacity modulation
+};
+
+struct StarRenderInstance {
+    int x{0};
+    int y{0};
+    int size_px{1};
+    uint8_t alpha{90};
+    uint8_t layer{0};
+    ColorRgba blended_color;
+};
+
+class CosmicStarfield {
+public:
+    static constexpr size_t kStarCount = 48;
+    static constexpr uint64_t kLayerPeriodMs[3] = {120000ULL, 90000ULL, 60000ULL};
+
+    CosmicStarfield() {
+        InitializeDeterministicStars();
+    }
+
+    void SetReducedMotion(bool reduced_motion) {
+        m_reduced_motion = reduced_motion;
+    }
+    bool IsReducedMotion() const { return m_reduced_motion; }
+
+    void SetWindowState(bool visible, bool minimized) {
+        m_window_visible = visible;
+        m_window_minimized = minimized;
+    }
+    bool IsWindowVisible() const { return m_window_visible; }
+    bool IsWindowMinimized() const { return m_window_minimized; }
+
+    // Decorative drift is active ONLY when window is visible, not minimized, and reduced-motion is off
+    bool IsAnimationActive() const {
+        return m_window_visible && !m_window_minimized && !m_reduced_motion;
+    }
+
+    // Clean static fallback retains the exact same starfield layout at rest (phase = 0)
+    bool IsStaticFallbackActive() const {
+        return !IsAnimationActive();
+    }
+
+    uint64_t GetElapsedMs() const { return m_elapsed_ms; }
+
+    void AdvanceTime(uint64_t delta_ms) {
+        if (!IsAnimationActive()) {
+            return;
+        }
+        m_elapsed_ms = (m_elapsed_ms + delta_ms) % 360000ULL;
+    }
+
+    std::pair<int, int> ComputeLayerDriftOffset(uint8_t layer, int width, int height) const {
+        if (IsStaticFallbackActive() || width <= 0 || height <= 0) {
+            return {0, 0};
+        }
+        uint8_t safe_layer = std::min<uint8_t>(layer, 2);
+        uint64_t period = kLayerPeriodMs[safe_layer];
+        uint64_t phase = m_elapsed_ms % period;
+        // Gentle horizontal and slight vertical drift across the long 60s-120s period
+        int dx = static_cast<int>((phase * static_cast<uint64_t>(width)) / period);
+        int dy = static_cast<int>((phase * static_cast<uint64_t>(height)) / (period * 4ULL));
+        return {dx, dy};
+    }
+
+    std::vector<StarRenderInstance> BuildRenderStars(
+        const RectI& bounds,
+        uint32_t dpi,
+        const ThemePalette& palette) const {
+        std::vector<StarRenderInstance> out;
+        int w = bounds.width();
+        int h = bounds.height();
+        if (w <= 0 || h <= 0) return out;
+
+        out.reserve(kStarCount);
+        std::pair<int, int> layer_offsets[3] = {
+            ComputeLayerDriftOffset(0, w, h),
+            ComputeLayerDriftOffset(1, w, h),
+            ComputeLayerDriftOffset(2, w, h)
+        };
+
+        int dpi_scale_1px = std::max(1, static_cast<int>((dpi + 48) / 96));
+        int dpi_scale_2px = std::max(2, static_cast<int>((2 * dpi + 48) / 96));
+
+        for (const auto& s : m_stars) {
+            const auto& [dx, dy] = layer_offsets[s.layer];
+            int base_x = (static_cast<int>(s.norm_x) * w) / 1000;
+            int base_y = (static_cast<int>(s.norm_y) * h) / 1000;
+            int rx = bounds.left + ((base_x + dx) % w);
+            int ry = bounds.top + ((base_y + dy) % h);
+
+            uint8_t alpha = s.base_alpha;
+            if (IsAnimationActive()) {
+                // Lightweight triangle-wave breathing over a 60s cycle (+/- 20 alpha units)
+                uint64_t p = (m_elapsed_ms + s.phase_ms) % 60000ULL;
+                int wave = (p < 30000ULL)
+                    ? static_cast<int>((p * 40ULL) / 30000ULL) - 20
+                    : 20 - static_cast<int>(((p - 30000ULL) * 40ULL) / 30000ULL);
+                alpha = static_cast<uint8_t>(std::clamp(static_cast<int>(s.base_alpha) + wave, 30, 210));
+            }
+
+            ColorRgba star_col = palette.star_bright;
+            if (s.tint_index == 1) star_col = palette.star_mid;
+            else if (s.tint_index == 2) star_col = palette.star_dim;
+            else if (s.tint_index == 3) star_col = palette.accent_violet;
+
+            StarRenderInstance inst;
+            inst.x = rx;
+            inst.y = ry;
+            inst.size_px = (s.base_size_px > 1) ? dpi_scale_2px : dpi_scale_1px;
+            inst.alpha = alpha;
+            inst.layer = s.layer;
+            inst.blended_color = star_col.BlendOver(palette.app_background, alpha);
+            out.push_back(inst);
+        }
+        return out;
+    }
+
+    const std::array<StarNode, kStarCount>& GetStarNodes() const { return m_stars; }
+
+private:
+    void InitializeDeterministicStars() {
+        // Deterministic LCG seeded once at construction for balanced spatial distribution
+        uint32_t seed = 0x464C5558u; // "FLUX"
+        auto next_u32 = [&]() -> uint32_t {
+            seed = seed * 1664525u + 1013904223u;
+            return seed;
+        };
+
+        for (size_t i = 0; i < kStarCount; ++i) {
+            StarNode n;
+            // Stratified golden-ratio distribution mixed with deterministic jitter to avoid clumping
+            n.norm_x = static_cast<uint16_t>((i * 618u + (next_u32() % 180u)) % 1000u);
+            n.norm_y = static_cast<uint16_t>((i * 382u + (next_u32() % 220u)) % 1000u);
+            if (i < 24) {
+                n.layer = 0; // Deep space dust (24 stars)
+                n.base_size_px = 1;
+                n.base_alpha = static_cast<uint8_t>(45 + (next_u32() % 45)); // 45..89
+            } else if (i < 40) {
+                n.layer = 1; // Mid-field stars (16 stars)
+                n.base_size_px = (i % 3 == 0) ? 2 : 1;
+                n.base_alpha = static_cast<uint8_t>(85 + (next_u32() % 55)); // 85..139
+            } else {
+                n.layer = 2; // Foreground celestial points (8 stars)
+                n.base_size_px = 2;
+                n.base_alpha = static_cast<uint8_t>(130 + (next_u32() % 55)); // 130..184
+            }
+            n.tint_index = static_cast<uint8_t>(next_u32() % 4u);
+            n.phase_ms = static_cast<uint16_t>(next_u32() % 60000u);
+            m_stars[i] = n;
+        }
+    }
+
+    std::array<StarNode, kStarCount> m_stars{};
+    uint64_t m_elapsed_ms{0};
+    bool m_reduced_motion{false};
+    bool m_window_visible{true};
+    bool m_window_minimized{false};
+};
+
 class DesignSystem {
 public:
-    struct StarSeed {
-        uint16_t norm_x; // 0..999
-        uint16_t norm_y; // 0..999
-        uint8_t layer;   // 0 = deep dust, 1 = midfield, 2 = foreground celestial
-        uint8_t base_size_px;
-        uint8_t base_opacity;
-        uint8_t tint;    // 0 = dim, 1 = cool blue, 2 = violet, 3 = bright starlight
-        bool cross_accent;
-    };
-
     static constexpr int ScaleForDpi(int base_px, uint32_t dpi) {
         return static_cast<int>((static_cast<int64_t>(base_px) * static_cast<int64_t>(dpi) + 48) / 96);
     }
@@ -228,10 +351,7 @@ public:
         m.corner_radius = ScaleForDpi(6, dpi);
         m.focus_ring_width = std::max(1, ScaleForDpi(2, dpi));
 
-        m.settings_sidebar_width = ScaleForDpi(210, dpi);
-        m.settings_row_height = ScaleForDpi(48, dpi);
-
-        // Enforce >= 11px caption floor and >= 13px body floor
+        // Enforce >= 11pt/px caption floor and >= 13px body floor
         m.font_caption_px = ScaleForDpi(11, dpi);
         m.font_body_px = ScaleForDpi(13, dpi);
         m.font_body_strong_px = ScaleForDpi(13, dpi);
@@ -242,171 +362,84 @@ public:
 
     static ThemePalette GetDarkPalette() {
         ThemePalette p;
-        p.mode              = ThemeMode::kDark;
-        p.cosmic_void       = {0x06, 0x09, 0x13, 255}; // #060913 Deepest Space Void
-        p.app_background    = {0x09, 0x0D, 0x16, 255}; // #090D16 Deep Space Charcoal
-        p.cosmic_atmosphere = {0x0C, 0x13, 0x22, 255}; // #0C1322 Subtle Navy/Indigo Atmosphere
-        p.surface_primary   = {0x0F, 0x17, 0x2A, 255}; // #0F172A Cosmic Navy Surface
-        p.surface_elevated  = {0x17, 0x20, 0x33, 255}; // #172033 Elevated Slate-Indigo Surface
-        p.surface_hover     = {0x1E, 0x29, 0x3B, 255}; // #1E293B Interactive Hover
-        p.surface_selected  = {0x17, 0x25, 0x54, 255}; // #172554 Deep Indigo Selection
-        p.border_subtle     = {0x1E, 0x29, 0x3B, 255}; // #1E293B Restrained 1px Divider
-        p.border_strong     = {0x26, 0x33, 0x4D, 255}; // #26334D Control Border
-        p.border_focus      = {0x38, 0xBD, 0xF8, 255}; // #38BDF8 Celestial Cyan Focus Ring
-        p.text_primary      = {0xF8, 0xFA, 0xFC, 255}; // #F8FAFC Starlight Off-White
-        p.text_secondary    = {0x94, 0xA3, 0xB8, 255}; // #94A3B8 Atmospheric Slate Metadata
-        p.text_muted        = {0x64, 0x74, 0x8B, 255}; // #64748B Dimmed Nebula Slate
-        p.accent_primary    = {0x25, 0x63, 0xEB, 255}; // #2563EB Restrained Cosmic Blue
-        p.accent_hover      = {0x3B, 0x82, 0xF6, 255}; // #3B82F6 Luminous Blue Hover
-        p.accent_cyan       = {0x38, 0xBD, 0xF8, 255}; // #38BDF8 Celestial Cyan Accent
-        p.accent_indigo     = {0x63, 0x66, 0xF1, 255}; // #6366F1 Atmospheric Indigo Accent
-        p.badge_stream      = {0x8B, 0x5C, 0xF6, 255}; // #8B5CF6 Violet Stream Badge
-        p.badge_file        = {0x25, 0x63, 0xEB, 255}; // #2563EB Direct File Badge
-        p.status_success    = {0x10, 0xB9, 0x81, 255}; // #10B981 Completed Emerald
-        p.status_warning    = {0xF5, 0x9E, 0x0B, 255}; // #F59E0B Paused / Warning Amber
-        p.status_danger     = {0xEF, 0x44, 0x44, 255}; // #EF4444 Failed / Error Crimson
-        p.status_queued     = {0x63, 0x66, 0xF1, 255}; // #6366F1 Queued Indigo
-        p.progress_track    = {0x13, 0x1C, 0x2E, 255}; // #131C2E Deep Space Progress Track
-        p.star_bright       = {0xE2, 0xE8, 0xF0, 255}; // #E2E8F0 Bright Starlight Point
-        p.star_cool         = {0x93, 0xC5, 0xFD, 255}; // #93C5FD Cool Cyan-Blue Star Point
-        p.star_violet       = {0xC4, 0xB5, 0xFD, 255}; // #C4B5FD Soft Violet Star Point
-        p.star_dim          = {0x47, 0x55, 0x69, 255}; // #475569 Distant Star Dust
+        p.mode = ThemeMode::kDark;
+        p.app_background   = {0x0F, 0x17, 0x2A, 255}; // #0F172A Flux Deep Space Slate
+        p.cosmic_void      = {0x07, 0x0B, 0x14, 255}; // #070B14 Deep Space Void
+        p.cosmic_nebula    = {0x11, 0x1A, 0x2E, 255}; // #111A2E Atmospheric Navy
+        p.cosmic_indigo    = {0x1E, 0x1B, 0x4B, 255}; // #1E1B4B Deep Indigo Tone
+        p.surface_primary  = {0x1E, 0x29, 0x3B, 255}; // #1E293B Dark Navy Surface
+        p.surface_elevated = {0x33, 0x41, 0x55, 255}; // #334155 Elevated Surface
+        p.surface_hover    = {0x47, 0x55, 0x69, 255}; // #475569 Interactive Hover
+        p.surface_selected = {0x1E, 0x3A, 0x8A, 255}; // #1E3A8A Deep Blue Selection
+        p.border_subtle    = {0x33, 0x41, 0x55, 255}; // #334155 Hairline Divider
+        p.border_focus     = {0x38, 0xBD, 0xF8, 255}; // #38BDF8 Cosmic Cyan Focus Ring
+        p.text_primary     = {0xF8, 0xFA, 0xFC, 255}; // #F8FAFC Crisp Off-White
+        p.text_secondary   = {0x94, 0xA3, 0xB8, 255}; // #94A3B8 Secondary Metadata
+        p.text_muted       = {0x64, 0x74, 0x8B, 255}; // #64748B Disabled / Hint
+        p.accent_primary   = {0x25, 0x63, 0xEB, 255}; // #2563EB Flux Blue Accent
+        p.accent_hover     = {0x3B, 0x82, 0xF6, 255}; // #3B82F6 Accent Hover
+        p.accent_cyan      = {0x06, 0xB6, 0xD4, 255}; // #06B6D4 Cosmic Cyan Accent
+        p.accent_violet    = {0x8B, 0x5C, 0xF6, 255}; // #8B5CF6 Celestial Violet
+        p.badge_stream     = {0x8B, 0x5C, 0xF6, 255}; // #8B5CF6 Media Stream Badge
+        p.badge_file       = {0x25, 0x63, 0xEB, 255}; // #2563EB Direct File Badge
+        p.status_success   = {0x22, 0xC5, 0x5E, 255}; // #22C55E Completed Green
+        p.status_warning   = {0xF5, 0x9E, 0x0B, 255}; // #F59E0B Paused / Warning Amber
+        p.status_danger    = {0xEF, 0x44, 0x44, 255}; // #EF4444 Failed / Error Red
+        p.progress_track   = {0x1E, 0x29, 0x3B, 255}; // #1E293B Progress Track
+        p.star_bright      = {0xE2, 0xE8, 0xF0, 210}; // #E2E8F0 Bright Starlight
+        p.star_mid         = {0x94, 0xA3, 0xB8, 145}; // #94A3B8 Mid Starlight
+        p.star_dim         = {0x38, 0xBD, 0xF8, 95};  // #38BDF8 Cyan Dust Star
         return p;
     }
 
-    // Minimal Cosmic Dark UI policy: the entire application remains in dark mode.
     static ThemePalette GetLightPalette() {
+        ThemePalette p = GetDarkPalette();
+        p.mode = ThemeMode::kLight;
+        p.app_background   = {0xF8, 0xFA, 0xFC, 255};
+        p.surface_primary  = {0xFF, 0xFF, 0xFF, 255};
+        p.surface_elevated = {0xF1, 0xF5, 0xF9, 255};
+        p.surface_hover    = {0xE2, 0xE8, 0xF0, 255};
+        p.surface_selected = {0xDB, 0xEA, 0xFE, 255};
+        p.border_subtle    = {0xCB, 0xD5, 0xE1, 255};
+        p.border_focus     = {0x25, 0x63, 0xEB, 255};
+        p.text_primary     = {0x0F, 0x17, 0x2A, 255};
+        p.text_secondary   = {0x47, 0x55, 0x69, 255};
+        p.text_muted       = {0x94, 0xA3, 0xB8, 255};
+        p.accent_primary   = {0x25, 0x63, 0xEB, 255};
+        p.accent_hover     = {0x1D, 0x4E, 0xD8, 255};
+        p.badge_stream     = {0x7C, 0x3A, 0xED, 255};
+        p.badge_file       = {0x25, 0x63, 0xEB, 255};
+        p.status_success   = {0x16, 0xA3, 0x4A, 255};
+        p.status_warning   = {0xD9, 0x77, 0x06, 255};
+        p.status_danger    = {0xDC, 0x26, 0x26, 255};
+        p.progress_track   = {0xE2, 0xE8, 0xF0, 255};
+        return p;
+    }
+
+    static ThemePalette GetRedesignPalette() {
+        ThemePalette p = GetDarkPalette();
+        p.app_background   = {0x16, 0x16, 0x18, 255}; // #161618 Matte Charcoal
+        p.cosmic_void      = {0x12, 0x12, 0x14, 255}; // #121214
+        p.cosmic_nebula    = {0x1A, 0x1A, 0x1E, 255}; // #1A1A1E
+        p.surface_primary  = {0x1E, 0x1E, 0x22, 255}; // #1E1E22
+        p.surface_elevated = {0x24, 0x24, 0x2A, 255}; // #24242A
+        p.surface_hover    = {0x1F, 0x1F, 0x24, 255}; // #1F1F24
+        p.surface_selected = {0x26, 0x26, 0x2E, 255}; // #26262E
+        p.border_subtle    = {0x28, 0x28, 0x2E, 255}; // #28282E
+        p.border_focus     = {0xFF, 0x52, 0x52, 255}; // #FF5252 Coral Red
+        p.accent_primary   = {0xFF, 0x52, 0x52, 255}; // #FF5252 Coral Red
+        p.accent_hover     = {0xFF, 0x66, 0x66, 255}; // #FF6666
+        p.status_success   = {0x8E, 0x8E, 0x98, 255}; // #8E8E98
+        p.status_warning   = {0x9E, 0x9E, 0xA8, 255}; // #9E9EA8
+        p.status_danger    = {0xFF, 0x52, 0x52, 255}; // #FF5252
+        p.progress_track   = {0x2E, 0x2E, 0x36, 255}; // #2E2E36
+        return p;
+    }
+
+    static ThemePalette ResolvePalette(std::string_view theme_setting, bool os_prefers_light = false) {
+        if (theme_setting == "light") return GetLightPalette();
+        if (theme_setting == "system") return os_prefers_light ? GetLightPalette() : GetDarkPalette();
         return GetDarkPalette();
-    }
-
-    static ThemePalette ResolvePalette(std::string_view /*theme_setting*/, bool /*os_prefers_light*/ = false) {
-        return GetDarkPalette();
-    }
-
-    // Pre-computed 42-point 3-layer star catalog for negligible CPU/GPU overhead.
-    // Never allocates random particles or runs heavy particle loops.
-    static constexpr std::array<StarSeed, 42> GetStarCatalog() {
-        return {{
-            // Layer 0: Deep Space Dust (22 faint 1px points, period 240s)
-            { 42,  68, 0, 1,  55, 0, false}, {118, 194, 0, 1,  65, 0, false},
-            {186,  44, 0, 1,  50, 0, false}, {244, 312, 0, 1,  70, 1, false},
-            {298, 142, 0, 1,  58, 0, false}, {356, 488, 0, 1,  62, 0, false},
-            {412,  82, 0, 1,  52, 0, false}, {468, 264, 0, 1,  68, 1, false},
-            {524, 618, 0, 1,  54, 0, false}, {578, 128, 0, 1,  64, 0, false},
-            {634, 392, 0, 1,  50, 0, false}, {688, 742, 0, 1,  66, 2, false},
-            {742, 216, 0, 1,  58, 0, false}, {796, 534, 0, 1,  60, 0, false},
-            {848,  96, 0, 1,  52, 1, false}, {904, 668, 0, 1,  64, 0, false},
-            {952, 348, 0, 1,  56, 0, false}, { 76, 812, 0, 1,  62, 0, false},
-            {214, 724, 0, 1,  54, 0, false}, {382, 864, 0, 1,  68, 1, false},
-            {612, 892, 0, 1,  56, 0, false}, {872, 838, 0, 1,  60, 0, false},
-
-            // Layer 1: Midfield Stars (14 delicate 1-2px cool/violet points, period 160s)
-            { 64, 152, 1, 1,  95, 1, false}, {154, 426, 1, 1, 105, 3, false},
-            {232,  92, 1, 2,  92, 1, false}, {318, 574, 1, 1, 110, 2, false},
-            {404, 228, 1, 1,  98, 1, false}, {492, 782, 1, 2,  90, 2, false},
-            {566, 318, 1, 1, 108, 3, false}, {652, 114, 1, 1,  96, 1, false},
-            {728, 642, 1, 2,  94, 1, false}, {814, 284, 1, 1, 112, 3, false},
-            {886, 496, 1, 1, 100, 2, false}, {944, 168, 1, 1,  92, 1, false},
-            {142, 884, 1, 1, 102, 1, false}, {764, 916, 1, 1,  96, 2, false},
-
-            // Layer 2: Foreground Celestial Points (6 understated 2px points, period 110s)
-            {128, 276, 2, 2, 145, 3, true }, {342, 136, 2, 2, 135, 1, false},
-            {538, 464, 2, 2, 150, 3, true }, {712, 192, 2, 2, 130, 2, false},
-            {862, 384, 2, 2, 142, 1, true }, {446, 692, 2, 2, 132, 3, false}
-        }};
-    }
-
-    static CosmicBackgroundState ComputeCosmicBackground(
-        int width,
-        int height,
-        uint32_t dpi = 96,
-        int64_t elapsed_ms = 0,
-        bool reduced_motion = false,
-        bool window_hidden_or_minimized = false) {
-
-        CosmicBackgroundState state;
-        state.sample_time_ms = std::max<int64_t>(0, elapsed_ms);
-        state.reduced_motion = reduced_motion;
-        state.window_hidden_or_minimized = window_hidden_or_minimized;
-
-        const int safe_w = std::max(320, width);
-        const int safe_h = std::max(240, height);
-
-        // Stop decorative animations immediately when hidden or minimized
-        if (window_hidden_or_minimized) {
-            state.mode = CosmicRenderMode::kSuspendedHidden;
-            state.animation_active = false;
-            return state;
-        }
-
-        const bool animate = !reduced_motion;
-        state.mode = animate ? CosmicRenderMode::kAnimatedDrift : CosmicRenderMode::kStaticFallback;
-        state.animation_active = animate;
-
-        // 3 pre-defined parallax layers with long periods (240s, 160s, 110s)
-        constexpr int kPeriodsMs[3] = {240000, 160000, 110000};
-        constexpr double kDriftXScale[3] = {-0.35, -0.65, -1.00};
-        constexpr double kDriftYScale[3] = {-0.12, -0.22, -0.35};
-
-        state.layers.resize(3);
-        for (uint8_t l = 0; l < 3; ++l) {
-            CosmicLayerTransform lt;
-            lt.layer_index = l;
-            lt.period_ms = kPeriodsMs[l];
-            if (animate && elapsed_ms > 0) {
-                double phase = static_cast<double>(elapsed_ms % kPeriodsMs[l]) / static_cast<double>(kPeriodsMs[l]);
-                lt.offset_x_px = phase * static_cast<double>(safe_w) * kDriftXScale[l];
-                lt.offset_y_px = phase * static_cast<double>(safe_h) * kDriftYScale[l];
-                // Subtle breathing modulation (+/- 10% opacity over full period)
-                double wave = std::sin(phase * 6.283185307179586);
-                lt.opacity_scale = static_cast<uint8_t>(std::clamp(230.0 + 25.0 * wave, 180.0, 255.0));
-            } else {
-                lt.offset_x_px = 0.0;
-                lt.offset_y_px = 0.0;
-                lt.opacity_scale = 235;
-            }
-            state.layers[l] = lt;
-        }
-
-        const auto pal = GetDarkPalette();
-        const auto catalog = GetStarCatalog();
-        state.stars.reserve(catalog.size());
-
-        for (size_t idx = 0; idx < catalog.size(); ++idx) {
-            const auto& seed = catalog[idx];
-            const auto& lt = state.layers[seed.layer];
-
-            double base_x = (static_cast<double>(seed.norm_x) / 1000.0) * static_cast<double>(safe_w);
-            double base_y = (static_cast<double>(seed.norm_y) / 1000.0) * static_cast<double>(safe_h);
-
-            int wrapped_x = static_cast<int>(std::fmod(base_x + lt.offset_x_px + safe_w * 4.0, static_cast<double>(safe_w)));
-            int wrapped_y = static_cast<int>(std::fmod(base_y + lt.offset_y_px + safe_h * 4.0, static_cast<double>(safe_h)));
-
-            uint32_t eff_opacity = (static_cast<uint32_t>(seed.base_opacity) * static_cast<uint32_t>(lt.opacity_scale)) / 255u;
-            if (animate && elapsed_ms > 0 && seed.layer >= 1) {
-                // Gentle per-star phase offset using deterministic index
-                double star_phase = (static_cast<double>((elapsed_ms + static_cast<int64_t>(idx) * 7919) % 48000)) / 48000.0;
-                double shimmer = 0.90 + 0.10 * std::cos(star_phase * 6.283185307179586);
-                eff_opacity = static_cast<uint32_t>(std::clamp(eff_opacity * shimmer, 32.0, 175.0));
-            }
-
-            ColorRgba raw_tint = pal.star_dim;
-            if (seed.tint == 1) raw_tint = pal.star_cool;
-            else if (seed.tint == 2) raw_tint = pal.star_violet;
-            else if (seed.tint == 3) raw_tint = pal.star_bright;
-
-            CosmicStarPoint pt;
-            pt.x_px = std::clamp(wrapped_x, 0, safe_w - 1);
-            pt.y_px = std::clamp(wrapped_y, 0, safe_h - 1);
-            pt.size_px = std::max(1, ScaleForDpi(seed.base_size_px, dpi));
-            pt.opacity = static_cast<uint8_t>(eff_opacity);
-            pt.layer = seed.layer;
-            pt.has_celestial_cross = seed.cross_accent;
-            pt.color = ColorRgba::BlendOver(pal.app_background, raw_tint, pt.opacity);
-            state.stars.push_back(pt);
-        }
-
-        return state;
     }
 
     static const char* GetAccessibleIconGlyph(IconId icon) {
@@ -428,6 +461,10 @@ public:
             case IconId::kWarningTriangle:  return "WARN";
             case IconId::kErrorCircle:      return "ERR";
             case IconId::kBrowserConnected: return "IPC";
+            case IconId::kCosmicStar:       return "[*]";
+            case IconId::kSpeedLimit:       return "[BW]";
+            case IconId::kFolderRule:       return "[DIR]";
+            case IconId::kDiagnostics:      return "[DIAG]";
         }
         return "";
     }

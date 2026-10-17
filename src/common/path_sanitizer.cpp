@@ -69,7 +69,6 @@ std::string TaskTypeToString(TaskType t) {
         case TaskType::kStreamHls: return "STREAM_HLS";
         case TaskType::kStreamDash: return "STREAM_DASH";
         case TaskType::kStreamMss: return "STREAM_MSS";
-        case TaskType::kYouTubeExtraction: return "YOUTUBE_EXTRACTION";
     }
     return "HTTP_FILE";
 }
@@ -78,7 +77,6 @@ TaskType TaskTypeFromString(const std::string& s) {
     if (s == "STREAM_HLS") return TaskType::kStreamHls;
     if (s == "STREAM_DASH") return TaskType::kStreamDash;
     if (s == "STREAM_MSS") return TaskType::kStreamMss;
-    if (s == "YOUTUBE_EXTRACTION" || s == "YOUTUBE") return TaskType::kYouTubeExtraction;
     return TaskType::kHttpFile;
 }
 
@@ -107,6 +105,21 @@ TaskState TaskStateFromString(const std::string& s) {
     if (s == "FAILED") return TaskState::kFailed;
     if (s == "CANCELED") return TaskState::kCanceled;
     return TaskState::kQueued;
+}
+
+std::string ConflictPolicyToString(ConflictPolicy p) {
+    switch (p) {
+        case ConflictPolicy::kAutoRename:   return "auto_rename";
+        case ConflictPolicy::kOverwrite:    return "overwrite";
+        case ConflictPolicy::kFailIfExists: return "fail_if_exists";
+    }
+    return "auto_rename";
+}
+
+ConflictPolicy ConflictPolicyFromString(const std::string& s) {
+    if (s == "overwrite" || s == "OVERWRITE") return ConflictPolicy::kOverwrite;
+    if (s == "fail_if_exists" || s == "FAIL_IF_EXISTS") return ConflictPolicy::kFailIfExists;
+    return ConflictPolicy::kAutoRename;
 }
 
 std::string InferCategoryFromFilename(const std::string& filename) {
@@ -463,14 +476,6 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
         base = base.substr(0, base.size() - 4);
     }
 
-    if (base == "yt-dlp") {
-        if (const char* env_yt = std::getenv("FLUX_YTDLP_BINARY")) {
-            if (env_yt[0] != '\0' && std::filesystem::exists(env_yt, ec)) {
-                return std::filesystem::path(env_yt);
-            }
-        }
-    }
-
 #ifdef _WIN32
     const std::string native_name = base + ".exe";
 #else
@@ -571,10 +576,7 @@ bool PathSanitizer::IsWebpageWatchUrl(std::string_view url) {
     // YouTube watch and shorts URLs
     if (lower.find("youtube.com/watch") != std::string::npos ||
         lower.find("youtube.com/shorts/") != std::string::npos ||
-        lower.find("youtube.com/embed/") != std::string::npos ||
-        lower.find("youtube.com/live/") != std::string::npos ||
-        lower.find("youtu.be/") != std::string::npos ||
-        lower.find("/watch?v=") != std::string::npos) {
+        lower.find("youtu.be/") != std::string::npos) {
         return true;
     }
 

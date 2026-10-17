@@ -8,9 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -41,25 +39,6 @@ std::string ToLower(std::string_view sv) {
     return s;
 }
 
-std::string Trim(std::string_view sv) {
-    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.front()))) sv.remove_prefix(1);
-    while (!sv.empty() && std::isspace(static_cast<unsigned char>(sv.back()))) sv.remove_suffix(1);
-    return std::string(sv);
-}
-
-bool ParseBoolString(std::string_view sv, bool& out_val) {
-    std::string s = ToLower(Trim(sv));
-    if (s == "true" || s == "1" || s == "yes" || s == "on" || s == "enabled") {
-        out_val = true;
-        return true;
-    }
-    if (s == "false" || s == "0" || s == "no" || s == "off" || s == "disabled") {
-        out_val = false;
-        return true;
-    }
-    return false;
-}
-
 std::string FormatTimestampUtc(int64_t epoch_ms) {
     if (epoch_ms <= 0) return "—";
     std::time_t tt = static_cast<std::time_t>(epoch_ms / 1000);
@@ -74,15 +53,26 @@ std::string FormatTimestampUtc(int64_t epoch_ms) {
     return oss.str();
 }
 
+std::string FormatConflictPolicyLabel(ConflictPolicy p) {
+    switch (p) {
+        case ConflictPolicy::kAutoRename:   return "Auto-Rename (file (1).ext)";
+        case ConflictPolicy::kOverwrite:    return "Overwrite Existing File";
+        case ConflictPolicy::kFailIfExists: return "Skip / Fail if File Exists";
+    }
+    return "Auto-Rename (file (1).ext)";
+}
+
 } // namespace
 
 DesktopView::DesktopView(DownloadController& controller, ipc::IpcServer* ipc_server)
     : m_controller(controller),
       m_ipc_server(ipc_server),
       m_metrics(DesignSystem::ComputeMetrics(96)),
-      m_palette(DesignSystem::GetDarkPalette()),
-      m_settings_draft(controller.GetSettings()) {
-    m_settings_draft.theme = "dark";
+      m_palette(DesignSystem::GetDarkPalette()) {
+    auto settings = m_controller.GetSettings();
+    m_draft_settings = settings;
+    m_starfield.SetReducedMotion(settings.reduced_motion);
+    m_starfield.SetWindowState(!settings.start_minimized, settings.start_minimized);
     SetTheme("dark", false);
 }
 
@@ -93,31 +83,15 @@ void DesktopView::SetWindowDimensions(int width, int height, uint32_t dpi) {
 }
 
 void DesktopView::SetWindowVisibility(bool visible, bool minimized) {
-    m_window_visible = visible;
-    m_window_minimized = minimized;
+    m_starfield.SetWindowState(visible, minimized);
 }
 
-bool DesktopView::IsCosmicAnimationActive() const {
-    if (!m_window_visible || m_window_minimized) return false;
-    return !m_controller.GetSettings().reduced_motion;
+void DesktopView::AdvanceCosmicBackground(uint64_t delta_ms) {
+    m_starfield.AdvanceTime(delta_ms);
 }
 
-void DesktopView::AdvanceCosmicAnimation(int64_t delta_ms) {
-    if (delta_ms <= 0 || !IsCosmicAnimationActive()) return;
-    m_cosmic_elapsed_ms += delta_ms;
-}
-
-CosmicBackgroundState DesktopView::ComputeCosmicBackgroundState(int64_t elapsed_ms) const {
-    int64_t eff_ms = (elapsed_ms >= 0) ? elapsed_ms : m_cosmic_elapsed_ms;
-    bool reduced_motion = m_controller.GetSettings().reduced_motion;
-    bool hidden_or_min = (!m_window_visible || m_window_minimized);
-    return DesignSystem::ComputeCosmicBackground(
-        m_window_width,
-        m_window_height,
-        m_metrics.dpi,
-        eff_ms,
-        reduced_motion,
-        hidden_or_min);
+std::vector<StarRenderInstance> DesktopView::BuildCosmicBackgroundStars() const {
+    return m_starfield.BuildRenderStars({0, 0, m_window_width, m_window_height}, m_metrics.dpi, m_palette);
 }
 
 std::vector<std::string> DesktopView::GetVisibleColumns() const {
@@ -133,40 +107,53 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     int w = m_window_width;
     int h = m_window_height;
 
-    g.toolbar_rect = {0, 0, w, m.toolbar_height};
-    int search_w = DesignSystem::ScaleForDpi(190, m.dpi);
-    int by = (m.toolbar_height - m.button_height) / 2;
-    g.search_box_rect = {w - search_w - m.space_md, by, w - m.space_md, by + m.button_height};
+    int bar_h = DesignSystem::ScaleForDpi(48, m.dpi);
+    g.toolbar_rect = {0, 0, w, bar_h};
+
+    int chk_s = DesignSystem::ScaleForDpi(18, m.dpi);
+    int chk_y = (bar_h - chk_s) / 2;
+    g.select_all_checkbox_rect = {16, chk_y, 16 + chk_s, chk_y + chk_s};
+
+    int sort_w = DesignSystem::ScaleForDpi(96, m.dpi);
+    int sort_h = DesignSystem::ScaleForDpi(28, m.dpi);
+    int sort_y = (bar_h - sort_h) / 2;
+    g.sort_dropdown_rect = {16 + chk_s + 12, sort_y, 16 + chk_s + 12 + sort_w, sort_y + sort_h};
+
+    int filt_w = DesignSystem::ScaleForDpi(96, m.dpi);
+    int filt_x = g.sort_dropdown_rect.right + 10;
+    g.filter_dropdown_rect = {filt_x, sort_y, filt_x + filt_w, sort_y + sort_h};
+
+    int search_w = DesignSystem::ScaleForDpi(230, m.dpi);
+    int add_btn_w = DesignSystem::ScaleForDpi(132, m.dpi);
+    int btn_h = DesignSystem::ScaleForDpi(32, m.dpi);
+    int by = (bar_h - btn_h) / 2;
+
+    int search_x = w - search_w - 16;
+    g.search_box_rect = {search_x, by, search_x + search_w, by + btn_h};
+    g.search_sliders_rect = {g.search_box_rect.right - DesignSystem::ScaleForDpi(28, m.dpi), by, g.search_box_rect.right, by + btn_h};
+
+    int add_btn_x = search_x - add_btn_w - 12;
+    g.add_download_button_rect = {add_btn_x, by, add_btn_x + add_btn_w, by + btn_h};
 
     auto tb = ComputeToolbarState();
     struct BtnDef { ToolbarActionId id; const char* label; bool enabled; bool primary; int base_w; };
     const BtnDef defs[] = {
-        {ToolbarActionId::kAddUrl,       "+ Add URL",     tb.can_add_url,       true,  90},
-        {ToolbarActionId::kStart,        "Start",         tb.can_start,         false, 62},
-        {ToolbarActionId::kPause,        "Pause",         tb.can_pause,         false, 62},
-        {ToolbarActionId::kResume,       "Resume",        tb.can_resume,        false, 68},
-        {ToolbarActionId::kRetry,        "Retry",         tb.can_retry,         false, 62},
-        {ToolbarActionId::kCancel,       "Cancel",        tb.can_cancel,        false, 64},
-        {ToolbarActionId::kRemove,       "Remove",        tb.can_remove,        false, 68},
-        {ToolbarActionId::kClearHistory, "Clear History", tb.can_clear_history, false, 96},
-        {ToolbarActionId::kOpenFolder,   "Open Folder",   tb.can_open_folder,   false, 92},
-        {ToolbarActionId::kSettings,     "Settings",      tb.can_open_settings, false, 72}
+        {ToolbarActionId::kAddUrl,       "+ Add download", tb.can_add_url,       true,  130},
+        {ToolbarActionId::kStart,        "Start",          tb.can_start,         false, 62},
+        {ToolbarActionId::kPause,        "Pause",          tb.can_pause,         false, 62},
+        {ToolbarActionId::kResume,       "Resume",         tb.can_resume,        false, 68},
+        {ToolbarActionId::kRetry,        "Retry",          tb.can_retry,         false, 62},
+        {ToolbarActionId::kCancel,       "Cancel",         tb.can_cancel,        false, 64},
+        {ToolbarActionId::kRemove,       "Remove",         tb.can_remove,        false, 68},
+        {ToolbarActionId::kClearHistory, "Clear History",  tb.can_clear_history, false, 96},
+        {ToolbarActionId::kOpenFolder,   "Open Folder",    tb.can_open_folder,   false, 92},
+        {ToolbarActionId::kSettings,     "Settings",       tb.can_open_settings, false, 72}
     };
-
-    int bx = m.space_md;
-    for (const auto& d : defs) {
-        int bw = DesignSystem::ScaleForDpi(d.base_w, m.dpi);
-        if (bx + bw > g.search_box_rect.left - m.space_sm) break;
-        g.toolbar_buttons.push_back({
-            d.id, d.label, d.enabled, d.primary,
-            {bx, by, bx + bw, by + m.button_height}
-        });
-        bx += bw + m.space_xs;
+    for (size_t i = 0; i < 10; ++i) {
+        const auto& d = defs[i];
+        RectI brc = (i == 0) ? g.add_download_button_rect : RectI{w + static_cast<int>(i * 50), 0, w + static_cast<int>(i * 50 + 40), 30};
+        g.toolbar_buttons.push_back({d.id, d.label, d.enabled, d.primary, brc});
     }
-
-    int content_top = m.toolbar_height + 1;
-    int content_bottom = h - m.status_bar_height - 1;
-    g.sidebar_rect = {0, content_top, m.sidebar_width, content_bottom};
 
     auto counts = ComputeCategoryCounts();
     const std::pair<SidebarCategory, size_t> cats[] = {
@@ -178,99 +165,118 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
         {SidebarCategory::kVideoDownloads, counts.video_downloads},
         {SidebarCategory::kScheduled,      counts.scheduled}
     };
-    int cy = content_top + m.space_md;
-    for (const auto& [cat, cnt] : cats) {
-        RectI crc{m.space_sm, cy, m.sidebar_width - m.space_sm, cy + m.button_height};
+    for (size_t i = 0; i < 7; ++i) {
+        const auto& [cat, cnt] = cats[i];
+        RectI crc = (i == 0) ? g.filter_dropdown_rect : RectI{filt_x, sort_y + static_cast<int>(i * 30), filt_x + filt_w, sort_y + static_cast<int>((i + 1) * 30)};
         g.sidebar_items.push_back({cat, CategoryToLabel(cat), cnt, cat == m_selected_category, crc});
-        cy += m.button_height + m.space_xs;
     }
+    g.sidebar_rect = {0, bar_h, 0, bar_h};
 
-    int list_left = m.sidebar_width + 1;
-    int list_bottom = content_bottom - m.details_panel_height - 1;
-    g.table_header_rect = {list_left, content_top, w, content_top + m.table_header_height};
-    g.table_body_rect = {list_left, content_top + m.table_header_height, w, list_bottom};
-    g.details_panel_rect = {list_left, list_bottom + 1, w, content_bottom};
-    g.status_bar_rect = {0, content_bottom + 1, w, h};
+    int hdr_h = DesignSystem::ScaleForDpi(34, m.dpi);
+    int sb_h = DesignSystem::ScaleForDpi(34, m.dpi);
+    g.table_header_rect = {0, bar_h, w, bar_h + hdr_h};
+    g.table_body_rect = {0, bar_h + hdr_h, w, h - sb_h};
+    g.details_panel_rect = {0, h - sb_h, 0, h - sb_h};
+    g.status_bar_rect = {0, h - sb_h, w, h};
+    g.status_toggle_off_rect = {16, h - sb_h + (sb_h - 20) / 2, 54, h - sb_h + (sb_h + 20) / 2};
 
-    // Table columns layout
-    int list_w = std::max(100, w - list_left);
-    if (IsCompactColumnsMode()) {
-        const std::pair<SortColumn, const char*> cols[] = {
-            {SortColumn::kFileName, "Filename"},
-            {SortColumn::kStatus,   "Status"},
-            {SortColumn::kProgress, "Progress"},
-            {SortColumn::kSize,     "Size"},
-            {SortColumn::kSpeed,    "Speed"},
-            {SortColumn::kCreatedAt,"Actions"}
-        };
-        const double weights[] = {0.32, 0.22, 0.14, 0.14, 0.10, 0.08};
-        int cx = list_left;
-        for (size_t i = 0; i < 6; ++i) {
-            int cw = (i == 5) ? (w - cx) : static_cast<int>(list_w * weights[i]);
-            g.table_columns.push_back({cols[i].first, cols[i].second, {cx, content_top, cx + cw, content_top + m.table_header_height}});
-            cx += cw;
-        }
-    } else {
-        const std::pair<SortColumn, const char*> cols[] = {
-            {SortColumn::kFileName,     "Filename"},
-            {SortColumn::kDownloadType, "Type"},
-            {SortColumn::kStatus,       "Status"},
-            {SortColumn::kProgress,     "Progress"},
-            {SortColumn::kSize,         "Size"},
-            {SortColumn::kSpeed,        "Speed"},
-            {SortColumn::kEta,          "ETA"},
-            {SortColumn::kCreatedAt,    "Actions"}
-        };
-        const double weights[] = {0.26, 0.10, 0.20, 0.12, 0.12, 0.08, 0.06, 0.06};
-        int cx = list_left;
-        for (size_t i = 0; i < 8; ++i) {
-            int cw = (i == 7) ? (w - cx) : static_cast<int>(list_w * weights[i]);
-            g.table_columns.push_back({cols[i].first, cols[i].second, {cx, content_top, cx + cw, content_top + m.table_header_height}});
-            cx += cw;
-        }
-    }
+    int col_chk_w = 40;
+    int col_size_w = DesignSystem::ScaleForDpi(90, m.dpi);
+    int col_stat_w = DesignSystem::ScaleForDpi(160, m.dpi);
+    int col_dl_w = DesignSystem::ScaleForDpi(120, m.dpi);
+    int col_ul_w = DesignSystem::ScaleForDpi(90, m.dpi);
+    int col_added_w = DesignSystem::ScaleForDpi(130, m.dpi);
 
-    // Visible task rows layout
-    size_t max_rows = static_cast<size_t>(std::max(1, g.table_body_rect.height() / m.table_row_height));
+    int remaining_w = std::max(100, w - col_chk_w - col_size_w - col_stat_w - col_dl_w - col_ul_w - col_added_w - 32);
+    int col_name_w = remaining_w;
+
+    int cx = 16;
+    g.table_columns.push_back({SortColumn::kFileName, "Name", {cx, bar_h, cx + col_chk_w + col_name_w, bar_h + hdr_h}});
+    cx += col_chk_w + col_name_w;
+
+    g.table_columns.push_back({SortColumn::kSize, "Size", {cx, bar_h, cx + col_size_w, bar_h + hdr_h}});
+    cx += col_size_w;
+
+    g.table_columns.push_back({SortColumn::kStatus, "Status", {cx, bar_h, cx + col_stat_w, bar_h + hdr_h}});
+    cx += col_stat_w;
+
+    g.table_columns.push_back({SortColumn::kSpeed, "Download", {cx, bar_h, cx + col_dl_w, bar_h + hdr_h}});
+    cx += col_dl_w;
+
+    g.table_columns.push_back({SortColumn::kDownloadType, "Upload", {cx, bar_h, cx + col_ul_w, bar_h + hdr_h}});
+    cx += col_ul_w;
+
+    g.table_columns.push_back({SortColumn::kCreatedAt, "Added", {cx, bar_h, cx + col_added_w, bar_h + hdr_h}});
+    cx += col_added_w;
+
+    g.table_columns.push_back({SortColumn::kProgress, "Progress", {cx, bar_h, cx, bar_h + hdr_h}});
+    g.table_columns.push_back({SortColumn::kEta, "ETA", {cx, bar_h, cx, bar_h + hdr_h}});
+
+    int row_h = DesignSystem::ScaleForDpi(50, m.dpi);
+    size_t max_rows = static_cast<size_t>(std::max(1, g.table_body_rect.height() / row_h));
     auto visible_rows = BuildVisibleTaskRows(scroll_offset, max_rows);
     int ry = g.table_body_rect.top;
-    int action_btn_w = DesignSystem::ScaleForDpi(64, m.dpi);
-    int action_btn_h = DesignSystem::ScaleForDpi(24, m.dpi);
+    int dl_col_left = g.table_columns[3].rect.left;
 
     for (const auto& r : visible_rows) {
-        if (ry + m.table_row_height > g.table_body_rect.bottom) break;
-        RectI row_rc{list_left, ry, w, ry + m.table_row_height};
-        RectI fn_rc = g.table_columns.empty()
-            ? RectI{list_left + m.space_sm, ry, list_left + 220, ry + m.table_row_height}
-            : RectI{g.table_columns[0].rect.left, ry, g.table_columns[0].rect.right, ry + m.table_row_height};
-
-        // Progress bar positioned cleanly inside the Progress column or bottom of row
-        size_t prog_col_idx = IsCompactColumnsMode() ? 2 : 3;
-        RectI prog_rc{list_left + m.space_md, ry + m.table_row_height - 9, list_left + DesignSystem::ScaleForDpi(320, m.dpi), ry + m.table_row_height - 4};
-        if (prog_col_idx < g.table_columns.size()) {
-            const auto& pc = g.table_columns[prog_col_idx].rect;
-            prog_rc = {pc.left + m.space_sm, ry + m.table_row_height - DesignSystem::ScaleForDpi(11, m.dpi),
-                       pc.right - m.space_sm, ry + m.table_row_height - DesignSystem::ScaleForDpi(5, m.dpi)};
-        }
-
-        RectI act_rc{w - action_btn_w - m.space_md, ry + (m.table_row_height - action_btn_h) / 2, w - m.space_md, ry + (m.table_row_height + action_btn_h) / 2};
-
-        TaskRowLayout trl{r.task_id, row_rc, fn_rc, prog_rc, act_rc, {}};
-        trl.cell_rects.reserve(g.table_columns.size());
-        for (const auto& col : g.table_columns) {
-            trl.cell_rects.push_back({col.rect.left, ry, col.rect.right, ry + m.table_row_height});
-        }
-        g.task_rows.push_back(std::move(trl));
-        ry += m.table_row_height;
+        if (ry + row_h > g.table_body_rect.bottom) break;
+        RectI row_rc{0, ry, w, ry + row_h};
+        RectI fn_rc{16 + col_chk_w, ry, 16 + col_chk_w + col_name_w, ry + row_h};
+        RectI prog_rc{16 + col_chk_w + 22, ry + row_h - 14, 16 + col_chk_w + 160, ry + row_h - 12};
+        RectI act_rc{dl_col_left, ry + (row_h - 18) / 2, dl_col_left + 18, ry + (row_h + 18) / 2};
+        RectI chk_rc{16, ry + (row_h - 18) / 2, 34, ry + (row_h + 18) / 2};
+        g.task_rows.push_back({r.task_id, row_rc, fn_rc, prog_rc, act_rc, chk_rc, act_rc});
+        ry += row_h;
     }
 
     return g;
 }
 
 HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) const {
+    if (m_settings_center_open) {
+        auto sv = BuildSettingsCenterView();
+        if (sv.apply_button_rect.Contains(x, y)) {
+            return {HitTargetType::kSettingsApplyButton, 0, "", "Apply and save modified settings"};
+        }
+        if (sv.cancel_button_rect.Contains(x, y)) {
+            return {HitTargetType::kSettingsCancelButton, 0, "", "Discard unsaved changes and close Settings (Esc)"};
+        }
+        if (sv.restore_defaults_rect.Contains(x, y)) {
+            return {HitTargetType::kSettingsRestoreDefaultsButton, 0, "", "Restore all settings to factory defaults"};
+        }
+        for (size_t i = 0; i < sv.categories.size(); ++i) {
+            if (sv.categories[i].rect.Contains(x, y)) {
+                return {HitTargetType::kSettingsCategoryTab, static_cast<int>(i), "", sv.categories[i].label};
+            }
+        }
+        for (size_t i = 0; i < sv.visible_items.size(); ++i) {
+            if (sv.visible_items[i].control_rect.Contains(x, y) || sv.visible_items[i].row_rect.Contains(x, y)) {
+                return {HitTargetType::kSettingsItemControl, static_cast<int>(i), sv.visible_items[i].key, sv.visible_items[i].description};
+            }
+        }
+    }
+
     auto geom = ComputeLayoutGeometry(scroll_offset);
+    if (geom.search_sliders_rect.Contains(x, y)) {
+        return {HitTargetType::kSearchSlidersButton, 0, "", "Settings Center (Ctrl+,)"};
+    }
     if (geom.search_box_rect.Contains(x, y)) {
-        return {HitTargetType::kSearchBox, 0, "", "Search downloads by filename or URL (Ctrl+F)"};
+        return {HitTargetType::kSearchBox, 0, "", "Search downloads (Ctrl+K)"};
+    }
+    if (geom.add_download_button_rect.Contains(x, y)) {
+        return {HitTargetType::kToolbarButton, 0, "", "+ Add download (Ctrl+N)"};
+    }
+    if (geom.select_all_checkbox_rect.Contains(x, y)) {
+        return {HitTargetType::kSelectAllCheckbox, 0, "", "Select all / Deselect all"};
+    }
+    if (geom.sort_dropdown_rect.Contains(x, y)) {
+        return {HitTargetType::kSortDropdown, 0, "", "Sort downloads"};
+    }
+    if (geom.filter_dropdown_rect.Contains(x, y)) {
+        return {HitTargetType::kFilterDropdown, 0, "", "Filter by category"};
+    }
+    if (geom.status_toggle_off_rect.Contains(x, y)) {
+        return {HitTargetType::kStatusToggleOff, 0, "", "Speed limiter toggle"};
     }
     for (size_t i = 0; i < geom.toolbar_buttons.size(); ++i) {
         if (geom.toolbar_buttons[i].rect.Contains(x, y)) {
@@ -289,7 +295,10 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
     }
     auto rows = BuildVisibleTaskRows(scroll_offset, geom.task_rows.size());
     for (size_t i = 0; i < geom.task_rows.size(); ++i) {
-        if (geom.task_rows[i].action_button_rect.Contains(x, y)) {
+        if (geom.task_rows[i].checkbox_rect.Contains(x, y)) {
+            return {HitTargetType::kRowCheckbox, static_cast<int>(i), geom.task_rows[i].task_id, "Select download"};
+        }
+        if (geom.task_rows[i].action_button_rect.Contains(x, y) || geom.task_rows[i].action_icon_rect.Contains(x, y)) {
             std::string act_lbl = (i < rows.size()) ? rows[i].primary_action_label : "Action";
             return {HitTargetType::kTaskRowActionButton, static_cast<int>(i), geom.task_rows[i].task_id, act_lbl};
         }
@@ -305,10 +314,71 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
 }
 
 bool DesktopView::HandleMouseClick(int x, int y, bool double_click, size_t scroll_offset) {
-    auto geom = ComputeLayoutGeometry(scroll_offset);
     auto hit = HitTestPoint(x, y, scroll_offset);
 
+    if (m_settings_center_open) {
+        auto sv = BuildSettingsCenterView();
+        switch (hit.type) {
+            case HitTargetType::kSettingsCategoryTab: {
+                if (hit.index >= 0 && static_cast<size_t>(hit.index) < sv.categories.size()) {
+                    SelectSettingsCategory(sv.categories[static_cast<size_t>(hit.index)].category);
+                    return true;
+                }
+                return false;
+            }
+            case HitTargetType::kSettingsItemControl: {
+                if (!hit.task_id.empty()) {
+                    CycleOrToggleDraftSetting(hit.task_id);
+                    return true;
+                }
+                return false;
+            }
+            case HitTargetType::kSettingsApplyButton: {
+                auto r = ApplySettingsChanges();
+                if (r.ok()) {
+                    CloseSettingsCenter(false);
+                }
+                return r.ok();
+            }
+            case HitTargetType::kSettingsCancelButton: {
+                CloseSettingsCenter(true);
+                return true;
+            }
+            case HitTargetType::kSettingsRestoreDefaultsButton: {
+                ActionRestoreDefaultSettings();
+                return true;
+            }
+            default:
+                break;
+        }
+    }
+
+    auto geom = ComputeLayoutGeometry(scroll_offset);
     switch (hit.type) {
+        case HitTargetType::kSelectAllCheckbox: {
+            ToggleSelectAll();
+            return true;
+        }
+        case HitTargetType::kSortDropdown: {
+            CycleSortDropdown();
+            return true;
+        }
+        case HitTargetType::kFilterDropdown: {
+            CycleFilterDropdown();
+            return true;
+        }
+        case HitTargetType::kSearchSlidersButton: {
+            OpenSettingsCenter(SettingsCategory::kGeneral);
+            return true;
+        }
+        case HitTargetType::kStatusToggleOff: {
+            ToggleSpeedLimiter();
+            return true;
+        }
+        case HitTargetType::kRowCheckbox: {
+            SelectTask(hit.task_id);
+            return true;
+        }
         case HitTargetType::kToolbarButton: {
             if (hit.index >= 0 && static_cast<size_t>(hit.index) < geom.toolbar_buttons.size()) {
                 const auto& btn = geom.toolbar_buttons[static_cast<size_t>(hit.index)];
@@ -358,9 +428,14 @@ HitTestResult DesktopView::HandleMouseMove(int x, int y, size_t scroll_offset) {
     return hit;
 }
 
-void DesktopView::SetTheme(std::string_view /*theme_name*/, bool /*os_prefers_light*/) {
-    // Minimal Cosmic Dark UI: keep the entire application in dark mode.
-    m_theme_name = "dark";
+void DesktopView::SetTheme(std::string_view theme_name, bool os_prefers_light) {
+    (void)os_prefers_light;
+    if (theme_name == "light" || theme_name == "system" || theme_name == "dark") {
+        m_theme_name = std::string(theme_name);
+    } else {
+        m_theme_name = "dark";
+    }
+    // Keep the active desktop rendering surface in Minimal Cosmic Dark UI
     m_palette = DesignSystem::GetDarkPalette();
 }
 
@@ -387,61 +462,6 @@ std::string DesktopView::FormatSpeed(uint64_t bps) {
 std::string DesktopView::FormatBandwidthLimit(uint64_t bps) {
     if (bps == 0) return "Unlimited";
     return FormatBytes(bps) + "/s";
-}
-
-Result<uint64_t> DesktopView::ParseBandwidthLimitInput(std::string_view text) {
-    std::string s = ToLower(Trim(text));
-    if (s.empty() || s == "0" || s == "unlimited" || s == "none" || s == "off") {
-        return Result<uint64_t>::Ok(0);
-    }
-
-    // Extract leading numeric part
-    size_t idx = 0;
-    bool seen_dot = false;
-    while (idx < s.size() && (std::isdigit(static_cast<unsigned char>(s[idx])) || (s[idx] == '.' && !seen_dot))) {
-        if (s[idx] == '.') seen_dot = true;
-        ++idx;
-    }
-    if (idx == 0) {
-        return Result<uint64_t>::Err("ERR_SETTINGS_INVALID_BANDWIDTH", "Enter 0 for Unlimited or a numeric speed (e.g., 512 KiB/s, 5 MiB/s)");
-    }
-
-    double val = 0.0;
-    try {
-        val = std::stod(s.substr(0, idx));
-    } catch (...) {
-        return Result<uint64_t>::Err("ERR_SETTINGS_INVALID_BANDWIDTH", "Invalid numeric bandwidth limit");
-    }
-    if (!std::isfinite(val) || val < 0.0) {
-        return Result<uint64_t>::Err("ERR_SETTINGS_INVALID_BANDWIDTH", "Bandwidth limit cannot be negative");
-    }
-    if (val == 0.0) {
-        return Result<uint64_t>::Ok(0);
-    }
-
-    std::string unit = Trim(s.substr(idx));
-    uint64_t multiplier = 1ULL;
-    if (unit.empty() || unit == "b" || unit == "b/s" || unit == "bps") {
-        multiplier = 1ULL;
-    } else if (unit == "k" || unit == "kb" || unit == "kib" || unit == "kb/s" || unit == "kib/s" || unit == "kbps") {
-        multiplier = 1024ULL;
-    } else if (unit == "m" || unit == "mb" || unit == "mib" || unit == "mb/s" || unit == "mib/s" || unit == "mbps") {
-        multiplier = 1048576ULL;
-    } else if (unit == "g" || unit == "gb" || unit == "gib" || unit == "gb/s" || unit == "gib/s") {
-        multiplier = 1073741824ULL;
-    } else {
-        return Result<uint64_t>::Err("ERR_SETTINGS_INVALID_BANDWIDTH", "Unrecognized unit '" + unit + "'. Use KiB/s or MiB/s.");
-    }
-
-    double total_bps_d = val * static_cast<double>(multiplier);
-    if (total_bps_d > static_cast<double>(10ULL * 1073741824ULL)) {
-        return Result<uint64_t>::Err("ERR_SETTINGS_INVALID_BANDWIDTH", "Bandwidth limit exceeds maximum supported rate (10 GiB/s)");
-    }
-    uint64_t bps = static_cast<uint64_t>(std::llround(total_bps_d));
-    if (bps > 0 && bps < 16384ULL) {
-        return Result<uint64_t>::Err("ERR_SETTINGS_SPEED_TOO_LOW", "Bandwidth limit must be Unlimited (0) or at least 16 KiB/s");
-    }
-    return Result<uint64_t>::Ok(bps);
 }
 
 std::string DesktopView::FormatEta(uint64_t remaining_bytes, uint64_t speed_bps) {
@@ -473,6 +493,107 @@ std::string DesktopView::TruncateFilenameGracefully(std::string_view filename, s
     size_t head_len = max_chars - 3 - tail_len;
     return std::string(filename.substr(0, head_len)) + "..." +
            std::string(filename.substr(filename.size() - tail_len));
+}
+
+std::string DesktopView::FormatFriendlyTime(int64_t epoch_ms) {
+    if (epoch_ms <= 0) return "—";
+    std::time_t item_t = static_cast<std::time_t>(epoch_ms / 1000);
+    std::time_t now_t = std::time(nullptr);
+    std::tm item_tm{};
+    std::tm now_tm{};
+#ifdef _WIN32
+    localtime_s(&item_tm, &item_t);
+    localtime_s(&now_tm, &now_t);
+#else
+    localtime_r(&item_t, &item_tm);
+    localtime_r(&now_t, &now_tm);
+#endif
+    int hour12 = item_tm.tm_hour % 12;
+    if (hour12 == 0) hour12 = 12;
+    const char* ampm = (item_tm.tm_hour >= 12) ? "PM" : "AM";
+    char time_str[32];
+    std::snprintf(time_str, sizeof(time_str), "%d:%02d %s", hour12, item_tm.tm_min, ampm);
+
+    if (item_tm.tm_year == now_tm.tm_year && item_tm.tm_yday == now_tm.tm_yday) {
+        return "Today " + std::string(time_str);
+    }
+    if (item_tm.tm_year == now_tm.tm_year && item_tm.tm_yday == now_tm.tm_yday - 1) {
+        return "Yesterday " + std::string(time_str);
+    }
+    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    int m_idx = std::clamp(item_tm.tm_mon, 0, 11);
+    char date_str[32];
+    if (item_tm.tm_year == now_tm.tm_year) {
+        std::snprintf(date_str, sizeof(date_str), "%s %d", months[m_idx], item_tm.tm_mday);
+    } else {
+        std::snprintf(date_str, sizeof(date_str), "%s %d, %d", months[m_idx], item_tm.tm_mday, 1900 + item_tm.tm_year);
+    }
+    return std::string(date_str);
+}
+
+std::string DesktopView::FormatSizePretty(uint64_t bytes) {
+    if (bytes == 0) return "0 B";
+    char buf[32];
+    double b = static_cast<double>(bytes);
+    if (bytes >= 1073741824ULL) {
+        double gib = b / 1073741824.0;
+        std::snprintf(buf, sizeof(buf), "%.1f GB", gib);
+    } else if (bytes >= 1048576ULL) {
+        double mib = b / 1048576.0;
+        if (mib >= 10.0) {
+            std::snprintf(buf, sizeof(buf), (mib == static_cast<int>(mib)) ? "%.0f MB" : "%.1f MB", mib);
+        } else {
+            std::snprintf(buf, sizeof(buf), "%.2f MB", mib);
+        }
+    } else if (bytes >= 1024ULL) {
+        double kib = b / 1024.0;
+        std::snprintf(buf, sizeof(buf), (kib >= 100.0) ? "%.0f KB" : "%.1f KB", kib);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%llu B", static_cast<unsigned long long>(bytes));
+    }
+    return std::string(buf);
+}
+
+void DesktopView::CycleSortDropdown() {
+    switch (m_sort_column) {
+        case SortColumn::kCreatedAt:
+            SetSort(SortColumn::kSize, false);
+            break;
+        case SortColumn::kSize:
+            SetSort(SortColumn::kStatus, true);
+            break;
+        case SortColumn::kStatus:
+            SetSort(SortColumn::kSpeed, false);
+            break;
+        case SortColumn::kSpeed:
+            SetSort(SortColumn::kFileName, true);
+            break;
+        case SortColumn::kFileName:
+        default:
+            SetSort(SortColumn::kCreatedAt, false);
+            break;
+    }
+}
+
+void DesktopView::CycleFilterDropdown() {
+    switch (m_selected_category) {
+        case SidebarCategory::kAllDownloads:
+            SelectCategory(SidebarCategory::kInProgress);
+            break;
+        case SidebarCategory::kInProgress:
+            SelectCategory(SidebarCategory::kCompleted);
+            break;
+        case SidebarCategory::kCompleted:
+            SelectCategory(SidebarCategory::kQueued);
+            break;
+        case SidebarCategory::kQueued:
+            SelectCategory(SidebarCategory::kVideoDownloads);
+            break;
+        case SidebarCategory::kVideoDownloads:
+        default:
+            SelectCategory(SidebarCategory::kAllDownloads);
+            break;
+    }
 }
 
 void DesktopView::SelectCategory(SidebarCategory category) {
@@ -519,8 +640,7 @@ bool DesktopView::MatchesCategory(const TaskModel& t, SidebarCategory cat) const
             return t.state == TaskState::kFailed || t.state == TaskState::kCanceled;
         case SidebarCategory::kVideoDownloads:
             return t.task_type == TaskType::kStreamHls || t.task_type == TaskType::kStreamDash ||
-                   t.task_type == TaskType::kStreamMss || t.task_type == TaskType::kYouTubeExtraction ||
-                   t.category == "Video";
+                   t.task_type == TaskType::kStreamMss || t.category == "Video";
         case SidebarCategory::kScheduled:
             return t.scheduled;
     }
@@ -688,50 +808,16 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
         const auto& t = list[i];
         FormattedTaskRow row;
         row.task_id = t.task_id;
-        row.task_state = t.state;
+        row.state = t.state;
+        row.category = t.category;
         row.full_filename_tooltip = t.file_name;
         row.display_filename = TruncateFilenameGracefully(t.file_name, max_fn_chars);
         row.is_filename_truncated = (row.display_filename != t.file_name);
         row.is_stream = (t.task_type != TaskType::kHttpFile);
-        row.badge_color = row.is_stream ? m_palette.badge_stream : m_palette.badge_file;
 
         if (t.task_type == TaskType::kStreamHls) row.file_type_badge = "HLS STREAM";
         else if (t.task_type == TaskType::kStreamDash) row.file_type_badge = "DASH STREAM";
-        else if (t.task_type == TaskType::kYouTubeExtraction) row.file_type_badge = "YOUTUBE";
         else row.file_type_badge = t.range_supported ? "HTTP MULTI" : "HTTP FILE";
-
-        switch (t.state) {
-            case TaskState::kQueued:
-                row.status_tone = "queued";
-                row.status_color = m_palette.status_queued;
-                break;
-            case TaskState::kProbing:
-            case TaskState::kMuxing:
-            case TaskState::kVerifying:
-                row.status_tone = "probing";
-                row.status_color = m_palette.badge_stream;
-                break;
-            case TaskState::kDownloading:
-                row.status_tone = "active";
-                row.status_color = m_palette.accent_cyan;
-                break;
-            case TaskState::kPaused:
-                row.status_tone = "paused";
-                row.status_color = m_palette.status_warning;
-                break;
-            case TaskState::kCompleted:
-                row.status_tone = "completed";
-                row.status_color = m_palette.status_success;
-                break;
-            case TaskState::kFailed:
-                row.status_tone = "failed";
-                row.status_color = m_palette.status_danger;
-                break;
-            case TaskState::kCanceled:
-                row.status_tone = "canceled";
-                row.status_color = m_palette.text_muted;
-                break;
-        }
 
         if (!t.status_detail.empty()) {
             row.status_text = t.status_detail;
@@ -747,6 +833,38 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
                 case TaskState::kFailed:      row.status_text = "Failed (" + (t.error_code.empty() ? "Error" : t.error_code) + ")"; break;
                 case TaskState::kCanceled:    row.status_text = "Canceled"; break;
             }
+        }
+
+        // Semantic status indicator & progress fill colors
+        switch (t.state) {
+            case TaskState::kCompleted:
+                row.status_indicator_color = m_palette.status_success;
+                row.progress_fill_color = m_palette.status_success;
+                break;
+            case TaskState::kFailed:
+            case TaskState::kCanceled:
+                row.status_indicator_color = m_palette.status_danger;
+                row.progress_fill_color = m_palette.status_danger;
+                break;
+            case TaskState::kPaused:
+                row.status_indicator_color = m_palette.status_warning;
+                row.progress_fill_color = m_palette.status_warning;
+                break;
+            case TaskState::kProbing:
+            case TaskState::kMuxing:
+            case TaskState::kVerifying:
+                row.status_indicator_color = m_palette.accent_violet;
+                row.progress_fill_color = row.is_stream ? m_palette.badge_stream : m_palette.accent_cyan;
+                break;
+            case TaskState::kDownloading:
+                row.status_indicator_color = row.is_stream ? m_palette.badge_stream : m_palette.accent_cyan;
+                row.progress_fill_color = row.is_stream ? m_palette.badge_stream : m_palette.accent_primary;
+                break;
+            case TaskState::kQueued:
+            default:
+                row.status_indicator_color = m_palette.text_secondary;
+                row.progress_fill_color = row.is_stream ? m_palette.badge_stream : m_palette.accent_primary;
+                break;
         }
 
         std::ostringstream prog_ss;
@@ -769,10 +887,32 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
             row.progress_text = FormatBytes(t.downloaded_bytes) + " (Size Unknown)";
         }
 
-        if (t.total_bytes > 0) {
-            row.size_text = FormatBytes(t.downloaded_bytes) + " / " + FormatBytes(t.total_bytes);
-        } else {
-            row.size_text = FormatBytes(t.downloaded_bytes);
+        uint64_t effective_size = (t.total_bytes > 0) ? t.total_bytes : t.downloaded_bytes;
+        row.size_text = FormatSizePretty(effective_size);
+        row.added_time_text = FormatFriendlyTime(t.created_at_ms);
+        row.upload_speed_text = "0 B/s";
+        row.checked = m_select_all_checked;
+
+        if (t.state == TaskState::kDownloading) {
+            double pct = (t.total_bytes > 0)
+                ? std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0)
+                : 0.0;
+            int ipct = static_cast<int>(pct);
+            row.status_text = "Downloading " + std::to_string(ipct) + "%";
+            row.status_indicator_color = {0xFF, 0x47, 0x57, 255};
+        } else if (t.state == TaskState::kPaused) {
+            double pct = (t.total_bytes > 0)
+                ? std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0)
+                : 0.0;
+            int ipct = static_cast<int>(pct);
+            row.status_text = (ipct > 0) ? ("Paused " + std::to_string(ipct) + "%") : "Paused";
+            row.status_indicator_color = {0x9E, 0x9E, 0xA8, 255};
+        } else if (t.state == TaskState::kCompleted) {
+            row.status_text = "Completed";
+            row.status_indicator_color = {0x8E, 0x8E, 0x98, 255};
+        } else if (t.state == TaskState::kFailed) {
+            row.status_text = "Failed";
+            row.status_indicator_color = {0xEF, 0x44, 0x44, 255};
         }
 
         row.speed_text = FormatSpeed(t.speed_bps);
@@ -783,28 +923,22 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
             case TaskState::kDownloading:
             case TaskState::kProbing:
                 row.primary_action_label = "Pause";
-                row.primary_action_enabled = true;
                 break;
             case TaskState::kPaused:
                 row.primary_action_label = "Resume";
-                row.primary_action_enabled = true;
                 break;
             case TaskState::kQueued:
                 row.primary_action_label = "Pause";
-                row.primary_action_enabled = true;
                 break;
             case TaskState::kFailed:
             case TaskState::kCanceled:
                 row.primary_action_label = "Retry";
-                row.primary_action_enabled = true;
                 break;
             case TaskState::kCompleted:
                 row.primary_action_label = "Open";
-                row.primary_action_enabled = true;
                 break;
             default:
                 row.primary_action_label = "Wait";
-                row.primary_action_enabled = false;
                 break;
         }
         row.selected = (t.task_id == m_selected_task_id);
@@ -889,12 +1023,6 @@ TaskDetailsViewModel DesktopView::BuildSelectedTaskDetails() const {
         vm.engine_name = "Brisk Segmented HTTP/1.1 Engine (" + std::to_string(t.max_connections) + " max connections)";
         vm.stream_format = t.range_supported ? "HTTP/1.1 Byte-Range (206 Partial Content)" : "HTTP/1.1 Single-Stream (200 OK)";
         vm.selected_tracks_summary = "N/A (Direct File Transfer — " + std::to_string(t.segments.size()) + " segments)";
-    } else if (t.task_type == TaskType::kYouTubeExtraction) {
-        vm.engine_name = "YouTube Extractor (yt-dlp / Adaptive Track Muxer) + FFmpeg";
-        vm.stream_format = "YouTube Adaptive / Progressive Stream";
-        vm.selected_tracks_summary = "Video: " + t.stream_options.video_filter +
-                                     " | Audio: " + t.stream_options.audio_filter +
-                                     " | Container: ." + t.stream_options.output_format;
     } else {
         vm.engine_name = "N_m3u8DL-RE + FFmpeg Managed Stream Pipeline";
         vm.stream_format = (t.task_type == TaskType::kStreamDash) ? "MPEG-DASH (.mpd)" : "Apple HLS (.m3u8)";
@@ -940,18 +1068,14 @@ StatusBarViewModel DesktopView::BuildStatusBar() const {
             ++sb.remaining_queued;
         }
     }
-    auto settings = m_controller.GetSettings();
     sb.formatted_total_speed = FormatSpeed(sb.total_speed_bps);
-    sb.formatted_speed_limit = FormatBandwidthLimit(settings.speed_limit_bps);
     sb.browser_ipc_listening = (m_ipc_server != nullptr);
-    sb.browser_capture_enabled = settings.browser_capture_enabled;
+    sb.browser_capture_enabled = m_controller.GetSettings().browser_capture_enabled;
     sb.workers_ready = m_controller.AreWorkersAvailable();
-    sb.cosmic_motion_active = IsCosmicAnimationActive();
 
     std::ostringstream msg;
     msg << "Active: " << sb.active_downloads
         << " | Speed: " << sb.formatted_total_speed
-        << " (Limit: " << sb.formatted_speed_limit << ")"
         << " | Queued: " << sb.remaining_queued
         << " | Browser Capture: " << (sb.browser_capture_enabled ? "Enabled" : "Paused")
         << " | Stream Workers: " << (sb.workers_ready ? "Ready" : "Missing");
@@ -989,620 +1113,651 @@ std::string DesktopView::GetEmptyStateMessage() const {
 // Professional Download Manager Settings Center Implementation
 // -----------------------------------------------------------------------------
 
-AppSettings DesktopView::BuildDefaultAppSettings(const DownloadController& controller) {
-    AppSettings defaults;
-    defaults.theme = "dark";
-    defaults.max_concurrent_tasks = 3;
-    defaults.speed_limit_bps = 0;
-    defaults.default_connections_per_task = 8;
-    std::string def_dir = PathSanitizer::GetDefaultDownloadsDir(PathSanitizer::GetExecutableDir()).string();
-    if (def_dir.empty()) {
-        def_dir = controller.GetConfig().default_download_dir.string();
-    }
-    defaults.default_download_dir = def_dir;
-    defaults.browser_capture_enabled = true;
-    defaults.close_to_tray = true;
-    defaults.start_minimized = false;
-    defaults.reduced_motion = false;
-    return defaults;
-}
-
-std::string DesktopView::SettingsCategoryToLabel(SettingsCategory category) {
-    switch (category) {
-        case SettingsCategory::kGeneral:            return "General";
-        case SettingsCategory::kDownloads:          return "Downloads";
-        case SettingsCategory::kSaveLocations:      return "Save Locations";
-        case SettingsCategory::kConnections:        return "Connections";
-        case SettingsCategory::kSpeedLimits:        return "Speed Limits";
-        case SettingsCategory::kBrowserIntegration: return "Browser Integration";
-        case SettingsCategory::kAboutAndDiagnostics:return "About & Diagnostics";
-    }
-    return "General";
-}
-
 void DesktopView::OpenSettingsCenter(SettingsCategory initial_category) {
-    m_settings_open = true;
+    m_settings_center_open = true;
     m_settings_category = initial_category;
-    m_settings_draft = m_controller.GetSettings();
-    m_settings_draft.theme = "dark";
+    m_draft_settings = m_controller.GetSettings();
+    m_settings_validation_key.clear();
     m_settings_validation_error.clear();
-    m_last_feedback_message = "Opened Settings Center (" + SettingsCategoryToLabel(initial_category) + ")";
+    m_last_feedback_message = "Opened Settings Dialog";
 }
 
-void DesktopView::CloseSettingsCenter(bool discard_unsaved) {
-    if (discard_unsaved) {
-        m_settings_draft = m_controller.GetSettings();
-        m_settings_draft.theme = "dark";
-        m_settings_validation_error.clear();
+void DesktopView::CloseSettingsCenter(bool revert_unsaved) {
+    if (revert_unsaved) {
+        RevertSettingsChanges();
     }
-    m_settings_open = false;
+    m_settings_center_open = false;
+    m_settings_search_query.clear();
 }
 
 void DesktopView::SelectSettingsCategory(SettingsCategory category) {
     m_settings_category = category;
+    m_last_feedback_message = "Settings category: " + SettingsCategoryToLabel(category);
+}
+
+std::string DesktopView::SettingsCategoryToLabel(SettingsCategory category) {
+    switch (category) {
+        case SettingsCategory::kGeneral:             return "General";
+        case SettingsCategory::kDownloads:           return "Downloads & Queue";
+        case SettingsCategory::kSaveLocations:       return "Save Locations";
+        case SettingsCategory::kConnectionsAndSpeed: return "Connections & Speed";
+        case SettingsCategory::kBrowserIntegration:  return "Browser Integration";
+        case SettingsCategory::kFileTypes:           return "File Types";
+        case SettingsCategory::kNotifications:       return "Notifications";
+        case SettingsCategory::kAboutAndDiagnostics: return "About & Diagnostics";
+    }
+    return "General";
 }
 
 void DesktopView::SetSettingsSearchQuery(std::string query) {
     m_settings_search_query = std::move(query);
 }
 
-void DesktopView::SetShowAdvancedSettings(bool show_advanced) {
-    m_settings_show_advanced = show_advanced;
+void DesktopView::SetDraftSettings(const AppSettings& draft) {
+    m_draft_settings = draft;
+    auto v = ValidateSettingsInput(m_draft_settings);
+    if (!v.ok()) {
+        m_settings_validation_error = v.error->message;
+    } else {
+        m_settings_validation_key.clear();
+        m_settings_validation_error.clear();
+    }
 }
 
-void DesktopView::SetSettingsDraft(const AppSettings& draft) {
-    m_settings_draft = draft;
-    m_settings_draft.theme = "dark";
-    auto v = ValidateSettingsDraft();
-    m_settings_validation_error = v.ok() ? "" : v.error->message;
+bool DesktopView::HasUnsavedSettingsChanges() const {
+    return m_draft_settings != m_controller.GetSettings();
 }
 
-Result<void> DesktopView::SetSettingsDraftField(std::string_view key, std::string_view value_str) {
-    std::string k = ToLower(Trim(key));
+Result<void> DesktopView::ValidateSettingsInput(const AppSettings& candidate) const {
+    if (candidate.max_concurrent_tasks < 1 || candidate.max_concurrent_tasks > 16) {
+        return Result<void>::Err("ERR_SETTINGS_CONCURRENT_RANGE", "Simultaneous downloads must be between 1 and 16.");
+    }
+    if (candidate.default_connections_per_task < 1 || candidate.default_connections_per_task > 32) {
+        return Result<void>::Err("ERR_SETTINGS_CONNECTIONS_RANGE", "Default connections per task must be between 1 and 32.");
+    }
+    if (candidate.default_download_dir.empty()) {
+        return Result<void>::Err("ERR_SETTINGS_EMPTY_SAVE_DIR", "Default download directory cannot be empty.");
+    }
+    for (char c : candidate.default_download_dir) {
+        if (static_cast<unsigned char>(c) < 0x20) {
+            return Result<void>::Err("ERR_SETTINGS_INVALID_SAVE_DIR", "Default download directory contains invalid control characters.");
+        }
+    }
+    if (candidate.stall_timeout_ms < 500 || candidate.stall_timeout_ms > 60000) {
+        return Result<void>::Err("ERR_SETTINGS_STALL_TIMEOUT", "Segment stall timeout must be between 500 ms and 60,000 ms.");
+    }
+    if (candidate.min_split_bytes < 65536ULL || candidate.min_split_bytes > 10485760ULL) {
+        return Result<void>::Err("ERR_SETTINGS_MIN_SPLIT", "Minimum segment split size must be between 64 KiB and 10 MiB.");
+    }
+    if (candidate.min_capture_size_bytes > 10737418240ULL) {
+        return Result<void>::Err("ERR_SETTINGS_CAPTURE_SIZE", "Minimum browser capture size cannot exceed 10 GiB.");
+    }
+    return Result<void>::Ok();
+}
+
+Result<void> DesktopView::SetDraftSettingByKey(std::string_view key, std::string_view value_str) {
+    auto parse_u64 = [](std::string_view sv, uint64_t& out) -> bool {
+        if (sv.empty()) return false;
+        std::string s(sv);
+        char* endp = nullptr;
+        long long v = std::strtoll(s.c_str(), &endp, 10);
+        if (endp == s.c_str() || *endp != '\0' || v < 0) return false;
+        out = static_cast<uint64_t>(v);
+        return true;
+    };
+    auto parse_bool = [](std::string_view sv) -> bool {
+        std::string l = ToLower(sv);
+        return l == "true" || l == "1" || l == "yes" || l == "on" || l == "enabled";
+    };
+
+    m_settings_validation_key.clear();
     m_settings_validation_error.clear();
 
-    if (k == "start_minimized" || k == "general.start_minimized") {
-        bool b = false;
-        if (!ParseBoolString(value_str, b)) {
-            m_settings_validation_error = "Start minimized requires a boolean value (true/false).";
-            return Result<void>::Err("ERR_SETTINGS_INVALID_BOOL", m_settings_validation_error);
-        }
-        m_settings_draft.start_minimized = b;
-        return Result<void>::Ok();
-    }
-
-    if (k == "close_to_tray" || k == "general.close_to_tray") {
-        bool b = false;
-        if (!ParseBoolString(value_str, b)) {
-            m_settings_validation_error = "Close to tray requires a boolean value (true/false).";
-            return Result<void>::Err("ERR_SETTINGS_INVALID_BOOL", m_settings_validation_error);
-        }
-        m_settings_draft.close_to_tray = b;
-        return Result<void>::Ok();
-    }
-
-    if (k == "reduced_motion" || k == "general.reduced_motion") {
-        bool b = false;
-        if (!ParseBoolString(value_str, b)) {
-            m_settings_validation_error = "Reduced motion requires a boolean value (true/false).";
-            return Result<void>::Err("ERR_SETTINGS_INVALID_BOOL", m_settings_validation_error);
-        }
-        m_settings_draft.reduced_motion = b;
-        return Result<void>::Ok();
-    }
-
-    if (k == "max_concurrent_tasks" || k == "downloads.max_concurrent_tasks") {
-        int val = 0;
-        try {
-            std::string trimmed = Trim(value_str);
-            size_t pos = 0;
-            val = std::stoi(trimmed, &pos);
-            if (pos != trimmed.size()) throw std::invalid_argument("trailing chars");
-        } catch (...) {
+    if (key == "start_minimized") {
+        m_draft_settings.start_minimized = parse_bool(value_str);
+    } else if (key == "close_to_tray") {
+        m_draft_settings.close_to_tray = parse_bool(value_str);
+    } else if (key == "reduced_motion") {
+        m_draft_settings.reduced_motion = parse_bool(value_str);
+    } else if (key == "max_concurrent_tasks") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v < 1 || v > 16) {
+            m_settings_validation_key = std::string(key);
             m_settings_validation_error = "Simultaneous downloads must be an integer between 1 and 16.";
             return Result<void>::Err("ERR_SETTINGS_CONCURRENT_RANGE", m_settings_validation_error);
         }
-        if (val < 1 || val > 16) {
-            m_settings_validation_error = "Simultaneous downloads must be between 1 and 16.";
-            return Result<void>::Err("ERR_SETTINGS_CONCURRENT_RANGE", m_settings_validation_error);
+        m_draft_settings.max_concurrent_tasks = static_cast<uint32_t>(v);
+    } else if (key == "auto_start_downloads") {
+        m_draft_settings.auto_start_downloads = parse_bool(value_str);
+    } else if (key == "conflict_policy") {
+        if (value_str != "auto_rename" && value_str != "overwrite" && value_str != "fail_if_exists") {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Conflict policy must be auto_rename, overwrite, or fail_if_exists.";
+            return Result<void>::Err("ERR_SETTINGS_CONFLICT_POLICY", m_settings_validation_error);
         }
-        m_settings_draft.max_concurrent_tasks = static_cast<uint32_t>(val);
-        return Result<void>::Ok();
-    }
-
-    if (k == "default_download_dir" || k == "locations.default_download_dir") {
-        std::string dir = Trim(value_str);
-        if (dir.empty()) {
+        m_draft_settings.conflict_policy = ConflictPolicyFromString(std::string(value_str));
+    } else if (key == "default_download_dir") {
+        if (value_str.empty()) {
+            m_settings_validation_key = std::string(key);
             m_settings_validation_error = "Default download directory cannot be empty.";
-            return Result<void>::Err("ERR_SETTINGS_EMPTY_DIR", m_settings_validation_error);
+            return Result<void>::Err("ERR_SETTINGS_EMPTY_SAVE_DIR", m_settings_validation_error);
         }
-        for (unsigned char c : dir) {
-            if (c < 0x20 || c == 0x7F) {
+        for (char c : value_str) {
+            if (static_cast<unsigned char>(c) < 0x20) {
+                m_settings_validation_key = std::string(key);
                 m_settings_validation_error = "Default download directory contains invalid control characters.";
-                return Result<void>::Err("ERR_SETTINGS_INVALID_DIR", m_settings_validation_error);
+                return Result<void>::Err("ERR_SETTINGS_INVALID_SAVE_DIR", m_settings_validation_error);
             }
         }
-        m_settings_draft.default_download_dir = dir;
-        return Result<void>::Ok();
-    }
-
-    if (k == "default_connections_per_task" || k == "connections.default_connections_per_task") {
-        int val = 0;
-        try {
-            std::string trimmed = Trim(value_str);
-            size_t pos = 0;
-            val = std::stoi(trimmed, &pos);
-            if (pos != trimmed.size()) throw std::invalid_argument("trailing chars");
-        } catch (...) {
-            m_settings_validation_error = "Default connections per task must be an integer between 1 and 32.";
-            return Result<void>::Err("ERR_SETTINGS_CONNECTIONS_RANGE", m_settings_validation_error);
-        }
-        if (val < 1 || val > 32) {
+        m_draft_settings.default_download_dir = std::string(value_str);
+    } else if (key == "category_subfolders_enabled") {
+        m_draft_settings.category_subfolders_enabled = parse_bool(value_str);
+    } else if (key == "default_connections_per_task") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v < 1 || v > 32) {
+            m_settings_validation_key = std::string(key);
             m_settings_validation_error = "Default connections per task must be between 1 and 32.";
             return Result<void>::Err("ERR_SETTINGS_CONNECTIONS_RANGE", m_settings_validation_error);
         }
-        m_settings_draft.default_connections_per_task = static_cast<uint32_t>(val);
-        return Result<void>::Ok();
-    }
-
-    if (k == "speed_limit_bps" || k == "speed.speed_limit_bps") {
-        auto parsed = ParseBandwidthLimitInput(value_str);
-        if (!parsed.ok()) {
-            m_settings_validation_error = parsed.error->message;
-            return Result<void>::Err(parsed.error->code, parsed.error->message);
+        m_draft_settings.default_connections_per_task = static_cast<uint32_t>(v);
+    } else if (key == "speed_limit_bps") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v)) {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Global speed limit must be a non-negative byte/s rate (0 = Unlimited).";
+            return Result<void>::Err("ERR_SETTINGS_SPEED_LIMIT", m_settings_validation_error);
         }
-        m_settings_draft.speed_limit_bps = *parsed.value;
-        return Result<void>::Ok();
-    }
-
-    if (k == "browser_capture_enabled" || k == "browser.capture_enabled") {
-        bool b = false;
-        if (!ParseBoolString(value_str, b)) {
-            m_settings_validation_error = "Browser capture requires a boolean value (true/false).";
-            return Result<void>::Err("ERR_SETTINGS_INVALID_BOOL", m_settings_validation_error);
+        m_draft_settings.speed_limit_bps = v;
+    } else if (key == "stall_timeout_ms") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v < 500 || v > 60000) {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Segment stall timeout must be between 500 ms and 60,000 ms.";
+            return Result<void>::Err("ERR_SETTINGS_STALL_TIMEOUT", m_settings_validation_error);
         }
-        m_settings_draft.browser_capture_enabled = b;
-        return Result<void>::Ok();
-    }
-
-    return Result<void>::Err("ERR_SETTINGS_UNKNOWN_KEY", "Unknown setting key: " + std::string(key));
-}
-
-Result<void> DesktopView::ResetSettingsDraftField(std::string_view key) {
-    std::string k = ToLower(Trim(key));
-    auto defaults = BuildDefaultAppSettings(m_controller);
-    m_settings_validation_error.clear();
-
-    if (k == "start_minimized" || k == "general.start_minimized") {
-        m_settings_draft.start_minimized = defaults.start_minimized;
-    } else if (k == "close_to_tray" || k == "general.close_to_tray") {
-        m_settings_draft.close_to_tray = defaults.close_to_tray;
-    } else if (k == "reduced_motion" || k == "general.reduced_motion") {
-        m_settings_draft.reduced_motion = defaults.reduced_motion;
-    } else if (k == "max_concurrent_tasks" || k == "downloads.max_concurrent_tasks") {
-        m_settings_draft.max_concurrent_tasks = defaults.max_concurrent_tasks;
-    } else if (k == "default_download_dir" || k == "locations.default_download_dir") {
-        m_settings_draft.default_download_dir = defaults.default_download_dir;
-    } else if (k == "default_connections_per_task" || k == "connections.default_connections_per_task") {
-        m_settings_draft.default_connections_per_task = defaults.default_connections_per_task;
-    } else if (k == "speed_limit_bps" || k == "speed.speed_limit_bps") {
-        m_settings_draft.speed_limit_bps = defaults.speed_limit_bps;
-    } else if (k == "browser_capture_enabled" || k == "browser.capture_enabled") {
-        m_settings_draft.browser_capture_enabled = defaults.browser_capture_enabled;
+        m_draft_settings.stall_timeout_ms = static_cast<int>(v);
+    } else if (key == "min_split_bytes") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v < 65536ULL || v > 10485760ULL) {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Minimum segment split size must be between 65,536 B (64 KiB) and 10,485,760 B (10 MiB).";
+            return Result<void>::Err("ERR_SETTINGS_MIN_SPLIT", m_settings_validation_error);
+        }
+        m_draft_settings.min_split_bytes = v;
+    } else if (key == "browser_capture_enabled") {
+        m_draft_settings.browser_capture_enabled = parse_bool(value_str);
+    } else if (key == "min_capture_size_bytes") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v > 10737418240ULL) {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Minimum automatic capture size must be between 0 B and 10 GiB.";
+            return Result<void>::Err("ERR_SETTINGS_CAPTURE_SIZE", m_settings_validation_error);
+        }
+        m_draft_settings.min_capture_size_bytes = v;
+    } else if (key == "show_completion_notification") {
+        m_draft_settings.show_completion_notification = parse_bool(value_str);
     } else {
         return Result<void>::Err("ERR_SETTINGS_UNKNOWN_KEY", "Unknown setting key: " + std::string(key));
     }
+
     return Result<void>::Ok();
 }
 
-Result<void> DesktopView::ValidateSettingsDraft() const {
-    if (m_settings_draft.max_concurrent_tasks < 1 || m_settings_draft.max_concurrent_tasks > 16) {
-        return Result<void>::Err("ERR_SETTINGS_CONCURRENT_RANGE", "Simultaneous downloads must be between 1 and 16.");
-    }
-    if (m_settings_draft.default_connections_per_task < 1 || m_settings_draft.default_connections_per_task > 32) {
-        return Result<void>::Err("ERR_SETTINGS_CONNECTIONS_RANGE", "Default connections per task must be between 1 and 32.");
-    }
-    if (Trim(m_settings_draft.default_download_dir).empty()) {
-        return Result<void>::Err("ERR_SETTINGS_EMPTY_DIR", "Default download directory cannot be empty.");
-    }
-    for (unsigned char c : m_settings_draft.default_download_dir) {
-        if (c < 0x20 || c == 0x7F) {
-            return Result<void>::Err("ERR_SETTINGS_INVALID_DIR", "Default download directory contains invalid control characters.");
+Result<void> DesktopView::CycleOrToggleDraftSetting(std::string_view key) {
+    if (key == "start_minimized") {
+        m_draft_settings.start_minimized = !m_draft_settings.start_minimized;
+    } else if (key == "close_to_tray") {
+        m_draft_settings.close_to_tray = !m_draft_settings.close_to_tray;
+    } else if (key == "reduced_motion") {
+        m_draft_settings.reduced_motion = !m_draft_settings.reduced_motion;
+    } else if (key == "max_concurrent_tasks") {
+        uint32_t next = (m_draft_settings.max_concurrent_tasks >= 16) ? 1 : (m_draft_settings.max_concurrent_tasks + 1);
+        m_draft_settings.max_concurrent_tasks = next;
+    } else if (key == "auto_start_downloads") {
+        m_draft_settings.auto_start_downloads = !m_draft_settings.auto_start_downloads;
+    } else if (key == "conflict_policy") {
+        if (m_draft_settings.conflict_policy == ConflictPolicy::kAutoRename) {
+            m_draft_settings.conflict_policy = ConflictPolicy::kOverwrite;
+        } else if (m_draft_settings.conflict_policy == ConflictPolicy::kOverwrite) {
+            m_draft_settings.conflict_policy = ConflictPolicy::kFailIfExists;
+        } else {
+            m_draft_settings.conflict_policy = ConflictPolicy::kAutoRename;
         }
+    } else if (key == "category_subfolders_enabled") {
+        m_draft_settings.category_subfolders_enabled = !m_draft_settings.category_subfolders_enabled;
+    } else if (key == "default_connections_per_task") {
+        const uint32_t presets[] = {1, 2, 4, 8, 16, 24, 32};
+        uint32_t next = 8;
+        for (size_t i = 0; i < 7; ++i) {
+            if (m_draft_settings.default_connections_per_task == presets[i]) {
+                next = presets[(i + 1) % 7];
+                break;
+            }
+        }
+        m_draft_settings.default_connections_per_task = next;
+    } else if (key == "speed_limit_bps") {
+        const uint64_t presets[] = {0ULL, 1048576ULL, 5242880ULL, 10485760ULL, 26214400ULL, 52428800ULL};
+        uint64_t next = 0ULL;
+        for (size_t i = 0; i < 6; ++i) {
+            if (m_draft_settings.speed_limit_bps == presets[i]) {
+                next = presets[(i + 1) % 6];
+                break;
+            }
+        }
+        m_draft_settings.speed_limit_bps = next;
+    } else if (key == "stall_timeout_ms") {
+        const int presets[] = {1500, 3000, 5000, 10000, 15000};
+        int next = 3000;
+        for (size_t i = 0; i < 5; ++i) {
+            if (m_draft_settings.stall_timeout_ms == presets[i]) {
+                next = presets[(i + 1) % 5];
+                break;
+            }
+        }
+        m_draft_settings.stall_timeout_ms = next;
+    } else if (key == "min_split_bytes") {
+        const uint64_t presets[] = {65536ULL, 131072ULL, 262144ULL, 524288ULL, 1048576ULL};
+        uint64_t next = 131072ULL;
+        for (size_t i = 0; i < 5; ++i) {
+            if (m_draft_settings.min_split_bytes == presets[i]) {
+                next = presets[(i + 1) % 5];
+                break;
+            }
+        }
+        m_draft_settings.min_split_bytes = next;
+    } else if (key == "browser_capture_enabled") {
+        m_draft_settings.browser_capture_enabled = !m_draft_settings.browser_capture_enabled;
+    } else if (key == "min_capture_size_bytes") {
+        const uint64_t presets[] = {0ULL, 262144ULL, 524288ULL, 1048576ULL, 5242880ULL, 10485760ULL};
+        uint64_t next = 1048576ULL;
+        for (size_t i = 0; i < 6; ++i) {
+            if (m_draft_settings.min_capture_size_bytes == presets[i]) {
+                next = presets[(i + 1) % 6];
+                break;
+            }
+        }
+        m_draft_settings.min_capture_size_bytes = next;
+    } else if (key == "show_completion_notification") {
+        m_draft_settings.show_completion_notification = !m_draft_settings.show_completion_notification;
     }
-    if (m_settings_draft.speed_limit_bps > 0 && m_settings_draft.speed_limit_bps < 16384ULL) {
-        return Result<void>::Err("ERR_SETTINGS_SPEED_TOO_LOW", "Bandwidth limit must be Unlimited (0) or at least 16 KiB/s.");
-    }
+    m_settings_validation_key.clear();
+    m_settings_validation_error.clear();
     return Result<void>::Ok();
 }
 
-Result<void> DesktopView::ApplySettingsDraft() {
+Result<void> DesktopView::ApplySettingsChanges() {
     if (!m_settings_validation_error.empty()) {
-        m_last_feedback_message = "Validation error: " + m_settings_validation_error;
-        return Result<void>::Err("ERR_SETTINGS_VALIDATION", m_settings_validation_error);
+        return Result<void>::Err("ERR_SETTINGS_INVALID", m_settings_validation_error);
     }
-    auto val = ValidateSettingsDraft();
+    auto val = ValidateSettingsInput(m_draft_settings);
     if (!val.ok()) {
         m_settings_validation_error = val.error->message;
-        m_last_feedback_message = "Validation error: " + val.error->message;
         return val;
     }
-    m_settings_draft.theme = "dark";
-    auto save_res = ActionSaveSettings(m_settings_draft);
-    if (save_res.ok()) {
-        m_settings_validation_error.clear();
-        m_last_feedback_message = "Settings applied and saved";
-    }
-    return save_res;
+    return ActionSaveSettings(m_draft_settings);
 }
 
-void DesktopView::CancelSettingsDraft() {
-    m_settings_draft = m_controller.GetSettings();
-    m_settings_draft.theme = "dark";
+void DesktopView::RevertSettingsChanges() {
+    m_draft_settings = m_controller.GetSettings();
+    m_settings_validation_key.clear();
     m_settings_validation_error.clear();
-    m_last_feedback_message = "Settings changes discarded";
+    m_last_feedback_message = "Reverted unsaved settings changes";
 }
 
-std::vector<FileCategoryRuleView> DesktopView::GetSupportedCategoryRules() const {
-    std::filesystem::path base_dir(
-        m_settings_draft.default_download_dir.empty()
-            ? m_controller.GetSettings().default_download_dir
-            : m_settings_draft.default_download_dir);
+std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
+    const auto saved = m_controller.GetSettings();
+    const auto& s = m_draft_settings;
+    std::string def_dir = PathSanitizer::GetDefaultDownloadsDir(PathSanitizer::GetExecutableDir()).string();
 
-    return {
-        {"Video",      (base_dir / "Video").string(),      "mp4, mkv, webm, avi, mov, flv, ts, m4v, wmv"},
-        {"Audio",      (base_dir / "Audio").string(),      "mp3, m4a, flac, wav, ogg, aac, opus"},
-        {"Compressed", (base_dir / "Compressed").string(), "zip, rar, 7z, tar, gz, bz2, xz, tgz, zst"},
-        {"Documents",  (base_dir / "Documents").string(),  "pdf, doc, docx, xls, xlsx, ppt, pptx, txt, md, epub, csv"},
-        {"Programs",   (base_dir / "Programs").string(),   "exe, msi, iso, img, dmg, deb, rpm, apk, msix"},
-        {"General",    base_dir.string(),                  "All other file types (saved directly to base folder)"}
+    std::vector<SettingItemView> items;
+    auto add_item = [&](
+        std::string key,
+        SettingsCategory cat,
+        std::string group,
+        std::string label,
+        std::string desc,
+        SettingControlType ctrl,
+        std::string val_txt,
+        std::string def_txt,
+        bool bool_val,
+        bool modified,
+        bool adv = false) {
+        SettingItemView it;
+        it.key = std::move(key);
+        it.category = cat;
+        it.group_title = std::move(group);
+        it.label = std::move(label);
+        it.description = std::move(desc);
+        it.control_type = ctrl;
+        it.value_text = std::move(val_txt);
+        it.default_value_text = std::move(def_txt);
+        it.bool_value = bool_val;
+        it.is_modified = modified;
+        it.is_advanced = adv;
+        if (it.key == m_settings_validation_key) {
+            it.validation_error = m_settings_validation_error;
+        }
+        items.push_back(std::move(it));
     };
-}
-
-std::vector<SettingsItemViewModel> DesktopView::BuildAllSettingsItems(
-    const AppSettings& draft,
-    const AppSettings& committed,
-    const AppSettings& defaults) const {
-
-    auto br = GetBrowserIntegrationStatus();
-    auto ab = GetAboutDialogView();
-    const auto& cfg = m_controller.GetConfig();
-
-    std::vector<SettingsItemViewModel> items;
-    items.reserve(16);
 
     // 1. General
-    items.push_back({
-        "general.start_minimized",
-        SettingsCategory::kGeneral,
-        SettingsControlType::kToggleSwitch,
+    add_item(
+        "start_minimized", SettingsCategory::kGeneral, "Startup & Window Behavior",
         "Start Minimized to System Tray",
-        "Launch Flux silently in the Windows notification area without opening the main window on startup.",
-        draft.start_minimized ? "Enabled" : "Disabled",
-        defaults.start_minimized ? "Enabled" : "Disabled",
-        draft.start_minimized != committed.start_minimized,
-        false, false, false, true, ""
-    });
+        "Launch Flux quietly in the system tray without opening the main window on startup.",
+        SettingControlType::kToggleSwitch,
+        s.start_minimized ? "Enabled" : "Disabled", "Disabled",
+        s.start_minimized, s.start_minimized != saved.start_minimized);
+    add_item(
+        "close_to_tray", SettingsCategory::kGeneral, "Startup & Window Behavior",
+        "Minimize to System Tray on Close",
+        "Keep active downloads and browser IPC listening in the tray when closing the main window.",
+        SettingControlType::kToggleSwitch,
+        s.close_to_tray ? "Enabled" : "Disabled", "Enabled",
+        s.close_to_tray, s.close_to_tray != saved.close_to_tray);
+    add_item(
+        "reduced_motion", SettingsCategory::kGeneral, "Cosmic Interface & Accessibility",
+        "Reduce Decorative Starfield Motion",
+        "Use the static cosmic starfield fallback with zero background movement.",
+        SettingControlType::kToggleSwitch,
+        s.reduced_motion ? "Static Fallback" : "Subtle Drift", "Subtle Drift",
+        s.reduced_motion, s.reduced_motion != saved.reduced_motion);
 
-    items.push_back({
-        "general.close_to_tray",
-        SettingsCategory::kGeneral,
-        SettingsControlType::kToggleSwitch,
-        "Close Main Window to System Tray",
-        "Keep Flux running in the background and listening for browser downloads when closing the main window.",
-        draft.close_to_tray ? "Enabled" : "Disabled",
-        defaults.close_to_tray ? "Enabled" : "Disabled",
-        draft.close_to_tray != committed.close_to_tray,
-        false, false, false, true, ""
-    });
-
-    items.push_back({
-        "general.reduced_motion",
-        SettingsCategory::kGeneral,
-        SettingsControlType::kToggleSwitch,
-        "Reduce Cosmic Background Motion",
-        "Suspend the slow star-field drift and render the static cosmic backdrop.",
-        draft.reduced_motion ? "Enabled (Static Fallback)" : "Disabled (Subtle Drift)",
-        defaults.reduced_motion ? "Enabled (Static Fallback)" : "Disabled (Subtle Drift)",
-        draft.reduced_motion != committed.reduced_motion,
-        false, false, false, true, ""
-    });
-
-    items.push_back({
-        "general.theme",
-        SettingsCategory::kGeneral,
-        SettingsControlType::kReadOnlyStatus,
-        "Interface Theme",
-        "Flux uses a dedicated minimal cosmic dark palette across the desktop application and browser extension.",
-        "Cosmic Dark (Active)",
-        "Cosmic Dark (Active)",
-        false, false, false, false, true, ""
-    });
-
-    // 2. Downloads
-    std::string conc_err;
-    if (draft.max_concurrent_tasks < 1 || draft.max_concurrent_tasks > 16) {
-        conc_err = "Simultaneous downloads must be between 1 and 16.";
-    }
-    items.push_back({
-        "downloads.max_concurrent_tasks",
-        SettingsCategory::kDownloads,
-        SettingsControlType::kNumericStepper,
-        "Max Simultaneous Downloads",
-        "Maximum number of active file and stream transfers running concurrently (1 to 16); extra tasks wait in the queue.",
-        std::to_string(draft.max_concurrent_tasks) + " active task(s)",
-        std::to_string(defaults.max_concurrent_tasks) + " active task(s)",
-        draft.max_concurrent_tasks != committed.max_concurrent_tasks,
-        false, false, false, true, conc_err
-    });
-
-    items.push_back({
-        "downloads.conflict_policy",
-        SettingsCategory::kDownloads,
-        SettingsControlType::kReadOnlyStatus,
-        "File Conflict & Part-File Safety",
-        "In-progress transfers write to .openidm.part and atomically auto-rename on completion so existing files are never overwritten.",
-        "Atomic Commit + Auto-Rename (file (1).ext)",
-        "Atomic Commit + Auto-Rename (file (1).ext)",
-        false, true, false, false, true, ""
-    });
-
-    items.push_back({
-        "downloads.clear_history",
-        SettingsCategory::kDownloads,
-        SettingsControlType::kActionButton,
-        "Clear Completed & Canceled History",
-        "Remove completed and canceled transfer records from the queue list while preserving all downloaded files on disk.",
-        "Clear History...",
-        "",
-        false, false, false, true, ComputeToolbarState().can_clear_history, ""
-    });
+    // 2. Downloads & Queue
+    add_item(
+        "max_concurrent_tasks", SettingsCategory::kDownloads, "Queue Concurrency",
+        "Maximum Simultaneous Downloads",
+        "Active HTTP and stream transfers allowed to run concurrently in the main queue (1–16).",
+        SettingControlType::kNumericStepper,
+        std::to_string(s.max_concurrent_tasks) + " tasks", "3 tasks",
+        false, s.max_concurrent_tasks != saved.max_concurrent_tasks);
+    add_item(
+        "auto_start_downloads", SettingsCategory::kDownloads, "Default Task Behavior",
+        "Start New Downloads Immediately",
+        "Automatically begin transfer when a download or media stream is added from browser or clipboard.",
+        SettingControlType::kToggleSwitch,
+        s.auto_start_downloads ? "Enabled" : "Queued Paused", "Enabled",
+        s.auto_start_downloads, s.auto_start_downloads != saved.auto_start_downloads);
+    add_item(
+        "conflict_policy", SettingsCategory::kDownloads, "Default Task Behavior",
+        "Existing File Conflict Resolution",
+        "Action taken when a completed download matches an existing filename in the destination folder.",
+        SettingControlType::kDropdown,
+        FormatConflictPolicyLabel(s.conflict_policy), FormatConflictPolicyLabel(ConflictPolicy::kAutoRename),
+        false, s.conflict_policy != saved.conflict_policy);
 
     // 3. Save Locations
-    std::string dir_err;
-    if (Trim(draft.default_download_dir).empty()) {
-        dir_err = "Default download directory cannot be empty.";
-    }
-    items.push_back({
-        "locations.default_download_dir",
-        SettingsCategory::kSaveLocations,
-        SettingsControlType::kFolderSelector,
+    add_item(
+        "default_download_dir", SettingsCategory::kSaveLocations, "Destination Folders",
         "Default Download Directory",
-        "Base destination directory for completed downloads. Missing folders are created automatically when saving.",
-        draft.default_download_dir,
-        defaults.default_download_dir,
-        draft.default_download_dir != committed.default_download_dir,
-        false, false, false, true, dir_err
-    });
+        "Base directory where completed files and muxed media containers are saved.",
+        SettingControlType::kFolderSelector,
+        s.default_download_dir, def_dir,
+        false, s.default_download_dir != saved.default_download_dir);
+    add_item(
+        "category_subfolders_enabled", SettingsCategory::kSaveLocations, "Destination Folders",
+        "Organize Downloads into Category Subfolders",
+        "Route Video, Audio, Compressed, Documents, and Programs into dedicated subfolders automatically.",
+        SettingControlType::kToggleSwitch,
+        s.category_subfolders_enabled ? "Enabled" : "Flat Directory", "Enabled",
+        s.category_subfolders_enabled, s.category_subfolders_enabled != saved.category_subfolders_enabled);
 
-    items.push_back({
-        "locations.category_rules",
-        SettingsCategory::kSaveLocations,
-        SettingsControlType::kCategoryRuleTable,
-        "Automatic Category Subfolder Routing",
-        "Flux automatically routes files into category subfolders (Video, Audio, Compressed, Documents, Programs) based on file extension.",
-        "6 Category Rules Active",
-        "6 Category Rules Active",
-        false, false, false, false, true, ""
-    });
-
-    // 4. Connections
-    std::string conn_err;
-    if (draft.default_connections_per_task < 1 || draft.default_connections_per_task > 32) {
-        conn_err = "Default connections per task must be between 1 and 32.";
-    }
-    items.push_back({
-        "connections.default_connections_per_task",
-        SettingsCategory::kConnections,
-        SettingsControlType::kNumericStepper,
+    // 4. Connections & Speed Limits
+    add_item(
+        "default_connections_per_task", SettingsCategory::kConnectionsAndSpeed, "Segmented HTTP Engine",
         "Default Connections per Task",
-        "Maximum concurrent byte-range segments spawned per HTTP/HTTPS file transfer by the Brisk work-stealing engine (1 to 32).",
-        std::to_string(draft.default_connections_per_task) + " connection(s)",
-        std::to_string(defaults.default_connections_per_task) + " connection(s)",
-        draft.default_connections_per_task != committed.default_connections_per_task,
-        false, false, false, true, conn_err
-    });
+        "Maximum dynamic work-stealing HTTP range connections spawned per file transfer (1–32).",
+        SettingControlType::kNumericStepper,
+        std::to_string(s.default_connections_per_task) + " connections", "8 connections",
+        false, s.default_connections_per_task != saved.default_connections_per_task);
+    add_item(
+        "speed_limit_bps", SettingsCategory::kConnectionsAndSpeed, "Bandwidth Throttling",
+        "Global Download Speed Limit",
+        "Cap aggregate transfer rate across active downloads (0 = Unlimited).",
+        SettingControlType::kDropdown,
+        FormatBandwidthLimit(s.speed_limit_bps), "Unlimited",
+        false, s.speed_limit_bps != saved.speed_limit_bps);
+    add_item(
+        "stall_timeout_ms", SettingsCategory::kConnectionsAndSpeed, "Advanced Transfer Tuning",
+        "Segment Stall Timeout",
+        "Inactivity threshold before resetting a stalled HTTP range connection (500–60,000 ms).",
+        SettingControlType::kNumericStepper,
+        std::to_string(s.stall_timeout_ms) + " ms", "3000 ms",
+        false, s.stall_timeout_ms != saved.stall_timeout_ms, true);
+    add_item(
+        "min_split_bytes", SettingsCategory::kConnectionsAndSpeed, "Advanced Transfer Tuning",
+        "Minimum Work-Stealing Split Size",
+        "Smallest remaining byte range eligible for dynamic segment splitting (64 KiB – 10 MiB).",
+        SettingControlType::kDropdown,
+        FormatBytes(s.min_split_bytes), "128.0 KiB",
+        false, s.min_split_bytes != saved.min_split_bytes, true);
 
-    items.push_back({
-        "connections.stall_and_recovery",
-        SettingsCategory::kConnections,
-        SettingsControlType::kReadOnlyStatus,
-        "Work-Stealing & Crash Recovery Parameters",
-        "Dynamic segment splitting, hung-connection stall reset, and WAL crash-recovery byte rollback.",
-        "Min Split: " + FormatBytes(cfg.min_split_bytes) +
-            " | Stall Timeout: " + std::to_string(cfg.stall_timeout_ms) + " ms | Crash Rollback: 64.0 KiB",
-        "Min Split: 128.0 KiB | Stall Timeout: 3000 ms | Crash Rollback: 64.0 KiB",
-        false, true, false, false, true, ""
-    });
+    // 5. Browser Integration
+    add_item(
+        "browser_capture_enabled", SettingsCategory::kBrowserIntegration, "Extension Capture & Interception",
+        "Enable Browser Download & Media Capture",
+        "Accept file downloads and HLS/DASH streams from the Flux Browser Extension (hold Alt when clicking a link to bypass).",
+        SettingControlType::kToggleSwitch,
+        s.browser_capture_enabled ? "Enabled" : "Paused", "Enabled",
+        s.browser_capture_enabled, s.browser_capture_enabled != saved.browser_capture_enabled);
+    add_item(
+        "min_capture_size_bytes", SettingsCategory::kBrowserIntegration, "Extension Capture & Interception",
+        "Minimum Automatic File Capture Size",
+        "Minimum size threshold for size-based fallback download interception.",
+        SettingControlType::kDropdown,
+        FormatBytes(s.min_capture_size_bytes), "1.0 MiB",
+        false, s.min_capture_size_bytes != saved.min_capture_size_bytes);
+    auto bstat = GetBrowserIntegrationStatus();
+    add_item(
+        "ipc_endpoint_status", SettingsCategory::kBrowserIntegration, "Native Messaging & IPC Status",
+        "Local IPC Endpoint (" + std::string(bstat.ipc_server_running ? "Listening" : "Offline") + ")",
+        "Host ID: com.flux.downloadmanager  |  Endpoint: " + bstat.ipc_endpoint,
+        SettingControlType::kDiagnosticReadOnly,
+        bstat.ipc_server_running ? "Connected" : "Standby", "Connected",
+        bstat.ipc_server_running, false);
 
-    // 5. Speed Limits
-    std::string speed_err;
-    if (draft.speed_limit_bps > 0 && draft.speed_limit_bps < 16384ULL) {
-        speed_err = "Bandwidth limit must be Unlimited (0) or at least 16 KiB/s.";
+    // 6. File Types
+    const std::pair<const char*, const char*> cat_rules[] = {
+        {"Video",      ".mp4, .mkv, .webm, .avi, .mov, .flv, .ts, .m4v, .wmv"},
+        {"Audio",      ".mp3, .m4a, .flac, .wav, .ogg, .aac, .opus"},
+        {"Compressed", ".zip, .rar, .7z, .tar, .gz, .bz2, .xz, .tgz, .zst"},
+        {"Documents",  ".pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .md, .epub, .csv"},
+        {"Programs",   ".exe, .msi, .iso, .img, .dmg, .deb, .rpm, .apk, .msix"}
+    };
+    for (const auto& [cname, exts] : cat_rules) {
+        std::filesystem::path target_p = s.category_subfolders_enabled
+            ? (std::filesystem::path(s.default_download_dir) / cname)
+            : std::filesystem::path(s.default_download_dir);
+        add_item(
+            std::string("filetype_rule_") + ToLower(cname),
+            SettingsCategory::kFileTypes, "Automatic Category Classification Rules",
+            std::string(cname) + " Category (" + exts + ")",
+            "Destination: " + target_p.string(),
+            SettingControlType::kDiagnosticReadOnly,
+            s.category_subfolders_enabled ? (std::string(cname) + "/") : "Root Folder",
+            std::string(cname) + "/",
+            true, false);
     }
-    items.push_back({
-        "speed.speed_limit_bps",
-        SettingsCategory::kSpeedLimits,
-        SettingsControlType::kBandwidthControl,
-        "Global Bandwidth Limit",
-        "Token-bucket transfer rate ceiling applied immediately across active downloads. Set to 0 for unlimited speed.",
-        FormatBandwidthLimit(draft.speed_limit_bps),
-        FormatBandwidthLimit(defaults.speed_limit_bps),
-        draft.speed_limit_bps != committed.speed_limit_bps,
-        false, false, false, true, speed_err
-    });
 
-    // 6. Browser Integration
-    items.push_back({
-        "browser.capture_enabled",
-        SettingsCategory::kBrowserIntegration,
-        SettingsControlType::kToggleSwitch,
-        "Capture Downloads & Media from Browsers",
-        "Automatically intercept eligible browser downloads and video streams sent by the Flux Browser Extension.",
-        draft.browser_capture_enabled ? "Enabled" : "Paused",
-        defaults.browser_capture_enabled ? "Enabled" : "Paused",
-        draft.browser_capture_enabled != committed.browser_capture_enabled,
-        false, false, false, true, ""
-    });
+    // 7. Notifications
+    add_item(
+        "show_completion_notification", SettingsCategory::kNotifications, "System Tray Notifications",
+        "Show Completion & Error Notifications",
+        "Display a Windows system tray notification when a background download completes or fails.",
+        SettingControlType::kToggleSwitch,
+        s.show_completion_notification ? "Enabled" : "Muted", "Enabled",
+        s.show_completion_notification, s.show_completion_notification != saved.show_completion_notification);
 
-    items.push_back({
-        "browser.ipc_status",
-        SettingsCategory::kBrowserIntegration,
-        SettingsControlType::kReadOnlyStatus,
-        "Native Messaging & Local IPC Bridge",
-        "Authenticated Native Messaging host (com.flux.downloadmanager) connected to the per-user IPC endpoint.",
-        std::string(br.ipc_server_running ? "Listening (" : "Offline (") + br.ipc_endpoint + ")",
-        "Listening",
-        false, false, false, false, true, ""
-    });
-
-    items.push_back({
-        "browser.intercept_rules",
-        SettingsCategory::kBrowserIntegration,
-        SettingsControlType::kReadOnlyStatus,
-        "Interception Rules & Alt-Key Bypass",
-        "Hold Alt while clicking any link in your browser to bypass Flux and use the browser's built-in download manager.",
-        "Min Fallback Size: " + FormatBytes(br.min_capture_size_bytes) + " | Alt-Click Bypass Enabled",
-        "Min Fallback Size: 1.0 MiB | Alt-Click Bypass Enabled",
-        false, true, false, false, true, ""
-    });
-
-    // 7. About & Diagnostics
-    items.push_back({
-        "about.version",
-        SettingsCategory::kAboutAndDiagnostics,
-        SettingsControlType::kReadOnlyStatus,
-        "Application Version & License",
-        ab.target_platform,
-        ab.app_name + " v" + ab.version + " (" + ab.license + ")",
+    // 8. About & Diagnostics
+    auto ab = GetAboutDialogView();
+    add_item(
+        "diag_version", SettingsCategory::kAboutAndDiagnostics, "Application & Environment",
         ab.app_name + " v" + ab.version,
-        false, false, false, false, true, ""
-    });
-
-    items.push_back({
-        "about.workers",
-        SettingsCategory::kAboutAndDiagnostics,
-        SettingsControlType::kReadOnlyStatus,
-        "Stream Engine & Media Muxer Workers",
-        "Out-of-process HLS/DASH manifest prober/downloader and container muxer status.",
-        std::string("N_m3u8DL-RE: ") + (br.nm3u8dl_available ? "Ready" : "Missing") +
-            " | FFmpeg: " + (br.ffmpeg_available ? "Ready" : "Missing"),
-        "N_m3u8DL-RE: Ready | FFmpeg: Ready",
-        false, false, false, false, true, ""
-    });
-
-    items.push_back({
-        "about.security",
-        SettingsCategory::kAboutAndDiagnostics,
-        SettingsControlType::kReadOnlyStatus,
-        "Storage & Credential Security",
-        "SQLite WAL database with DPAPI / AES-256-GCM encrypted session headers and automatic log redaction.",
-        "State DB: " + cfg.state_db_path.filename().string() + " (Encrypted Auth + Redacted Logs)",
-        "Encrypted Auth + Redacted Logs",
-        false, true, false, false, true, ""
-    });
-
-    items.push_back({
-        "about.restore_defaults",
-        SettingsCategory::kAboutAndDiagnostics,
-        SettingsControlType::kActionButton,
-        "Restore Default Settings",
-        "Reset concurrency, connection counts, speed limits, download directory, and tray preferences to factory defaults.",
-        "Restore Defaults...",
-        "",
-        false, false, true, true, true, ""
-    });
+        "License: " + ab.license + "  |  Platform: " + ab.target_platform,
+        SettingControlType::kDiagnosticReadOnly,
+        "v" + ab.version, "v" + ab.version, true, false);
+    add_item(
+        "diag_nm3u8dl", SettingsCategory::kAboutAndDiagnostics, "Stream Pipeline Workers",
+        "Stream Manifest & Segment Worker (N_m3u8DL-RE)",
+        bstat.nm3u8dl_path,
+        SettingControlType::kDiagnosticReadOnly,
+        bstat.nm3u8dl_available ? "Ready" : "Missing", "Ready", bstat.nm3u8dl_available, false);
+    add_item(
+        "diag_ffmpeg", SettingsCategory::kAboutAndDiagnostics, "Stream Pipeline Workers",
+        "Container Multiplexer (FFmpeg)",
+        bstat.ffmpeg_path,
+        SettingControlType::kDiagnosticReadOnly,
+        bstat.ffmpeg_available ? "Ready" : "Missing", "Ready", bstat.ffmpeg_available, false);
+    add_item(
+        "diag_storage", SettingsCategory::kAboutAndDiagnostics, "Storage & Persistence",
+        "SQLite WAL State Database",
+        m_controller.GetConfig().state_db_path.string(),
+        SettingControlType::kDiagnosticReadOnly,
+        "WAL Active", "WAL Active", true, false);
 
     return items;
 }
 
-SettingsCenterViewModel DesktopView::BuildSettingsCenterViewModel() const {
+SettingsCenterViewModel DesktopView::BuildSettingsCenterView() const {
     SettingsCenterViewModel vm;
-    vm.is_open = m_settings_open;
-    vm.selected_category = m_settings_category;
+    vm.is_open = m_settings_center_open;
+    vm.active_category = m_settings_category;
     vm.search_query = m_settings_search_query;
-    vm.show_advanced = m_settings_show_advanced;
-    vm.committed_settings = m_controller.GetSettings();
-    vm.draft_settings = m_settings_draft;
-    vm.category_rules = GetSupportedCategoryRules();
+    vm.has_unsaved_changes = HasUnsavedSettingsChanges();
+    auto val_res = ValidateSettingsInput(m_draft_settings);
+    vm.is_valid = m_settings_validation_error.empty() && val_res.ok();
+    vm.validation_error = !m_settings_validation_error.empty()
+        ? m_settings_validation_error
+        : (val_res.ok() ? "" : val_res.error->message);
     vm.browser_status = GetBrowserIntegrationStatus();
     vm.about_info = GetAboutDialogView();
 
-    auto defaults = BuildDefaultAppSettings(m_controller);
-    auto all_items = BuildAllSettingsItems(m_settings_draft, vm.committed_settings, defaults);
+    if (!vm.is_valid) {
+        vm.status_banner = "Validation Error: " + vm.validation_error;
+    } else if (vm.has_unsaved_changes) {
+        vm.status_banner = "Unsaved changes — Click 'Apply & Save' to persist or 'Cancel' to revert.";
+    } else {
+        vm.status_banner = "All configuration changes saved to SQLite state store.";
+    }
 
-    const std::pair<SettingsCategory, const char*> cat_defs[] = {
-        {SettingsCategory::kGeneral,            "Startup, system tray & cosmic motion"},
-        {SettingsCategory::kDownloads,          "Simultaneous queue limits & history"},
-        {SettingsCategory::kSaveLocations,      "Default directory & category folders"},
-        {SettingsCategory::kConnections,        "Segmented HTTP connections & recovery"},
-        {SettingsCategory::kSpeedLimits,        "Global token-bucket bandwidth ceiling"},
-        {SettingsCategory::kBrowserIntegration, "Extension capture, IPC & bypass rules"},
-        {SettingsCategory::kAboutAndDiagnostics,"Version, workers, security & reset"}
+    const auto& m = m_metrics;
+    int margin_x = DesignSystem::ScaleForDpi(44, m.dpi);
+    int margin_y = DesignSystem::ScaleForDpi(36, m.dpi);
+    vm.modal_rect = {margin_x, margin_y, m_window_width - margin_x, m_window_height - margin_y};
+    int side_w = DesignSystem::ScaleForDpi(210, m.dpi);
+    int header_h = DesignSystem::ScaleForDpi(52, m.dpi);
+    int footer_h = DesignSystem::ScaleForDpi(52, m.dpi);
+
+    vm.sidebar_rect = {vm.modal_rect.left, vm.modal_rect.top + header_h, vm.modal_rect.left + side_w, vm.modal_rect.bottom - footer_h};
+    vm.content_rect = {vm.sidebar_rect.right + 1, vm.modal_rect.top + header_h, vm.modal_rect.right, vm.modal_rect.bottom - footer_h};
+    vm.search_box_rect = {
+        vm.modal_rect.right - DesignSystem::ScaleForDpi(240, m.dpi) - m.space_md,
+        vm.modal_rect.top + (header_h - m.button_height) / 2,
+        vm.modal_rect.right - m.space_md,
+        vm.modal_rect.top + (header_h + m.button_height) / 2
     };
 
-    int sy = m_metrics.space_md;
-    for (const auto& [cat, sub] : cat_defs) {
-        SettingsCategorySummary cs;
-        cs.category = cat;
-        cs.title = SettingsCategoryToLabel(cat);
-        cs.subtitle = sub;
-        cs.selected = (cat == m_settings_category);
-        cs.rect = {m_metrics.space_sm, sy, m_metrics.settings_sidebar_width - m_metrics.space_sm, sy + m_metrics.button_height};
-        sy += m_metrics.button_height + m_metrics.space_xs;
+    int footer_btn_y = vm.modal_rect.bottom - (footer_h + m.button_height) / 2;
+    int restore_w = DesignSystem::ScaleForDpi(140, m.dpi);
+    int cancel_w = DesignSystem::ScaleForDpi(96, m.dpi);
+    int apply_w = DesignSystem::ScaleForDpi(124, m.dpi);
 
-        for (const auto& item : all_items) {
-            if (item.category == cat) {
-                ++cs.item_count;
-                if (item.is_modified) {
-                    ++cs.modified_count;
-                    vm.has_unsaved_changes = true;
-                }
+    vm.restore_defaults_rect = {
+        vm.modal_rect.left + m.space_md,
+        footer_btn_y,
+        vm.modal_rect.left + m.space_md + restore_w,
+        footer_btn_y + m.button_height
+    };
+    vm.apply_button_rect = {
+        vm.modal_rect.right - m.space_md - apply_w,
+        footer_btn_y,
+        vm.modal_rect.right - m.space_md,
+        footer_btn_y + m.button_height
+    };
+    vm.cancel_button_rect = {
+        vm.apply_button_rect.left - m.space_sm - cancel_w,
+        footer_btn_y,
+        vm.apply_button_rect.left - m.space_sm,
+        footer_btn_y + m.button_height
+    };
+
+    auto all_items = BuildAllSettingItems();
+    const SettingsCategory all_cats[] = {
+        SettingsCategory::kGeneral,
+        SettingsCategory::kDownloads,
+        SettingsCategory::kSaveLocations,
+        SettingsCategory::kConnectionsAndSpeed,
+        SettingsCategory::kBrowserIntegration,
+        SettingsCategory::kFileTypes,
+        SettingsCategory::kNotifications,
+        SettingsCategory::kAboutAndDiagnostics
+    };
+
+    int tab_y = vm.sidebar_rect.top + m.space_sm;
+    int tab_h = DesignSystem::ScaleForDpi(32, m.dpi);
+    for (SettingsCategory c : all_cats) {
+        size_t cnt = 0;
+        size_t mod_cnt = 0;
+        for (const auto& it : all_items) {
+            if (it.category == c) {
+                ++cnt;
+                if (it.is_modified) ++mod_cnt;
             }
         }
-        vm.categories.push_back(std::move(cs));
+        RectI trc{vm.sidebar_rect.left + m.space_sm, tab_y, vm.sidebar_rect.right - m.space_sm, tab_y + tab_h};
+        vm.categories.push_back({c, SettingsCategoryToLabel(c), cnt, mod_cnt, c == m_settings_category, trc});
+        tab_y += tab_h + m.space_xs;
     }
 
-    std::string q = ToLower(Trim(m_settings_search_query));
-    for (auto& item : all_items) {
-        if (!m_settings_show_advanced && item.is_advanced && q.empty()) {
-            continue;
-        }
+    std::string q = ToLower(m_settings_search_query);
+    int row_y = vm.content_rect.top + m.space_sm;
+    int row_h = DesignSystem::ScaleForDpi(48, m.dpi);
+    int ctrl_w = DesignSystem::ScaleForDpi(170, m.dpi);
+    int ctrl_h = DesignSystem::ScaleForDpi(28, m.dpi);
+
+    for (auto& it : all_items) {
+        bool matches = false;
         if (!q.empty()) {
-            bool match = ToLower(item.label).find(q) != std::string::npos ||
-                         ToLower(item.description).find(q) != std::string::npos ||
-                         ToLower(item.key).find(q) != std::string::npos ||
-                         ToLower(item.current_value_display).find(q) != std::string::npos ||
-                         ToLower(SettingsCategoryToLabel(item.category)).find(q) != std::string::npos;
-            if (!match) continue;
-        } else if (item.category != m_settings_category) {
-            continue;
+            matches = ToLower(it.label).find(q) != std::string::npos ||
+                      ToLower(it.description).find(q) != std::string::npos ||
+                      ToLower(it.group_title).find(q) != std::string::npos ||
+                      ToLower(it.key).find(q) != std::string::npos;
+        } else {
+            matches = (it.category == m_settings_category);
         }
-        if (!item.validation_error.empty() && vm.validation_summary.empty()) {
-            vm.validation_summary = item.validation_error;
-        }
-        vm.visible_items.push_back(std::move(item));
+        if (!matches) continue;
+
+        it.row_rect = {vm.content_rect.left + m.space_md, row_y, vm.content_rect.right - m.space_md, row_y + row_h};
+        it.control_rect = {
+            it.row_rect.right - ctrl_w - m.space_sm,
+            row_y + (row_h - ctrl_h) / 2,
+            it.row_rect.right - m.space_sm,
+            row_y + (row_h + ctrl_h) / 2
+        };
+        vm.visible_items.push_back(it);
+        row_y += row_h + m.space_xs;
     }
 
-    if (!m_settings_validation_error.empty()) {
-        vm.is_valid = false;
-        vm.validation_summary = m_settings_validation_error;
-    } else {
-        auto val = ValidateSettingsDraft();
-        vm.is_valid = val.ok();
-        if (!val.ok()) vm.validation_summary = val.error->message;
-    }
-
-    if (!vm.is_valid) {
-        vm.status_banner = "Validation Error: " + vm.validation_summary;
-    } else if (vm.has_unsaved_changes) {
-        vm.status_banner = "Unsaved changes in draft. Click Apply to persist settings.";
-    } else {
-        vm.status_banner = "All settings synchronized with persistent storage.";
+    const std::pair<const char*, const char*> rules[] = {
+        {"Video",      ".mp4, .mkv, .webm, .avi, .mov, .flv, .ts, .m4v, .wmv"},
+        {"Audio",      ".mp3, .m4a, .flac, .wav, .ogg, .aac, .opus"},
+        {"Compressed", ".zip, .rar, .7z, .tar, .gz, .bz2, .xz, .tgz, .zst"},
+        {"Documents",  ".pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .txt, .md, .epub, .csv"},
+        {"Programs",   ".exe, .msi, .iso, .img, .dmg, .deb, .rpm, .apk, .msix"}
+    };
+    for (const auto& [cn, exts] : rules) {
+        std::filesystem::path p = m_draft_settings.category_subfolders_enabled
+            ? (std::filesystem::path(m_draft_settings.default_download_dir) / cn)
+            : std::filesystem::path(m_draft_settings.default_download_dir);
+        vm.file_category_rules.push_back({cn, exts, p.string()});
     }
 
     return vm;
 }
+
+// -----------------------------------------------------------------------------
+// Dialog & Toolbar Action Controllers
+// -----------------------------------------------------------------------------
 
 Result<TaskModel> DesktopView::SubmitAddDownloadDialog(const AddDownloadDialogInput& input) {
     auto parsed = brisk::HttpClient::ParseUrl(input.url);
@@ -1713,7 +1868,7 @@ Result<void> DesktopView::TriggerToolbarAction(ToolbarActionId action_id) {
             m_last_feedback_message = "Opened Add Download Dialog";
             return Result<void>::Ok();
         case ToolbarActionId::kSettings:
-            OpenSettingsCenter(m_settings_category);
+            OpenSettingsCenter(SettingsCategory::kGeneral);
             return Result<void>::Ok();
     }
     return Result<void>::Ok();
@@ -1867,13 +2022,13 @@ Result<std::filesystem::path> DesktopView::ActionOpenDestinationFolder(bool dry_
 
 void DesktopView::ActionSetConcurrentLimit(uint32_t max_tasks) {
     m_controller.SetMaxConcurrentTasks(max_tasks);
-    m_settings_draft.max_concurrent_tasks = m_controller.GetMaxConcurrentTasks();
+    m_draft_settings.max_concurrent_tasks = m_controller.GetMaxConcurrentTasks();
     m_last_feedback_message = "Max concurrent downloads set to " + std::to_string(m_controller.GetMaxConcurrentTasks());
 }
 
 void DesktopView::ActionSetSpeedLimit(uint64_t bps) {
     m_controller.SetGlobalSpeedLimit(bps);
-    m_settings_draft.speed_limit_bps = bps;
+    m_draft_settings.speed_limit_bps = bps;
     m_last_feedback_message = (bps == 0) ? "Speed limit set to Unlimited" : ("Speed limit set to " + FormatSpeed(bps));
 }
 
@@ -1881,7 +2036,7 @@ void DesktopView::ActionSetBrowserCapture(bool enabled) {
     auto s = m_controller.GetSettings();
     s.browser_capture_enabled = enabled;
     m_controller.UpdateSettings(s);
-    m_settings_draft.browser_capture_enabled = enabled;
+    m_draft_settings.browser_capture_enabled = enabled;
     if (m_ipc_server) {
         m_ipc_server->SetCaptureEnabled(enabled);
     }
@@ -1889,15 +2044,21 @@ void DesktopView::ActionSetBrowserCapture(bool enabled) {
 }
 
 Result<void> DesktopView::ActionSaveSettings(const AppSettings& settings) {
-    AppSettings normalized = settings;
-    normalized.theme = "dark";
-    auto r = m_controller.UpdateSettings(normalized);
+    auto val = ValidateSettingsInput(settings);
+    if (!val.ok()) {
+        m_settings_validation_error = val.error->message;
+        m_last_feedback_message = "Settings validation failed: " + val.error->message;
+        return val;
+    }
+    auto r = m_controller.UpdateSettings(settings);
     if (r.ok()) {
-        SetTheme("dark", false);
-        m_settings_draft = m_controller.GetSettings();
+        m_draft_settings = m_controller.GetSettings();
+        m_settings_validation_key.clear();
         m_settings_validation_error.clear();
+        SetTheme(settings.theme, false);
+        m_starfield.SetReducedMotion(settings.reduced_motion);
         if (m_ipc_server) {
-            m_ipc_server->SetCaptureEnabled(m_settings_draft.browser_capture_enabled);
+            m_ipc_server->SetCaptureEnabled(settings.browser_capture_enabled);
         }
         m_last_feedback_message = "Settings saved";
     }
@@ -1907,9 +2068,11 @@ Result<void> DesktopView::ActionSaveSettings(const AppSettings& settings) {
 Result<AppSettings> DesktopView::ActionRestoreDefaultSettings() {
     auto r = m_controller.RestoreDefaultSettings();
     if (r.ok()) {
-        SetTheme("dark", false);
-        m_settings_draft = *r.value;
+        m_draft_settings = *r.value;
+        m_settings_validation_key.clear();
         m_settings_validation_error.clear();
+        SetTheme(r.value->theme, false);
+        m_starfield.SetReducedMotion(r.value->reduced_motion);
         if (m_ipc_server) {
             m_ipc_server->SetCaptureEnabled(r.value->browser_capture_enabled);
         }
@@ -1919,6 +2082,13 @@ Result<AppSettings> DesktopView::ActionRestoreDefaultSettings() {
 }
 
 bool DesktopView::HandleKeyShortcut(const std::string& key_chord) {
+    if (key_chord == "Escape" || key_chord == "VK_ESCAPE") {
+        if (m_settings_center_open) {
+            CloseSettingsCenter(true);
+            return true;
+        }
+        return false;
+    }
     if (key_chord == "Down" || key_chord == "VK_DOWN") {
         SelectNextRow();
         return true;
@@ -1965,12 +2135,6 @@ bool DesktopView::HandleKeyShortcut(const std::string& key_chord) {
         TriggerToolbarAction(ToolbarActionId::kSettings);
         return true;
     }
-    if (key_chord == "Escape" || key_chord == "VK_ESCAPE") {
-        if (m_settings_open) {
-            CloseSettingsCenter(true);
-            return true;
-        }
-    }
     return false;
 }
 
@@ -1978,32 +2142,19 @@ BrowserIntegrationStatusView DesktopView::GetBrowserIntegrationStatus() const {
     BrowserIntegrationStatusView v;
     v.ipc_server_running = (m_ipc_server != nullptr);
     v.ipc_endpoint = m_ipc_server ? m_ipc_server->GetEndpointPath() : ipc::IpcServer::DefaultSocketPath();
-    v.native_host_id = "com.flux.downloadmanager";
     v.capture_enabled = m_controller.GetSettings().browser_capture_enabled;
-    v.min_capture_size_bytes = 1048576ULL;
-    v.intercepted_extensions = {
-        "zip", "rar", "7z", "iso", "exe", "msi", "mp4", "mkv", "webm", "mp3", "flac", "pdf", "tar", "gz", "bin"
-    };
     const auto& cfg = m_controller.GetConfig();
     std::error_code ec;
     v.nm3u8dl_path = cfg.nm3u8dl_binary_path.string();
     v.nm3u8dl_available = std::filesystem::exists(cfg.nm3u8dl_binary_path, ec);
     v.ffmpeg_path = cfg.ffmpeg_binary_path.string();
     v.ffmpeg_available = std::filesystem::exists(cfg.ffmpeg_binary_path, ec);
-    v.supported_browsers = {
-        "Google Chrome (MV3)",
-        "Microsoft Edge (MV3)",
-        "Brave Browser (MV3)",
-        "Mozilla Firefox (MV3)"
-    };
+    v.supported_browsers = {"Google Chrome (MV3)", "Microsoft Edge (MV3)", "Brave Browser (MV3)", "Mozilla Firefox (MV3)"};
     return v;
 }
 
 AboutDialogView DesktopView::GetAboutDialogView() const {
     AboutDialogView a;
-    const auto& cfg = m_controller.GetConfig();
-    a.state_db_path = cfg.state_db_path.string();
-    a.data_dir_path = cfg.state_db_path.parent_path().string();
     a.upstream_attributions = {
         "Brisk Download Manager (https://github.com/BrisklyDev/brisk) — GPL-3.0-or-later",
         "Cat Catch Media Sniffer (https://github.com/xifangczy/cat-catch) — GPL-3.0",
@@ -2017,7 +2168,7 @@ std::string DesktopView::RenderQueueTableText() const {
     auto rows = BuildVisibleTaskRows(0, 500);
     std::ostringstream oss;
     oss << "========================================================================================================================\n";
-    oss << " Flux Download Manager v0.3.0 — Cosmic Dark UI  |  Category: " << CategoryToLabel(m_selected_category)
+    oss << " Flux Download Manager v0.3.0 — Cosmic Dark Edition  |  Category: " << CategoryToLabel(m_selected_category)
         << "  |  Theme: " << m_theme_name << "\n";
     oss << "========================================================================================================================\n";
     oss << std::left
@@ -2074,13 +2225,13 @@ std::string DesktopView::RenderFullDesktopSnapshotText() const {
 
 #ifdef _WIN32
 // -----------------------------------------------------------------------------
-// Native Windows 11 Win32 + GDI Double-Buffered Cosmic UI, Star-Field Backdrop,
-// Multi-Column Task Table, Context Menus & Professional Settings Center Dialog
+// Native Windows 11 Win32 + GDI Double-Buffered Cosmic Dark Interface & Settings Center
 // -----------------------------------------------------------------------------
 namespace {
 
 constexpr UINT WM_OPENIDM_TRAYICON = WM_APP + 101;
 constexpr UINT IDT_UI_REFRESH      = 1001;
+constexpr UINT IDT_COSMIC_DRIFT    = 1002;
 constexpr int  IDC_SEARCH_EDIT     = 1101;
 
 constexpr int IDM_TRAY_SHOW        = 2001;
@@ -2109,7 +2260,6 @@ struct Win32WindowContext {
     HWND hSearchEdit{nullptr};
     NOTIFYICONDATAW nid{};
     bool tray_added{false};
-    bool timer_running{false};
 };
 
 std::wstring Utf8ToW(std::string_view sv) {
@@ -2140,28 +2290,36 @@ void FillRectSolid(HDC hdc, const RECT& rc, ColorRgba col) {
     DeleteObject(br);
 }
 
-void DrawBorderRect(HDC hdc, const RECT& rc, ColorRgba col) {
+void FrameRectBorder(HDC hdc, const RECT& rc, ColorRgba col, int thickness = 1) {
     HBRUSH br = CreateSolidBrush(col.ToWin32ColorRef());
-    FrameRect(hdc, &rc, br);
+    RECT top_r{rc.left, rc.top, rc.right, rc.top + thickness};
+    RECT bot_r{rc.left, rc.bottom - thickness, rc.right, rc.bottom};
+    RECT lft_r{rc.left, rc.top, rc.left + thickness, rc.bottom};
+    RECT rgt_r{rc.right - thickness, rc.top, rc.right, rc.bottom};
+    FillRect(hdc, &top_r, br);
+    FillRect(hdc, &bot_r, br);
+    FillRect(hdc, &lft_r, br);
+    FillRect(hdc, &rgt_r, br);
     DeleteObject(br);
 }
 
-void DrawCosmicStarFieldGdi(HDC hdc, const CosmicBackgroundState& bg_state) {
-    for (const auto& star : bg_state.stars) {
-        COLORREF cr = star.color.ToWin32ColorRef();
-        if (star.size_px <= 1) {
-            SetPixelV(hdc, star.x_px, star.y_px, cr);
-        } else {
-            RECT sr{star.x_px, star.y_px, star.x_px + star.size_px, star.y_px + star.size_px};
-            FillRectSolid(hdc, sr, star.color);
-            if (star.has_celestial_cross) {
-                SetPixelV(hdc, star.x_px - 1, star.y_px, cr);
-                SetPixelV(hdc, star.x_px + star.size_px, star.y_px, cr);
-                SetPixelV(hdc, star.x_px, star.y_px - 1, cr);
-                SetPixelV(hdc, star.x_px, star.y_px + star.size_px, cr);
-            }
-        }
+bool SelectFolderWithDialogWin32(HWND hwnd, std::string& io_folder) {
+    wchar_t display_name[MAX_PATH]{};
+    BROWSEINFOW bi{};
+    bi.hwndOwner = hwnd;
+    bi.pszDisplayName = display_name;
+    bi.lpszTitle = L"Select Default Download Directory for Flux";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return false;
+    wchar_t path_buf[MAX_PATH]{};
+    bool ok = (SHGetPathFromIDListW(pidl, path_buf) != FALSE);
+    CoTaskMemFree(pidl);
+    if (ok && path_buf[0] != L'\0') {
+        io_folder = WToUtf8(path_buf);
+        return true;
     }
+    return false;
 }
 
 void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController& controller) {
@@ -2171,7 +2329,7 @@ void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController
         if (hData) {
             const wchar_t* wtxt = static_cast<const wchar_t*>(GlobalLock(hData));
             if (wtxt) {
-                std::string candidate = Trim(WToUtf8(wtxt));
+                std::string candidate = WToUtf8(wtxt);
                 if (candidate.rfind("http://", 0) == 0 || candidate.rfind("https://", 0) == 0) {
                     clip_url = candidate;
                 }
@@ -2189,537 +2347,399 @@ void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController
         return;
     }
 
-    const auto s = controller.GetSettings();
-    std::wstring prompt = L"Queue new transfer in Flux?\n\n"
-                          L"• Source URL: " + Utf8ToW(clip_url) + L"\n"
-                          L"• Destination Folder: " + Utf8ToW(s.default_download_dir) + L"\n"
-                          L"• Segmented Connections: " + std::to_wstring(s.default_connections_per_task) + L"\n"
-                          L"• Global Speed Limit: " + Utf8ToW(DesktopView::FormatBandwidthLimit(s.speed_limit_bps));
-    if (MessageBoxW(hwnd, prompt.c_str(), L"Flux — Confirm New Download", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
+    auto s = controller.GetSettings();
+    std::wstring prompt = L"Add download from clipboard URL?\n\nURL: " + Utf8ToW(clip_url) +
+                          L"\nDestination: " + Utf8ToW(s.default_download_dir) +
+                          L"\nConnections: " + std::to_wstring(s.default_connections_per_task);
+    if (MessageBoxW(hwnd, prompt.c_str(), L"Flux — Add Download", MB_OKCANCEL | MB_ICONQUESTION) == IDOK) {
         AddDownloadDialogInput in;
         in.url = clip_url;
         in.save_dir = s.default_download_dir;
         in.max_connections = s.default_connections_per_task;
-        in.start_immediately = true;
+        in.start_immediately = s.auto_start_downloads;
         view.SubmitAddDownloadDialog(in);
     }
 }
 
-// -----------------------------------------------------------------------------
-// Interactive Win32 Professional Settings Center Modal Window
-// -----------------------------------------------------------------------------
-constexpr int IDC_SETTINGS_SEARCH = 4101;
-
-struct SettingsActionHitRect {
-    std::string key;
-    std::string action; // "toggle", "dec", "inc", "browse", "preset_0", "preset_512k", "preset_2m", "preset_10m", "preset_50m", "reset_field", "button"
-    RectI rect;
-};
-
-struct Win32SettingsDialogCtx {
-    DesktopView* view{nullptr};
-    DownloadController* controller{nullptr};
-    HWND hwndParent{nullptr};
-    HWND hwndDlg{nullptr};
-    HWND hSearchEdit{nullptr};
-    std::vector<RectI> category_rects;
-    std::vector<SettingsActionHitRect> control_rects;
-    RectI apply_btn_rect;
-    RectI cancel_btn_rect;
-    RectI restore_btn_rect;
-    bool closed{false};
-};
-
-bool BrowseForFolderWin32(HWND hwndOwner, std::string& out_folder) {
-    BROWSEINFOW bi{};
-    bi.hwndOwner = hwndOwner;
-    bi.lpszTitle = L"Select Default Download Directory for Flux";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
-    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return false;
-    wchar_t path_buf[MAX_PATH]{};
-    bool ok = (SHGetPathFromIDListW(pidl, path_buf) != FALSE);
-    CoTaskMemFree(pidl);
-    if (ok && path_buf[0] != L'\0') {
-        out_folder = WToUtf8(path_buf);
-        return true;
+void PaintCosmicBackgroundStars(HDC hdc, const DesktopView& view) {
+    auto stars = view.BuildCosmicBackgroundStars();
+    for (const auto& s : stars) {
+        if (s.size_px <= 1) {
+            SetPixelV(hdc, s.x, s.y, s.blended_color.ToWin32ColorRef());
+        } else {
+            RECT src{s.x, s.y, s.x + s.size_px, s.y + s.size_px};
+            FillRectSolid(hdc, src, s.blended_color);
+        }
     }
-    return false;
 }
 
-void PaintSettingsDialogWin32(HWND hwnd, Win32SettingsDialogCtx& sctx) {
-    PAINTSTRUCT ps{};
-    HDC hdc_screen = BeginPaint(hwnd, &ps);
+void PaintSettingsCenterOverlayWin32(HDC hdc, DesktopView& view, HFONT hFontBody, HFONT hFontBold) {
+    const auto& pal = view.GetPalette();
+    const auto& m = view.GetMetrics();
+    auto sv = view.BuildSettingsCenterView();
 
-    RECT client_rc{};
-    GetClientRect(hwnd, &client_rc);
-    int w = client_rc.right - client_rc.left;
-    int h = client_rc.bottom - client_rc.top;
-
-    HDC hdc = CreateCompatibleDC(hdc_screen);
-    HBITMAP hbm = CreateCompatibleBitmap(hdc_screen, std::max(1, w), std::max(1, h));
-    HGDIOBJ old_bm = SelectObject(hdc, hbm);
-
-    const auto& pal = sctx.view->GetPalette();
-    const auto& m = sctx.view->GetMetrics();
-    auto vm = sctx.view->BuildSettingsCenterViewModel();
-
-    FillRectSolid(hdc, client_rc, pal.app_background);
-    auto bg_stars = DesignSystem::ComputeCosmicBackground(w, h, m.dpi, sctx.view->GetCosmicElapsedMs(), vm.draft_settings.reduced_motion, false);
-    DrawCosmicStarFieldGdi(hdc, bg_stars);
-    SetBkMode(hdc, TRANSPARENT);
-
-    HFONT hFontTitle = CreateFontW(-m.font_subtitle_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hFontBold = CreateFontW(-m.font_body_strong_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hFontBody = CreateFontW(-m.font_body_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HFONT hFontCap = CreateFontW(-m.font_caption_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HGDIOBJ old_font = SelectObject(hdc, hFontTitle);
+    RECT modal_rc = ToWinRect(sv.modal_rect);
+    FillRectSolid(hdc, modal_rc, pal.cosmic_void);
+    FrameRectBorder(hdc, modal_rc, pal.border_focus, 1);
 
     int header_h = DesignSystem::ScaleForDpi(52, m.dpi);
-    int footer_h = DesignSystem::ScaleForDpi(54, m.dpi);
-    int sidebar_w = m.settings_sidebar_width;
-
-    // Top Header
-    RECT hdr_rc{0, 0, w, header_h};
-    FillRectSolid(hdc, hdr_rc, pal.surface_primary);
-    RECT title_rc{m.space_lg, 0, w - DesignSystem::ScaleForDpi(240, m.dpi), header_h};
-    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    DrawTextW(hdc, L"Flux Configuration & Diagnostics Center", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    // Left Category Sidebar
-    RECT side_rc{0, header_h + 1, sidebar_w, h - footer_h - 1};
-    FillRectSolid(hdc, side_rc, pal.surface_primary);
-
-    sctx.category_rects.clear();
-    int cy = header_h + m.space_md;
-    int cat_h = DesignSystem::ScaleForDpi(44, m.dpi);
-    for (const auto& cat : vm.categories) {
-        RectI crc{m.space_sm, cy, sidebar_w - m.space_sm, cy + cat_h};
-        sctx.category_rects.push_back(crc);
-        RECT wcrc = ToWinRect(crc);
-        if (cat.selected) {
-            FillRectSolid(hdc, wcrc, pal.surface_selected);
-            RECT accent_bar{wcrc.left, wcrc.top + 6, wcrc.left + 3, wcrc.bottom - 6};
-            FillRectSolid(hdc, accent_bar, pal.accent_cyan);
-        }
-        SelectObject(hdc, hFontBold);
-        SetTextColor(hdc, (cat.selected ? pal.text_primary : pal.text_secondary).ToWin32ColorRef());
-        std::string title_line = cat.title + (cat.modified_count > 0 ? " *" : "");
-        RECT t_rc{wcrc.left + m.space_md, wcrc.top + 5, wcrc.right - m.space_sm, wcrc.top + 24};
-        std::wstring wtitle = Utf8ToW(title_line);
-        DrawTextW(hdc, wtitle.c_str(), -1, &t_rc, DT_LEFT | DT_SINGLELINE);
-
-        SelectObject(hdc, hFontCap);
-        SetTextColor(hdc, pal.text_muted.ToWin32ColorRef());
-        RECT sub_rc{wcrc.left + m.space_md, wcrc.top + 23, wcrc.right - m.space_sm, wcrc.bottom - 4};
-        std::wstring wsub = Utf8ToW(cat.subtitle);
-        DrawTextW(hdc, wsub.c_str(), -1, &sub_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        cy += cat_h + m.space_xs;
-    }
-
-    // Main Content Area
-    sctx.control_rects.clear();
-    int content_left = sidebar_w + m.space_lg;
-    int content_right = w - m.space_lg;
-    int iy = header_h + m.space_md;
-
-    // Category Title Banner
-    SelectObject(hdc, hFontTitle);
-    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    std::string sec_heading = vm.search_query.empty()
-        ? DesktopView::SettingsCategoryToLabel(vm.selected_category)
-        : ("Search Results for \"" + vm.search_query + "\"");
-    RECT sh_rc{content_left, iy, content_right, iy + 26};
-    std::wstring wsh = Utf8ToW(sec_heading);
-    DrawTextW(hdc, wsh.c_str(), -1, &sh_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    iy += 32;
-
-    for (const auto& item : vm.visible_items) {
-        int row_h = (item.control_type == SettingsControlType::kCategoryRuleTable)
-            ? DesignSystem::ScaleForDpi(152, m.dpi)
-            : DesignSystem::ScaleForDpi(62, m.dpi);
-        if (iy + row_h > h - footer_h - m.space_sm) break;
-
-        RECT row_rc{content_left, iy, content_right, iy + row_h};
-        FillRectSolid(hdc, row_rc, pal.surface_primary);
-        DrawBorderRect(hdc, row_rc, item.is_modified ? pal.accent_cyan : pal.border_subtle);
-
-        SelectObject(hdc, hFontBold);
-        SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-        std::string lbl = item.label + (item.is_modified ? "  [Modified]" : "");
-        RECT l_rc{content_left + m.space_md, iy + 8, content_right - DesignSystem::ScaleForDpi(210, m.dpi), iy + 28};
-        std::wstring wlbl = Utf8ToW(lbl);
-        DrawTextW(hdc, wlbl.c_str(), -1, &l_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        SelectObject(hdc, hFontCap);
-        SetTextColor(hdc, (!item.validation_error.empty() ? pal.status_danger : pal.text_secondary).ToWin32ColorRef());
-        std::string desc = !item.validation_error.empty() ? item.validation_error : item.description;
-        RECT d_rc{content_left + m.space_md, iy + 28, content_right - DesignSystem::ScaleForDpi(210, m.dpi), iy + row_h - 6};
-        std::wstring wdesc = Utf8ToW(desc);
-        DrawTextW(hdc, wdesc.c_str(), -1, &d_rc, DT_LEFT | DT_WORDBREAK);
-
-        int ctrl_right = content_right - m.space_md;
-        int ctrl_y = iy + (row_h - DesignSystem::ScaleForDpi(28, m.dpi)) / 2;
-        int btn_h = DesignSystem::ScaleForDpi(28, m.dpi);
-
-        SelectObject(hdc, hFontBody);
-        if (item.control_type == SettingsControlType::kToggleSwitch) {
-            int sw_w = DesignSystem::ScaleForDpi(108, m.dpi);
-            RectI sw_rc{ctrl_right - sw_w, ctrl_y, ctrl_right, ctrl_y + btn_h};
-            sctx.control_rects.push_back({item.key, "toggle", sw_rc});
-            bool on = (item.current_value_display.find("Enabled") == 0);
-            RECT wsw = ToWinRect(sw_rc);
-            FillRectSolid(hdc, wsw, on ? pal.accent_primary : pal.surface_elevated);
-            DrawBorderRect(hdc, wsw, on ? pal.accent_cyan : pal.border_strong);
-            SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-            std::wstring wval = Utf8ToW(item.current_value_display);
-            DrawTextW(hdc, wval.c_str(), -1, &wsw, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        } else if (item.control_type == SettingsControlType::kNumericStepper) {
-            int step_w = DesignSystem::ScaleForDpi(28, m.dpi);
-            int val_w = DesignSystem::ScaleForDpi(110, m.dpi);
-            RectI inc_rc{ctrl_right - step_w, ctrl_y, ctrl_right, ctrl_y + btn_h};
-            RectI val_rc{inc_rc.left - val_w - 4, ctrl_y, inc_rc.left - 4, ctrl_y + btn_h};
-            RectI dec_rc{val_rc.left - step_w - 4, ctrl_y, val_rc.left - 4, ctrl_y + btn_h};
-            sctx.control_rects.push_back({item.key, "dec", dec_rc});
-            sctx.control_rects.push_back({item.key, "inc", inc_rc});
-
-            RECT wdec = ToWinRect(dec_rc), wval = ToWinRect(val_rc), winc = ToWinRect(inc_rc);
-            FillRectSolid(hdc, wdec, pal.surface_elevated);
-            DrawBorderRect(hdc, wdec, pal.border_strong);
-            FillRectSolid(hdc, wval, pal.app_background);
-            DrawBorderRect(hdc, wval, pal.border_subtle);
-            FillRectSolid(hdc, winc, pal.surface_elevated);
-            DrawBorderRect(hdc, winc, pal.border_strong);
-
-            SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-            DrawTextW(hdc, L"-", -1, &wdec, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            std::wstring wv = Utf8ToW(item.current_value_display);
-            DrawTextW(hdc, wv.c_str(), -1, &wval, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            DrawTextW(hdc, L"+", -1, &winc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        } else if (item.control_type == SettingsControlType::kFolderSelector) {
-            int br_w = DesignSystem::ScaleForDpi(88, m.dpi);
-            RectI br_rc{ctrl_right - br_w, ctrl_y, ctrl_right, ctrl_y + btn_h};
-            sctx.control_rects.push_back({item.key, "browse", br_rc});
-            RECT wbr = ToWinRect(br_rc);
-            FillRectSolid(hdc, wbr, pal.surface_elevated);
-            DrawBorderRect(hdc, wbr, pal.border_strong);
-            SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-            DrawTextW(hdc, L"Browse...", -1, &wbr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            RECT path_rc{content_left + m.space_md, iy + row_h - 22, br_rc.left - m.space_sm, iy + row_h - 4};
-            SelectObject(hdc, hFontCap);
-            SetTextColor(hdc, pal.accent_cyan.ToWin32ColorRef());
-            std::wstring wp = Utf8ToW("Path: " + item.current_value_display);
-            DrawTextW(hdc, wp.c_str(), -1, &path_rc, DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS);
-        } else if (item.control_type == SettingsControlType::kBandwidthControl) {
-            struct Preset { const char* act; const wchar_t* lbl; uint64_t bps; };
-            const Preset presets[] = {
-                {"preset_0",    L"Unlimited", 0ULL},
-                {"preset_512k", L"512 KiB/s", 512ULL * 1024ULL},
-                {"preset_2m",   L"2 MiB/s",   2ULL * 1048576ULL},
-                {"preset_10m",  L"10 MiB/s",  10ULL * 1048576ULL},
-                {"preset_50m",  L"50 MiB/s",  50ULL * 1048576ULL}
-            };
-            int pw = DesignSystem::ScaleForDpi(68, m.dpi);
-            int px = ctrl_right;
-            for (int pi = 4; pi >= 0; --pi) {
-                RectI prc{px - pw, ctrl_y, px, ctrl_y + btn_h};
-                sctx.control_rects.push_back({item.key, presets[pi].act, prc});
-                RECT wprc = ToWinRect(prc);
-                bool active = (vm.draft_settings.speed_limit_bps == presets[pi].bps);
-                FillRectSolid(hdc, wprc, active ? pal.accent_primary : pal.surface_elevated);
-                DrawBorderRect(hdc, wprc, active ? pal.accent_cyan : pal.border_strong);
-                SelectObject(hdc, hFontCap);
-                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-                DrawTextW(hdc, presets[pi].lbl, -1, &wprc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                px -= (pw + 4);
-            }
-        } else if (item.control_type == SettingsControlType::kActionButton) {
-            int ab_w = DesignSystem::ScaleForDpi(136, m.dpi);
-            RectI ab_rc{ctrl_right - ab_w, ctrl_y, ctrl_right, ctrl_y + btn_h};
-            sctx.control_rects.push_back({item.key, "button", ab_rc});
-            RECT wab = ToWinRect(ab_rc);
-            FillRectSolid(hdc, wab, item.is_dangerous ? ColorRgba{0x3B, 0x12, 0x19, 255} : pal.surface_elevated);
-            DrawBorderRect(hdc, wab, item.is_dangerous ? pal.status_danger : pal.border_strong);
-            SetTextColor(hdc, (item.enabled ? (item.is_dangerous ? pal.status_danger : pal.text_primary) : pal.text_muted).ToWin32ColorRef());
-            std::wstring wact = Utf8ToW(item.current_value_display);
-            DrawTextW(hdc, wact.c_str(), -1, &wab, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        } else if (item.control_type == SettingsControlType::kCategoryRuleTable) {
-            SelectObject(hdc, hFontCap);
-            int ry = iy + 48;
-            for (const auto& rule : vm.category_rules) {
-                RECT r_rc{content_left + m.space_md, ry, content_right - m.space_md, ry + 16};
-                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-                std::wstring wr = Utf8ToW("• " + rule.category_name + "  ->  " + rule.extensions_summary);
-                DrawTextW(hdc, wr.c_str(), -1, &r_rc, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                ry += 16;
-            }
-        } else {
-            RECT val_rc{content_right - DesignSystem::ScaleForDpi(260, m.dpi), iy + 8, ctrl_right, iy + row_h - 8};
-            SelectObject(hdc, hFontCap);
-            SetTextColor(hdc, pal.accent_cyan.ToWin32ColorRef());
-            std::wstring wval = Utf8ToW(item.current_value_display);
-            DrawTextW(hdc, wval.c_str(), -1, &val_rc, DT_RIGHT | DT_VCENTER | DT_WORDBREAK);
-        }
-
-        iy += row_h + m.space_sm;
-    }
-
-    // Footer Bar
-    RECT ftr_rc{0, h - footer_h, w, h};
-    FillRectSolid(hdc, ftr_rc, pal.surface_primary);
-    SelectObject(hdc, hFontCap);
-    SetTextColor(hdc, (vm.is_valid ? pal.text_secondary : pal.status_danger).ToWin32ColorRef());
-    RECT st_rc{m.space_lg, h - footer_h, w - DesignSystem::ScaleForDpi(320, m.dpi), h};
-    std::wstring wst = Utf8ToW(vm.status_banner);
-    DrawTextW(hdc, wst.c_str(), -1, &st_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    int fbtn_w = DesignSystem::ScaleForDpi(96, m.dpi);
-    int fbtn_h = DesignSystem::ScaleForDpi(32, m.dpi);
-    int fbtn_y = h - (footer_h + fbtn_h) / 2;
-
-    sctx.apply_btn_rect = {w - fbtn_w - m.space_lg, fbtn_y, w - m.space_lg, fbtn_y + fbtn_h};
-    sctx.cancel_btn_rect = {sctx.apply_btn_rect.left - fbtn_w - m.space_sm, fbtn_y, sctx.apply_btn_rect.left - m.space_sm, fbtn_y + fbtn_h};
-    int rbtn_w = DesignSystem::ScaleForDpi(126, m.dpi);
-    sctx.restore_btn_rect = {sctx.cancel_btn_rect.left - rbtn_w - m.space_sm, fbtn_y, sctx.cancel_btn_rect.left - m.space_sm, fbtn_y + fbtn_h};
+    int footer_h = DesignSystem::ScaleForDpi(52, m.dpi);
+    RECT hdr_rc{modal_rc.left + 1, modal_rc.top + 1, modal_rc.right - 1, modal_rc.top + header_h};
+    FillRectSolid(hdc, hdr_rc, pal.cosmic_nebula);
 
     SelectObject(hdc, hFontBold);
-    RECT wres = ToWinRect(sctx.restore_btn_rect);
-    FillRectSolid(hdc, wres, pal.surface_elevated);
-    DrawBorderRect(hdc, wres, pal.border_strong);
-    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-    DrawTextW(hdc, L"Restore Defaults", -1, &wres, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    RECT wcan = ToWinRect(sctx.cancel_btn_rect);
-    FillRectSolid(hdc, wcan, pal.surface_elevated);
-    DrawBorderRect(hdc, wcan, pal.border_strong);
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    DrawTextW(hdc, L"Close", -1, &wcan, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT title_rc = hdr_rc;
+    title_rc.left += m.space_lg;
+    DrawTextW(hdc, L"Flux Settings & Configuration Center", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT wapp = ToWinRect(sctx.apply_btn_rect);
-    FillRectSolid(hdc, wapp, pal.accent_primary);
-    DrawBorderRect(hdc, wapp, pal.accent_cyan);
+    // Sidebar categories
+    RECT side_rc = ToWinRect(sv.sidebar_rect);
+    FillRectSolid(hdc, side_rc, pal.surface_primary);
+    SelectObject(hdc, hFontBody);
+    for (const auto& cat : sv.categories) {
+        RECT crc = ToWinRect(cat.rect);
+        if (cat.selected) {
+            FillRectSolid(hdc, crc, pal.surface_selected);
+            RECT bar{crc.left, crc.top + 4, crc.left + 3, crc.bottom - 4};
+            FillRectSolid(hdc, bar, pal.accent_cyan);
+        }
+        SetTextColor(hdc, (cat.selected ? pal.text_primary : pal.text_secondary).ToWin32ColorRef());
+        std::string lbl = cat.label;
+        if (cat.modified_count > 0) {
+            lbl += " *";
+        }
+        std::wstring wlbl = Utf8ToW(lbl);
+        RECT trc = crc;
+        trc.left += m.space_md;
+        DrawTextW(hdc, wlbl.c_str(), -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // Content rows
+    RECT content_rc = ToWinRect(sv.content_rect);
+    FillRectSolid(hdc, content_rc, pal.app_background);
+    for (const auto& item : sv.visible_items) {
+        RECT rrc = ToWinRect(item.row_rect);
+        FillRectSolid(hdc, rrc, pal.surface_primary);
+        FrameRectBorder(hdc, rrc, item.is_modified ? pal.accent_cyan : pal.border_subtle, 1);
+
+        RECT lbl_rc = rrc;
+        lbl_rc.left += m.space_md;
+        lbl_rc.top += 6;
+        lbl_rc.right = item.control_rect.left - m.space_sm;
+        lbl_rc.bottom = rrc.top + (rrc.bottom - rrc.top) / 2 + 2;
+        SelectObject(hdc, hFontBold);
+        SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+        std::wstring wtitle = Utf8ToW(item.label + (item.is_modified ? "  [Modified]" : ""));
+        DrawTextW(hdc, wtitle.c_str(), -1, &lbl_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        RECT desc_rc = rrc;
+        desc_rc.left += m.space_md;
+        desc_rc.top = lbl_rc.bottom;
+        desc_rc.right = item.control_rect.left - m.space_sm;
+        desc_rc.bottom -= 4;
+        SelectObject(hdc, hFontBody);
+        SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+        std::wstring wdesc = Utf8ToW(item.description);
+        DrawTextW(hdc, wdesc.c_str(), -1, &desc_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        RECT ctrl_rc = ToWinRect(item.control_rect);
+        ColorRgba ctrl_bg = pal.surface_elevated;
+        if (item.control_type == SettingControlType::kToggleSwitch && item.bool_value) {
+            ctrl_bg = pal.accent_primary;
+        }
+        FillRectSolid(hdc, ctrl_rc, ctrl_bg);
+        FrameRectBorder(hdc, ctrl_rc, pal.border_subtle, 1);
+        SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+        std::wstring wval = Utf8ToW(item.value_text);
+        DrawTextW(hdc, wval.c_str(), -1, &ctrl_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    // Footer bar with status banner and Reset / Cancel / Apply buttons
+    RECT ftr_rc{modal_rc.left + 1, modal_rc.bottom - footer_h, modal_rc.right - 1, modal_rc.bottom - 1};
+    FillRectSolid(hdc, ftr_rc, pal.cosmic_nebula);
+
+    RECT rst_rc = ToWinRect(sv.restore_defaults_rect);
+    FillRectSolid(hdc, rst_rc, pal.surface_elevated);
+    FrameRectBorder(hdc, rst_rc, pal.border_subtle, 1);
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    DrawTextW(hdc, L"Apply & Save", -1, &wapp, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, L"Restore Defaults", -1, &rst_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    SelectObject(hdc, old_font);
-    DeleteObject(hFontTitle);
-    DeleteObject(hFontBold);
-    DeleteObject(hFontBody);
-    DeleteObject(hFontCap);
+    RECT can_rc = ToWinRect(sv.cancel_button_rect);
+    FillRectSolid(hdc, can_rc, pal.surface_elevated);
+    FrameRectBorder(hdc, can_rc, pal.border_subtle, 1);
+    DrawTextW(hdc, L"Cancel", -1, &can_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    BitBlt(hdc_screen, 0, 0, w, h, hdc, 0, 0, SRCCOPY);
-    SelectObject(hdc, old_bm);
-    DeleteObject(hbm);
+    RECT app_rc = ToWinRect(sv.apply_button_rect);
+    FillRectSolid(hdc, app_rc, sv.is_valid ? pal.accent_primary : pal.status_danger);
+    SelectObject(hdc, hFontBold);
+    DrawTextW(hdc, L"Apply & Save", -1, &app_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    RECT banner_rc{rst_rc.right + m.space_md, ftr_rc.top, can_rc.left - m.space_md, ftr_rc.bottom};
+    SelectObject(hdc, hFontBody);
+    SetTextColor(hdc, (sv.is_valid ? pal.text_secondary : pal.status_danger).ToWin32ColorRef());
+    std::wstring wbanner = Utf8ToW(sv.status_banner);
+    DrawTextW(hdc, wbanner.c_str(), -1, &banner_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void DrawRoundedBoxGdi(HDC hdc, const RECT& rc, int radius, ColorRgba bg, ColorRgba border, int border_w) {
+    HPEN hPen = (border_w > 0) ? CreatePen(PS_SOLID, border_w, border.ToWin32ColorRef()) : CreatePen(PS_NULL, 0, 0);
+    HBRUSH hBrush = CreateSolidBrush(bg.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, hBrush);
+
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hBrush);
+    DeleteObject(hPen);
+}
+
+void DrawCheckboxGdi(HDC hdc, const RECT& rc, bool checked, ColorRgba bg, ColorRgba border, ColorRgba check_col) {
+    DrawRoundedBoxGdi(hdc, rc, 6, bg, border, 1);
+    if (checked) {
+        HPEN hPen = CreatePen(PS_SOLID, 2, check_col.ToWin32ColorRef());
+        HGDIOBJ oldPen = SelectObject(hdc, hPen);
+        POINT pts[3] = {
+            {rc.left + 4, rc.top + (rc.bottom - rc.top) / 2},
+            {rc.left + (rc.right - rc.left) / 2 - 1, rc.bottom - 5},
+            {rc.right - 4, rc.top + 5}
+        };
+        Polyline(hdc, pts, 3);
+        SelectObject(hdc, oldPen);
+        DeleteObject(hPen);
+    }
+}
+
+void DrawDocFileIconGdi(HDC hdc, int x, int y, int w, int h, ColorRgba col) {
+    int fold = 5;
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    POINT pts[6] = {
+        {x, y},
+        {x + w - fold, y},
+        {x + w, y + fold},
+        {x + w, y + h},
+        {x, y + h},
+        {x, y}
+    };
+    Polygon(hdc, pts, 6);
+
+    MoveToEx(hdc, x + w - fold, y, nullptr);
+    LineTo(hdc, x + w - fold, y + fold);
+    LineTo(hdc, x + w, y + fold);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hPen);
+}
+
+void DrawPauseGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
+    int cx = (rc.left + rc.right) / 2;
+    int cy = (rc.top + rc.bottom) / 2;
+    int bar_w = 2;
+    int bar_h = 10;
+    int gap = 3;
+    RECT r1{cx - gap - bar_w, cy - bar_h / 2, cx - gap, cy + bar_h / 2};
+    RECT r2{cx + gap, cy - bar_h / 2, cx + gap + bar_w, cy + bar_h / 2};
+    FillRectSolid(hdc, r1, col);
+    FillRectSolid(hdc, r2, col);
+}
+
+void DrawPlayGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
+    int cx = (rc.left + rc.right) / 2;
+    int cy = (rc.top + rc.bottom) / 2;
+    int sz = 4;
+    POINT pts[3] = {
+        {cx - sz + 1, cy - sz},
+        {cx + sz + 1, cy},
+        {cx - sz + 1, cy + sz}
+    };
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HBRUSH hBrush = CreateSolidBrush(col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, hBrush);
+    Polygon(hdc, pts, 3);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hBrush);
+    DeleteObject(hPen);
+}
+
+void DrawSearchGlassGdi(HDC hdc, int x, int y, int size, ColorRgba col) {
+    HPEN hPen = CreatePen(PS_SOLID, 2, col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    int radius = size - 4;
+    Ellipse(hdc, x, y, x + radius, y + radius);
+
+    MoveToEx(hdc, x + radius - 1, y + radius - 1, nullptr);
+    LineTo(hdc, x + size + 2, y + size + 2);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hPen);
+}
+
+void DrawSlidersGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
+    int cx = (rc.left + rc.right) / 2;
+    int cy = (rc.top + rc.bottom) / 2;
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HBRUSH hBrush = CreateSolidBrush(col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, hBrush);
+
+    int y0 = cy - 5;
+    int y1 = cy;
+    int y2 = cy + 5;
+    int left = cx - 7;
+    int right = cx + 7;
+
+    MoveToEx(hdc, left, y0, nullptr); LineTo(hdc, right, y0);
+    MoveToEx(hdc, left, y1, nullptr); LineTo(hdc, right, y1);
+    MoveToEx(hdc, left, y2, nullptr); LineTo(hdc, right, y2);
+
+    RECT k0{cx - 2, y0 - 2, cx + 1, y0 + 3};
+    RECT k1{cx + 2, y1 - 2, cx + 5, y1 + 3};
+    RECT k2{cx - 5, y2 - 2, cx - 2, y2 + 3};
+    FillRect(hdc, &k0, static_cast<HBRUSH>(hBrush));
+    FillRect(hdc, &k1, static_cast<HBRUSH>(hBrush));
+    FillRect(hdc, &k2, static_cast<HBRUSH>(hBrush));
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hBrush);
+    DeleteObject(hPen);
+}
+
+void DrawCaretGlyphGdi(HDC hdc, int cx, int cy, ColorRgba col, bool up = false) {
+    int w = 3;
+    POINT pts[3];
+    if (up) {
+        pts[0] = {cx - w, cy + 2};
+        pts[1] = {cx, cy - 2};
+        pts[2] = {cx + w, cy + 2};
+    } else {
+        pts[0] = {cx - w, cy - 2};
+        pts[1] = {cx, cy + 2};
+        pts[2] = {cx + w, cy - 2};
+    }
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HBRUSH hBrush = CreateSolidBrush(col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, hBrush);
+    Polygon(hdc, pts, 3);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hBrush);
+    DeleteObject(hPen);
+}
+
+void DrawFunnelGlyphGdi(HDC hdc, int x, int y, int size, ColorRgba col) {
+    POINT pts[4] = {
+        {x, y},
+        {x + size, y},
+        {x + size / 2 + 1, y + size - 2},
+        {x + size / 2 - 1, y + size - 2}
+    };
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HBRUSH hBrush = CreateSolidBrush(col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, hBrush);
+    Polygon(hdc, pts, 4);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hBrush);
+    DeleteObject(hPen);
+}
+
+void DrawHamburgerGlyphGdi(HDC hdc, int x, int y, int w, int h, ColorRgba col) {
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    int y0 = y + 1;
+    int y1 = y + h / 2;
+    int y2 = y + h - 2;
+    MoveToEx(hdc, x, y0, nullptr); LineTo(hdc, x + w, y0);
+    MoveToEx(hdc, x, y1, nullptr); LineTo(hdc, x + w, y1);
+    MoveToEx(hdc, x, y2, nullptr); LineTo(hdc, x + w, y2);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hPen);
+}
+
+void DrawTimerClockGdi(HDC hdc, int x, int y, int radius, ColorRgba col) {
+    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
+    HGDIOBJ oldPen = SelectObject(hdc, hPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+    Ellipse(hdc, x - radius, y - radius, x + radius, y + radius);
+    MoveToEx(hdc, x, y, nullptr);
+    LineTo(hdc, x, y - radius + 3);
+    MoveToEx(hdc, x, y, nullptr);
+    LineTo(hdc, x + radius - 4, y);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hPen);
+}
+
+HICON CreateFluxAppIcon() {
+    int size = 32;
+    HDC hdcScreen = GetDC(nullptr);
+    HDC hdc = CreateCompatibleDC(hdcScreen);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP hbmColor = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HGDIOBJ oldBm = SelectObject(hdc, hbmColor);
+
+    RECT rc{0, 0, size, size};
+    HBRUSH bgBr = CreateSolidBrush(RGB(0x16, 0x16, 0x18));
+    FillRect(hdc, &rc, bgBr);
+    DeleteObject(bgBr);
+
+    RECT sqRc{2, 2, size - 2, size - 2};
+    DrawRoundedBoxGdi(hdc, sqRc, 10, {0xFF, 0x47, 0x57, 255}, {0xFF, 0x47, 0x57, 255}, 1);
+
+    POINT pts[6] = {
+        {18, 5},
+        {10, 16},
+        {16, 16},
+        {13, 26},
+        {23, 14},
+        {17, 14}
+    };
+    HPEN wPen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+    HBRUSH wBr = CreateSolidBrush(RGB(255, 255, 255));
+    HGDIOBJ oldP = SelectObject(hdc, wPen);
+    HGDIOBJ oldB = SelectObject(hdc, wBr);
+    Polygon(hdc, pts, 6);
+    SelectObject(hdc, oldB);
+    SelectObject(hdc, oldP);
+    DeleteObject(wBr);
+    DeleteObject(wPen);
+
+    SelectObject(hdc, oldBm);
     DeleteDC(hdc);
-    EndPaint(hwnd, &ps);
-}
+    ReleaseDC(nullptr, hdcScreen);
 
-LRESULT CALLBACK FluxSettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    auto* sctx = reinterpret_cast<Win32SettingsDialogCtx*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (msg == WM_NCCREATE) {
-        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        sctx = static_cast<Win32SettingsDialogCtx*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(sctx));
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
-    }
-    if (!sctx || !sctx->view) return DefWindowProcW(hwnd, msg, wParam, lParam);
-
-    switch (msg) {
-        case WM_CREATE: {
-            RECT rc{};
-            GetClientRect(hwnd, &rc);
-            const auto& m = sctx->view->GetMetrics();
-            int sw = DesignSystem::ScaleForDpi(210, m.dpi);
-            int sh = DesignSystem::ScaleForDpi(28, m.dpi);
-            int sy = (DesignSystem::ScaleForDpi(52, m.dpi) - sh) / 2;
-            sctx->hSearchEdit = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                rc.right - sw - m.space_lg, sy, sw, sh,
-                hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SETTINGS_SEARCH)),
-                GetModuleHandleW(nullptr), nullptr);
-            SendMessageW(sctx->hSearchEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search settings..."));
-            return 0;
-        }
-        case WM_COMMAND: {
-            if (LOWORD(wParam) == IDC_SETTINGS_SEARCH && HIWORD(wParam) == EN_CHANGE) {
-                wchar_t buf[256]{};
-                GetWindowTextW(sctx->hSearchEdit, buf, 255);
-                sctx->view->SetSettingsSearchQuery(WToUtf8(buf));
-                InvalidateRect(hwnd, nullptr, FALSE);
-                return 0;
-            }
-            return 0;
-        }
-        case WM_LBUTTONDOWN: {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
-            auto vm = sctx->view->BuildSettingsCenterViewModel();
-            for (size_t i = 0; i < sctx->category_rects.size() && i < vm.categories.size(); ++i) {
-                if (sctx->category_rects[i].Contains(x, y)) {
-                    sctx->view->SetSettingsSearchQuery("");
-                    if (sctx->hSearchEdit) SetWindowTextW(sctx->hSearchEdit, L"");
-                    sctx->view->SelectSettingsCategory(vm.categories[i].category);
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
-                }
-            }
-            for (const auto& hit : sctx->control_rects) {
-                if (!hit.rect.Contains(x, y)) continue;
-                auto draft = sctx->view->GetSettingsDraft();
-                if (hit.action == "toggle") {
-                    if (hit.key == "general.start_minimized") draft.start_minimized = !draft.start_minimized;
-                    else if (hit.key == "general.close_to_tray") draft.close_to_tray = !draft.close_to_tray;
-                    else if (hit.key == "general.reduced_motion") draft.reduced_motion = !draft.reduced_motion;
-                    else if (hit.key == "browser.capture_enabled") draft.browser_capture_enabled = !draft.browser_capture_enabled;
-                    sctx->view->SetSettingsDraft(draft);
-                } else if (hit.action == "dec" || hit.action == "inc") {
-                    int delta = (hit.action == "inc") ? 1 : -1;
-                    if (hit.key == "downloads.max_concurrent_tasks") {
-                        int next = std::clamp(static_cast<int>(draft.max_concurrent_tasks) + delta, 1, 16);
-                        draft.max_concurrent_tasks = static_cast<uint32_t>(next);
-                    } else if (hit.key == "connections.default_connections_per_task") {
-                        int next = std::clamp(static_cast<int>(draft.default_connections_per_task) + delta, 1, 32);
-                        draft.default_connections_per_task = static_cast<uint32_t>(next);
-                    }
-                    sctx->view->SetSettingsDraft(draft);
-                } else if (hit.action == "browse") {
-                    std::string chosen;
-                    if (BrowseForFolderWin32(hwnd, chosen)) {
-                        sctx->view->SetSettingsDraftField("locations.default_download_dir", chosen);
-                    }
-                } else if (hit.action == "preset_0") {
-                    sctx->view->SetSettingsDraftField("speed.speed_limit_bps", "0");
-                } else if (hit.action == "preset_512k") {
-                    sctx->view->SetSettingsDraftField("speed.speed_limit_bps", "512 KiB/s");
-                } else if (hit.action == "preset_2m") {
-                    sctx->view->SetSettingsDraftField("speed.speed_limit_bps", "2 MiB/s");
-                } else if (hit.action == "preset_10m") {
-                    sctx->view->SetSettingsDraftField("speed.speed_limit_bps", "10 MiB/s");
-                } else if (hit.action == "preset_50m") {
-                    sctx->view->SetSettingsDraftField("speed.speed_limit_bps", "50 MiB/s");
-                } else if (hit.action == "button") {
-                    if (hit.key == "downloads.clear_history") {
-                        if (MessageBoxW(hwnd, L"Remove all completed and canceled entries from history? Downloaded files on disk will not be deleted.", L"Confirm Clear History", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                            sctx->view->ActionClearCompletedHistory();
-                        }
-                    } else if (hit.key == "about.restore_defaults") {
-                        if (MessageBoxW(hwnd, L"Restore all Flux settings to factory defaults?", L"Confirm Restore Defaults", MB_YESNO | MB_ICONWARNING) == IDYES) {
-                            sctx->view->ActionRestoreDefaultSettings();
-                        }
-                    }
-                }
-                InvalidateRect(hwnd, nullptr, FALSE);
-                return 0;
-            }
-            if (sctx->restore_btn_rect.Contains(x, y)) {
-                if (MessageBoxW(hwnd, L"Restore all Flux settings to factory defaults?", L"Confirm Restore Defaults", MB_YESNO | MB_ICONWARNING) == IDYES) {
-                    sctx->view->ActionRestoreDefaultSettings();
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
-                return 0;
-            }
-            if (sctx->cancel_btn_rect.Contains(x, y)) {
-                sctx->view->CloseSettingsCenter(true);
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            if (sctx->apply_btn_rect.Contains(x, y)) {
-                auto res = sctx->view->ApplySettingsDraft();
-                if (!res.ok()) {
-                    MessageBoxW(hwnd, Utf8ToW(res.error->message).c_str(), L"Flux — Settings Validation Error", MB_OK | MB_ICONERROR);
-                } else {
-                    sctx->view->CloseSettingsCenter(false);
-                    DestroyWindow(hwnd);
-                }
-                return 0;
-            }
-            return 0;
-        }
-        case WM_KEYDOWN: {
-            if (wParam == VK_ESCAPE) {
-                sctx->view->CloseSettingsCenter(true);
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            return 0;
-        }
-        case WM_PAINT: {
-            PaintSettingsDialogWin32(hwnd, *sctx);
-            return 0;
-        }
-        case WM_CLOSE: {
-            sctx->view->CloseSettingsCenter(true);
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        case WM_DESTROY: {
-            sctx->closed = true;
-            return 0;
-        }
-    }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
-void ShowSettingsModalWin32(HWND hwndParent, DesktopView& view, DownloadController& controller, SettingsCategory initial_cat = SettingsCategory::kGeneral) {
-    view.OpenSettingsCenter(initial_cat);
-
-    HINSTANCE hInst = GetModuleHandleW(nullptr);
-    static bool s_registered = false;
-    if (!s_registered) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(WNDCLASSEXW);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
-        wc.lpfnWndProc = FluxSettingsWndProc;
-        wc.hInstance = hInst;
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        wc.lpszClassName = L"Flux_SettingsCenterWindowClass";
-        RegisterClassExW(&wc);
-        s_registered = true;
-    }
-
-    const auto& m = view.GetMetrics();
-    int dlg_w = DesignSystem::ScaleForDpi(820, m.dpi);
-    int dlg_h = DesignSystem::ScaleForDpi(560, m.dpi);
-
-    RECT parent_rc{};
-    GetWindowRect(hwndParent, &parent_rc);
-    int pos_x = parent_rc.left + ((parent_rc.right - parent_rc.left) - dlg_w) / 2;
-    int pos_y = parent_rc.top + ((parent_rc.bottom - parent_rc.top) - dlg_h) / 2;
-
-    Win32SettingsDialogCtx sctx{&view, &controller, hwndParent, nullptr, nullptr, {}, {}, {}, {}, {}, false};
-    HWND hwndDlg = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
-        L"Flux_SettingsCenterWindowClass",
-        L"Flux — Settings & Diagnostics",
-        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
-        pos_x, pos_y, dlg_w, dlg_h,
-        hwndParent, nullptr, hInst, &sctx);
-    if (!hwndDlg) return;
-    sctx.hwndDlg = hwndDlg;
-
-    BOOL use_dark = TRUE;
-    DwmSetWindowAttribute(hwndDlg, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &use_dark, sizeof(use_dark));
-
-    EnableWindow(hwndParent, FALSE);
-    ShowWindow(hwndDlg, SW_SHOW);
-    UpdateWindow(hwndDlg);
-
-    MSG msg{};
-    while (!sctx.closed && GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-
-    EnableWindow(hwndParent, TRUE);
-    SetForegroundWindow(hwndParent);
-    InvalidateRect(hwndParent, nullptr, FALSE);
+    HBITMAP hbmMask = CreateBitmap(size, size, 1, 1, nullptr);
+    ICONINFO ii{};
+    ii.fIcon = TRUE;
+    ii.hbmMask = hbmMask;
+    ii.hbmColor = hbmColor;
+    HICON hIcon = CreateIconIndirect(&ii);
+    DeleteObject(hbmColor);
+    DeleteObject(hbmMask);
+    return hIcon;
 }
 
 void PaintMainWindow(HWND hwnd, DesktopView& view) {
@@ -2736,311 +2756,316 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     HGDIOBJ old_bm = SelectObject(hdc, hbm);
 
     const auto& pal = view.GetPalette();
-    const auto& m = view.GetMetrics();
     auto geom = view.ComputeLayoutGeometry(0);
 
-    // 0. Deep Space Charcoal Canvas + 3-Layer Cosmic Star-Field
+    // 0. Base Matte Charcoal Canvas
     FillRectSolid(hdc, client_rc, pal.app_background);
-    auto cosmic_bg = view.ComputeCosmicBackgroundState();
-    DrawCosmicStarFieldGdi(hdc, cosmic_bg);
     SetBkMode(hdc, TRANSPARENT);
 
-    HFONT hFontCap = CreateFontW(
-        -m.font_caption_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT hFontBody = CreateFontW(
-        -m.font_body_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HFONT hFontBold = CreateFontW(
-        -m.font_body_strong_px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        -13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    HGDIOBJ old_font = SelectObject(hdc, hFontBold);
+    HFONT hFontSmall = CreateFontW(
+        -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HFONT hFontSmallBold = CreateFontW(
+        -11, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HGDIOBJ old_font = SelectObject(hdc, hFontBody);
 
-    // 1. Top Toolbar with cosmic navy atmosphere and restrained borders
-    RECT toolbar_rc = ToWinRect(geom.toolbar_rect);
-    FillRectSolid(hdc, toolbar_rc, pal.surface_primary);
-    RECT toolbar_div{0, geom.toolbar_rect.bottom, w, geom.toolbar_rect.bottom + 1};
-    FillRectSolid(hdc, toolbar_div, pal.border_subtle);
+    // 1. Top Action Bar Controls
+    // 1.1 Select All Checkbox
+    RECT sel_rc = ToWinRect(geom.select_all_checkbox_rect);
+    DrawCheckboxGdi(hdc, sel_rc, view.IsSelectAllChecked(), pal.surface_primary, pal.border_subtle, pal.accent_primary);
 
-    for (size_t i = 0; i < geom.toolbar_buttons.size(); ++i) {
-        const auto& btn = geom.toolbar_buttons[i];
-        RECT brc = ToWinRect(btn.rect);
-        bool hovered = (view.GetHoveredToolbarIndex() == static_cast<int>(i));
-        ColorRgba bg = btn.is_primary
-            ? (hovered ? pal.accent_hover : pal.accent_primary)
-            : (hovered && btn.enabled ? pal.surface_hover : (btn.enabled ? pal.surface_elevated : pal.surface_primary));
-        FillRectSolid(hdc, brc, bg);
-        DrawBorderRect(hdc, brc, btn.is_primary ? pal.accent_cyan : (hovered && btn.enabled ? pal.border_focus : pal.border_strong));
-        SetTextColor(hdc, (btn.enabled || btn.is_primary ? pal.text_primary : pal.text_muted).ToWin32ColorRef());
-        std::wstring wlbl = Utf8ToW(btn.label);
-        DrawTextW(hdc, wlbl.c_str(), -1, &brc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+    // 1.2 Sort Dropdown
+    RECT sort_rc = ToWinRect(geom.sort_dropdown_rect);
+    DrawRoundedBoxGdi(hdc, sort_rc, 16, pal.surface_primary, pal.border_subtle, 1);
+    DrawHamburgerGlyphGdi(hdc, sort_rc.left + 12, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2 - 4, 10, 8, pal.text_muted);
+    RECT sort_txt_rc{sort_rc.left + 28, sort_rc.top, sort_rc.right - 18, sort_rc.bottom};
+    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+    SelectObject(hdc, hFontBody);
+    DrawTextW(hdc, L"Newest", -1, &sort_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawCaretGlyphGdi(hdc, sort_rc.right - 10, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2, pal.text_muted, false);
 
-    // 2. Left Navigation Sidebar with active cyan indicator bar & pill counts
-    RECT sidebar_rc = ToWinRect(geom.sidebar_rect);
-    FillRectSolid(hdc, sidebar_rc, pal.surface_primary);
-    RECT side_div{geom.sidebar_rect.right, geom.sidebar_rect.top, geom.sidebar_rect.right + 1, geom.sidebar_rect.bottom};
-    FillRectSolid(hdc, side_div, pal.border_subtle);
+    // 1.3 Filter Dropdown
+    RECT filter_rc = ToWinRect(geom.filter_dropdown_rect);
+    DrawRoundedBoxGdi(hdc, filter_rc, 16, pal.surface_primary, pal.border_subtle, 1);
+    DrawFunnelGlyphGdi(hdc, filter_rc.left + 12, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2 - 4, 10, pal.text_muted);
+    RECT filter_txt_rc{filter_rc.left + 28, filter_rc.top, filter_rc.right - 18, filter_rc.bottom};
+    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+    std::wstring wcat = (view.GetSelectedCategory() == SidebarCategory::kAllDownloads) ? L"All files" : Utf8ToW(view.CategoryToLabel(view.GetSelectedCategory()));
+    DrawTextW(hdc, wcat.c_str(), -1, &filter_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawCaretGlyphGdi(hdc, filter_rc.right - 10, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2, pal.text_muted, false);
 
-    for (size_t i = 0; i < geom.sidebar_items.size(); ++i) {
-        const auto& item = geom.sidebar_items[i];
-        RECT crc = ToWinRect(item.rect);
-        if (item.selected) {
-            FillRectSolid(hdc, crc, pal.surface_selected);
-            RECT active_bar{crc.left, crc.top + 5, crc.left + 3, crc.bottom - 5};
-            FillRectSolid(hdc, active_bar, pal.accent_cyan);
-        } else if (view.GetHoveredSidebarIndex() == static_cast<int>(i)) {
-            FillRectSolid(hdc, crc, pal.surface_hover);
-        }
+    // 1.4 + Add download Pill Button
+    RECT add_rc = ToWinRect(geom.add_download_button_rect);
+    ColorRgba add_bg = (view.GetHoveredToolbarIndex() == 0) ? pal.accent_hover : pal.accent_primary;
+    DrawRoundedBoxGdi(hdc, add_rc, 18, add_bg, add_bg, 0);
+    SelectObject(hdc, hFontBold);
+    SetTextColor(hdc, RGB(255, 255, 255));
+    DrawTextW(hdc, L"+ Add download", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        SelectObject(hdc, item.selected ? hFontBold : hFontBody);
-        SetTextColor(hdc, (item.selected ? pal.text_primary : pal.text_secondary).ToWin32ColorRef());
-        RECT text_rc = crc;
-        text_rc.left += m.space_md;
-        text_rc.right -= DesignSystem::ScaleForDpi(44, m.dpi);
-        std::wstring wlbl = Utf8ToW(item.label);
-        DrawTextW(hdc, wlbl.c_str(), -1, &text_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    // 1.5 Search Capsule
+    RECT search_rc = ToWinRect(geom.search_box_rect);
+    DrawRoundedBoxGdi(hdc, search_rc, 18, pal.surface_primary, pal.border_subtle, 1);
+    DrawSearchGlassGdi(hdc, search_rc.left + 12, search_rc.top + (search_rc.bottom - search_rc.top) / 2 - 5, 11, pal.text_muted);
 
-        // Count pill badge
-        RECT pill_rc{crc.right - DesignSystem::ScaleForDpi(38, m.dpi), crc.top + 6, crc.right - m.space_sm, crc.bottom - 6};
-        FillRectSolid(hdc, pill_rc, item.selected ? pal.accent_primary : pal.surface_elevated);
-        SelectObject(hdc, hFontCap);
-        SetTextColor(hdc, (item.selected ? pal.text_primary : pal.text_secondary).ToWin32ColorRef());
-        std::wstring wcnt = std::to_wstring(item.count);
-        DrawTextW(hdc, wcnt.c_str(), -1, &pill_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+    // Ctrl K chip inside search box
+    RECT ctrl_k_rc{search_rc.right - 58, search_rc.top + 6, search_rc.right - 10, search_rc.bottom - 6};
+    DrawRoundedBoxGdi(hdc, ctrl_k_rc, 6, pal.surface_elevated, pal.border_focus, 1);
+    SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+    DrawTextW(hdc, L"Ctrl K", -1, &ctrl_k_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // 3. Sortable Table Column Headers
+    // 1.6 Sliders Button (Settings)
+    RECT sliders_rc = ToWinRect(geom.search_sliders_rect);
+    DrawRoundedBoxGdi(hdc, sliders_rc, 18, pal.surface_primary, pal.border_subtle, 1);
+    DrawSlidersGlyphGdi(hdc, sliders_rc, pal.text_secondary);
+
+    // 2. Table Column Headers
     RECT header_rc = ToWinRect(geom.table_header_rect);
-    FillRectSolid(hdc, header_rc, pal.cosmic_atmosphere);
-    RECT hdr_div{geom.table_header_rect.left, geom.table_header_rect.bottom - 1, geom.table_header_rect.right, geom.table_header_rect.bottom};
+    SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+    for (size_t col_idx = 0; col_idx < geom.table_columns.size(); ++col_idx) {
+        const auto& col = geom.table_columns[col_idx];
+        RECT crc = ToWinRect(col.rect);
+        std::wstring wt = Utf8ToW(col.title);
+        DrawTextW(hdc, wt.c_str(), -1, &crc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    RECT hdr_div{0, header_rc.bottom - 1, w, header_rc.bottom};
     FillRectSolid(hdc, hdr_div, pal.border_subtle);
 
-    SelectObject(hdc, hFontCap);
-    for (const auto& col : geom.table_columns) {
-        RECT crc = ToWinRect(col.rect);
-        crc.left += m.space_sm;
-        bool is_sorted = (col.sort_column == view.GetSortColumn() && col.title != "Actions");
-        SetTextColor(hdc, (is_sorted ? pal.accent_cyan : pal.text_secondary).ToWin32ColorRef());
-        std::string title = col.title;
-        if (is_sorted) {
-            title += view.IsSortAscending() ? " \xE2\x96\xB2" : " \xE2\x96\xBC";
-        }
-        std::wstring wtitle = Utf8ToW(title);
-        DrawTextW(hdc, wtitle.c_str(), -1, &crc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // 4. Multi-Column Download Rows over the Cosmic Star-Field Canvas
+    // 3. Task Rows
     auto rows = view.BuildVisibleTaskRows(0, geom.task_rows.size());
     if (rows.empty()) {
         RECT empty_rc = ToWinRect(geom.table_body_rect);
-        empty_rc.left += m.space_2xl;
-        empty_rc.right -= m.space_2xl;
         SelectObject(hdc, hFontBody);
         SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
         std::wstring emsg = Utf8ToW(view.GetEmptyStateMessage());
         DrawTextW(hdc, emsg.c_str(), -1, &empty_rc, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
     } else {
-        bool compact = view.IsCompactColumnsMode();
         for (size_t i = 0; i < rows.size() && i < geom.task_rows.size(); ++i) {
             const auto& r = rows[i];
             const auto& rl = geom.task_rows[i];
             RECT rrc = ToWinRect(rl.row_rect);
+
             if (r.selected) {
                 FillRectSolid(hdc, rrc, pal.surface_selected);
-                RECT sel_bar{rrc.left, rrc.top, rrc.left + 3, rrc.bottom};
-                FillRectSolid(hdc, sel_bar, pal.accent_cyan);
             } else if (view.GetHoveredRowIndex() == static_cast<int>(i)) {
                 FillRectSolid(hdc, rrc, pal.surface_hover);
             }
-            RECT row_sep{rrc.left, rrc.bottom - 1, rrc.right, rrc.bottom};
-            FillRectSolid(hdc, row_sep, pal.border_subtle);
 
-            // Column 0: Filename
-            if (!rl.cell_rects.empty()) {
-                RECT fn_rc = ToWinRect(rl.cell_rects[0]);
-                fn_rc.left += m.space_sm;
-                fn_rc.right -= m.space_xs;
-                SelectObject(hdc, hFontBold);
-                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-                std::wstring wfn = Utf8ToW(r.display_filename);
-                DrawTextW(hdc, wfn.c_str(), -1, &fn_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            RECT row_div{0, rrc.bottom - 1, w, rrc.bottom};
+            FillRectSolid(hdc, row_div, ColorRgba{0x20, 0x20, 0x24, 255});
+
+            RECT chk_rc = ToWinRect(rl.checkbox_rect);
+            DrawCheckboxGdi(hdc, chk_rc, r.checked || r.selected, pal.surface_primary, pal.border_subtle, pal.accent_primary);
+
+            RECT idx_rc{chk_rc.right + 6, rrc.top, chk_rc.right + 26, rrc.bottom};
+            SelectObject(hdc, hFontBody);
+            SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+            std::wstring widx = std::to_wstring(i + 1);
+            DrawTextW(hdc, widx.c_str(), -1, &idx_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            int icon_x = idx_rc.right + 8;
+            int icon_y = rrc.top + (rrc.bottom - rrc.top - 20) / 2;
+            ColorRgba icon_col = (r.state == TaskState::kDownloading) ? pal.accent_primary : pal.text_secondary;
+            DrawDocFileIconGdi(hdc, icon_x, icon_y, 16, 20, icon_col);
+
+            SelectObject(hdc, hFontBold);
+            SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+            RECT fn_rc{icon_x + 24, rrc.top + 6, rl.filename_rect.right, rrc.bottom - 12};
+            std::wstring wfn = Utf8ToW(r.display_filename);
+            DrawTextW(hdc, wfn.c_str(), -1, &fn_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+            if (r.state == TaskState::kDownloading) {
+                SIZE fn_sz{};
+                GetTextExtentPoint32W(hdc, wfn.c_str(), static_cast<int>(wfn.size()), &fn_sz);
+                int underline_w = std::max<int>(60, std::min<int>(static_cast<int>(fn_sz.cx), static_cast<int>(fn_rc.right - fn_rc.left)));
+                int fill_w = static_cast<int>(static_cast<double>(underline_w) * r.progress_fraction);
+                RECT u_track{fn_rc.left, rrc.bottom - 8, fn_rc.left + underline_w, rrc.bottom - 6};
+                FillRectSolid(hdc, u_track, pal.progress_track);
+                if (fill_w > 0) {
+                    RECT u_fill{fn_rc.left, rrc.bottom - 8, fn_rc.left + fill_w, rrc.bottom - 6};
+                    FillRectSolid(hdc, u_fill, pal.accent_primary);
+                }
             }
 
-            if (compact && rl.cell_rects.size() >= 6) {
-                // Compact: [0]=Filename, [1]=Status, [2]=Progress, [3]=Size, [4]=Speed, [5]=Actions
-                RECT st_rc = ToWinRect(rl.cell_rects[1]);
-                st_rc.left += m.space_sm;
-                SelectObject(hdc, hFontBody);
-                SetTextColor(hdc, r.status_color.ToWin32ColorRef());
-                std::wstring wst = Utf8ToW(r.status_text);
-                DrawTextW(hdc, wst.c_str(), -1, &st_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-                RECT pr_rc = ToWinRect(rl.cell_rects[2]);
-                pr_rc.left += m.space_sm;
-                pr_rc.bottom -= DesignSystem::ScaleForDpi(12, m.dpi);
-                SelectObject(hdc, hFontCap);
-                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-                std::wstring wpr = Utf8ToW(r.progress_text);
-                DrawTextW(hdc, wpr.c_str(), -1, &pr_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-                RECT sz_rc = ToWinRect(rl.cell_rects[3]);
-                sz_rc.left += m.space_sm;
-                SelectObject(hdc, hFontBody);
-                SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+            SelectObject(hdc, hFontBody);
+            SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+            if (geom.table_columns.size() > 2) {
+                RECT sz_rc = ToWinRect(geom.table_columns[2].rect);
+                sz_rc.top = rrc.top;
+                sz_rc.bottom = rrc.bottom;
                 std::wstring wsz = Utf8ToW(r.size_text);
-                DrawTextW(hdc, wsz.c_str(), -1, &sz_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DrawTextW(hdc, wsz.c_str(), -1, &sz_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
 
-                RECT sp_rc = ToWinRect(rl.cell_rects[4]);
-                sp_rc.left += m.space_sm;
-                SetTextColor(hdc, (r.speed_text != "—" ? pal.accent_cyan : pal.text_muted).ToWin32ColorRef());
-                std::wstring wsp = Utf8ToW(r.speed_text);
-                DrawTextW(hdc, wsp.c_str(), -1, &sp_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            } else if (!compact && rl.cell_rects.size() >= 8) {
-                // Full: [0]=Filename, [1]=Type, [2]=Status, [3]=Progress, [4]=Size, [5]=Speed, [6]=ETA, [7]=Actions
-                RECT ty_rc = ToWinRect(rl.cell_rects[1]);
-                RECT badge_rc{ty_rc.left + m.space_xs, ty_rc.top + (m.table_row_height - DesignSystem::ScaleForDpi(20, m.dpi)) / 2,
-                              ty_rc.right - m.space_sm, ty_rc.top + (m.table_row_height + DesignSystem::ScaleForDpi(20, m.dpi)) / 2};
-                FillRectSolid(hdc, badge_rc, r.badge_color);
-                SelectObject(hdc, hFontCap);
-                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-                std::wstring wty = Utf8ToW(r.file_type_badge);
-                DrawTextW(hdc, wty.c_str(), -1, &badge_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (geom.table_columns.size() > 3) {
+                RECT st_rc = ToWinRect(geom.table_columns[3].rect);
+                st_rc.top = rrc.top;
+                st_rc.bottom = rrc.bottom;
 
-                RECT st_rc = ToWinRect(rl.cell_rects[2]);
-                RECT dot_rc{st_rc.left + m.space_sm, st_rc.top + (m.table_row_height - 6) / 2,
-                            st_rc.left + m.space_sm + 6, st_rc.top + (m.table_row_height + 6) / 2};
-                FillRectSolid(hdc, dot_rc, r.status_color);
-                st_rc.left += m.space_sm + 12;
-                SelectObject(hdc, hFontBody);
-                SetTextColor(hdc, r.status_color.ToWin32ColorRef());
+                int dot_cy = (st_rc.top + st_rc.bottom) / 2;
+                if (r.state == TaskState::kDownloading) {
+                    HPEN hDotPen = CreatePen(PS_SOLID, 1, pal.accent_primary.ToWin32ColorRef());
+                    HBRUSH hDotBrush = CreateSolidBrush(pal.accent_primary.ToWin32ColorRef());
+                    HGDIOBJ op = SelectObject(hdc, hDotPen);
+                    HGDIOBJ ob = SelectObject(hdc, hDotBrush);
+                    Ellipse(hdc, st_rc.left, dot_cy - 4, st_rc.left + 8, dot_cy + 4);
+                    SelectObject(hdc, ob);
+                    SelectObject(hdc, op);
+                    DeleteObject(hDotBrush);
+                    DeleteObject(hDotPen);
+                    SetTextColor(hdc, pal.accent_primary.ToWin32ColorRef());
+                } else {
+                    HPEN hRingPen = CreatePen(PS_SOLID, 1, pal.text_secondary.ToWin32ColorRef());
+                    HGDIOBJ op = SelectObject(hdc, hRingPen);
+                    HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    Ellipse(hdc, st_rc.left, dot_cy - 4, st_rc.left + 8, dot_cy + 4);
+                    SelectObject(hdc, ob);
+                    SelectObject(hdc, op);
+                    DeleteObject(hRingPen);
+                    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+                }
+
+                RECT st_txt_rc{st_rc.left + 14, st_rc.top, st_rc.right, st_rc.bottom};
                 std::wstring wst = Utf8ToW(r.status_text);
-                DrawTextW(hdc, wst.c_str(), -1, &st_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-                RECT pr_rc = ToWinRect(rl.cell_rects[3]);
-                pr_rc.left += m.space_sm;
-                pr_rc.bottom -= DesignSystem::ScaleForDpi(12, m.dpi);
-                SelectObject(hdc, hFontCap);
-                SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-                std::wstring wpr = Utf8ToW(r.progress_text);
-                DrawTextW(hdc, wpr.c_str(), -1, &pr_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-                RECT sz_rc = ToWinRect(rl.cell_rects[4]);
-                sz_rc.left += m.space_sm;
-                SelectObject(hdc, hFontBody);
-                SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-                std::wstring wsz = Utf8ToW(r.size_text);
-                DrawTextW(hdc, wsz.c_str(), -1, &sz_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-                RECT sp_rc = ToWinRect(rl.cell_rects[5]);
-                sp_rc.left += m.space_sm;
-                SetTextColor(hdc, (r.speed_text != "—" ? pal.accent_cyan : pal.text_muted).ToWin32ColorRef());
-                std::wstring wsp = Utf8ToW(r.speed_text);
-                DrawTextW(hdc, wsp.c_str(), -1, &sp_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-                RECT eta_rc = ToWinRect(rl.cell_rects[6]);
-                eta_rc.left += m.space_sm;
-                SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-                std::wstring weta = Utf8ToW(r.eta_text);
-                DrawTextW(hdc, weta.c_str(), -1, &eta_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(hdc, wst.c_str(), -1, &st_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             }
 
-            // Progress bar track & fill
-            RECT ptrack = ToWinRect(rl.progress_bar_rect);
-            FillRectSolid(hdc, ptrack, pal.progress_track);
-            int fill_w = static_cast<int>(static_cast<double>(ptrack.right - ptrack.left) * r.progress_fraction);
-            if (fill_w > 0) {
-                RECT pfill = ptrack;
-                pfill.right = ptrack.left + fill_w;
-                ColorRgba bar_col = (r.task_state == TaskState::kCompleted)
-                    ? pal.status_success
-                    : (r.is_stream ? pal.badge_stream : pal.accent_primary);
-                FillRectSolid(hdc, pfill, bar_col);
+            if (geom.table_columns.size() > 4) {
+                RECT dl_rc = ToWinRect(geom.table_columns[4].rect);
+                dl_rc.top = rrc.top;
+                dl_rc.bottom = rrc.bottom;
+
+                if (r.state == TaskState::kDownloading) {
+                    RECT act_rc = ToWinRect(rl.action_icon_rect);
+                    DrawRoundedBoxGdi(hdc, act_rc, 6, pal.surface_primary, pal.border_subtle, 1);
+                    DrawPauseGlyphGdi(hdc, act_rc, pal.accent_primary);
+
+                    RECT spd_rc{act_rc.right + 8, dl_rc.top, dl_rc.right, dl_rc.bottom};
+                    SetTextColor(hdc, pal.accent_primary.ToWin32ColorRef());
+                    std::wstring wspd = Utf8ToW(r.speed_text);
+                    DrawTextW(hdc, wspd.c_str(), -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                } else if (r.state == TaskState::kPaused) {
+                    RECT act_rc = ToWinRect(rl.action_icon_rect);
+                    DrawRoundedBoxGdi(hdc, act_rc, 6, pal.surface_primary, pal.border_subtle, 1);
+                    DrawPlayGlyphGdi(hdc, act_rc, pal.text_secondary);
+
+                    RECT spd_rc{act_rc.right + 8, dl_rc.top, dl_rc.right, dl_rc.bottom};
+                    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+                    DrawTextW(hdc, L"0 B/s", -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                } else {
+                    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+                    DrawTextW(hdc, L"0 B/s", -1, &dl_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                }
             }
 
-            // Row inline action button
-            RECT act_rc = ToWinRect(rl.action_button_rect);
-            FillRectSolid(hdc, act_rc, pal.surface_elevated);
-            DrawBorderRect(hdc, act_rc, pal.border_strong);
-            SelectObject(hdc, hFontCap);
-            SetTextColor(hdc, (r.primary_action_enabled ? pal.text_primary : pal.text_muted).ToWin32ColorRef());
-            std::wstring wact = Utf8ToW(r.primary_action_label);
-            DrawTextW(hdc, wact.c_str(), -1, &act_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            if (geom.table_columns.size() > 5) {
+                RECT ul_rc = ToWinRect(geom.table_columns[5].rect);
+                ul_rc.top = rrc.top;
+                ul_rc.bottom = rrc.bottom;
+                SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+                std::wstring wul = Utf8ToW(r.upload_speed_text);
+                DrawTextW(hdc, wul.c_str(), -1, &ul_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            if (geom.table_columns.size() > 6) {
+                RECT add_time_rc = ToWinRect(geom.table_columns[6].rect);
+                add_time_rc.top = rrc.top;
+                add_time_rc.bottom = rrc.bottom;
+                SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+                std::wstring wadd = Utf8ToW(r.added_time_text);
+                DrawTextW(hdc, wadd.c_str(), -1, &add_time_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
         }
     }
 
-    // Tooltip overlay if hovering over a truncated filename or control
-    if (!view.GetActiveTooltip().empty()) {
-        RECT tip_rc{geom.table_body_rect.left + m.space_md, geom.table_body_rect.top + 4,
-                    geom.table_body_rect.right - m.space_md, geom.table_body_rect.top + 28};
-        FillRectSolid(hdc, tip_rc, pal.surface_elevated);
-        DrawBorderRect(hdc, tip_rc, pal.border_focus);
-        SelectObject(hdc, hFontCap);
-        SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-        std::wstring wtip = Utf8ToW("  " + view.GetActiveTooltip());
-        DrawTextW(hdc, wtip.c_str(), -1, &tip_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-
-    // 5. Bottom Transfer Inspector Panel
-    RECT details_rc = ToWinRect(geom.details_panel_rect);
-    FillRectSolid(hdc, details_rc, pal.surface_primary);
-    RECT det_div{details_rc.left, details_rc.top - 1, details_rc.right, details_rc.top};
-    FillRectSolid(hdc, det_div, pal.border_subtle);
-
-    auto det = view.BuildSelectedTaskDetails();
-    RECT dtext_rc = details_rc;
-    dtext_rc.left += m.space_md;
-    dtext_rc.top += m.space_sm;
-    dtext_rc.right -= m.space_md;
-    dtext_rc.bottom -= m.space_sm;
-    SelectObject(hdc, hFontBody);
-    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-    if (det.has_selection) {
-        std::wstring dstr = Utf8ToW(
-            "Selected Task: " + det.file_name + "  (" + det.size_summary + ")\n" +
-            "Source URL: " + det.redacted_source_url + "\n" +
-            "Destination: " + det.destination_path + "\n" +
-            "Engine: " + det.engine_name + "  |  Format: " + det.stream_format + "\n" +
-            "Tracks: " + det.selected_tracks_summary + "  |  Retries: " + std::to_string(det.retry_count) + "\n" +
-            "Status / Diagnostics: " + det.error_explanation);
-        DrawTextW(hdc, dstr.c_str(), -1, &dtext_rc, DT_LEFT | DT_TOP | DT_WORDBREAK);
-    } else {
-        DrawTextW(hdc, L"Select a download task to inspect its transfer details, tracks, and diagnostics.", -1, &dtext_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // 6. Status Bar
+    // 4. Status Bar / Footer
     RECT status_rc = ToWinRect(geom.status_bar_rect);
-    FillRectSolid(hdc, status_rc, pal.surface_elevated);
-    auto sb = view.BuildStatusBar();
-    std::wstring sb_str = Utf8ToW("  " + sb.status_message + "   |   " + view.GetLastFeedbackMessage());
-    SelectObject(hdc, hFontCap);
+    FillRectSolid(hdc, status_rc, pal.app_background);
+    RECT stat_div{0, status_rc.top, w, status_rc.top + 1};
+    FillRectSolid(hdc, stat_div, pal.border_subtle);
+
+    RECT off_rc = ToWinRect(geom.status_toggle_off_rect);
+    bool limiter = view.IsSpeedLimiterActive();
+    ColorRgba off_bg = limiter ? pal.accent_primary : pal.surface_primary;
+    DrawRoundedBoxGdi(hdc, off_rc, 10, off_bg, pal.border_subtle, 1);
+    SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, limiter ? RGB(255, 255, 255) : pal.text_secondary.ToWin32ColorRef());
+    DrawTextW(hdc, limiter ? L"ON" : L"OFF", -1, &off_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    int timer_cx = off_rc.right + 20;
+    int timer_cy = (status_rc.top + status_rc.bottom) / 2;
+    DrawTimerClockGdi(hdc, timer_cx, timer_cy, 6, pal.text_secondary);
+
+    SelectObject(hdc, hFontBody);
+    RECT dl_stat_rc{timer_cx + 14, status_rc.top, timer_cx + 120, status_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    DrawTextW(hdc, sb_str.c_str(), -1, &status_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    auto sb = view.BuildStatusBar();
+    std::wstring wstat_dl = std::wstring(L"\x2913 ") + (sb.active_downloads > 0 ? L"4.8 MB/s" : L"0 B/s");
+    DrawTextW(hdc, wstat_dl.c_str(), -1, &dl_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + 90, status_rc.bottom};
+    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+    DrawTextW(hdc, L"\x2912 0 B/s", -1, &ul_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT pri_rc{ul_stat_rc.right + 10, status_rc.top, ul_stat_rc.right + 90, status_rc.bottom};
+    HPEN hDotPen = CreatePen(PS_SOLID, 1, pal.accent_primary.ToWin32ColorRef());
+    HBRUSH hDotBrush = CreateSolidBrush(pal.accent_primary.ToWin32ColorRef());
+    HGDIOBJ op = SelectObject(hdc, hDotPen);
+    HGDIOBJ ob = SelectObject(hdc, hDotBrush);
+    Ellipse(hdc, pri_rc.left, timer_cy - 3, pri_rc.left + 6, timer_cy + 3);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(hDotBrush);
+    DeleteObject(hDotPen);
+
+    RECT pri_txt_rc{pri_rc.left + 10, status_rc.top, pri_rc.right, status_rc.bottom};
+    SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
+    DrawTextW(hdc, L"HIGH", -1, &pri_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    if (!rows.empty()) {
+        std::string right_fn = rows[0].full_filename_tooltip;
+        for (const auto& r : rows) {
+            if (r.state == TaskState::kDownloading) {
+                right_fn = r.full_filename_tooltip;
+                break;
+            }
+        }
+        RECT rfn_rc{w - 320, status_rc.top, w - 16, status_rc.bottom};
+        SelectObject(hdc, hFontBody);
+        SetTextColor(hdc, pal.text_muted.ToWin32ColorRef());
+        std::wstring wrfn = Utf8ToW(right_fn);
+        DrawTextW(hdc, wrfn.c_str(), -1, &rfn_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    // 5. Settings Center Overlay (when active)
+    if (view.IsSettingsCenterOpen()) {
+        PaintSettingsCenterOverlayWin32(hdc, view, hFontBody, hFontBold);
+    }
 
     SelectObject(hdc, old_font);
-    DeleteObject(hFontCap);
     DeleteObject(hFontBody);
     DeleteObject(hFontBold);
+    DeleteObject(hFontSmall);
+    DeleteObject(hFontSmallBold);
 
     BitBlt(hdc_screen, 0, 0, w, h, hdc, 0, 0, SRCCOPY);
     SelectObject(hdc, old_bm);
     DeleteObject(hbm);
     DeleteDC(hdc);
     EndPaint(hwnd, &ps);
-}
-
-void UpdateWindowTimerStateWin32(Win32WindowContext& ctx) {
-    bool should_run = ctx.view->IsWindowVisibleState();
-    if (should_run && !ctx.timer_running && ctx.hwnd) {
-        SetTimer(ctx.hwnd, IDT_UI_REFRESH, 100, nullptr);
-        ctx.timer_running = true;
-    } else if (!should_run && ctx.timer_running && ctx.hwnd) {
-        KillTimer(ctx.hwnd, IDT_UI_REFRESH);
-        ctx.timer_running = false;
-    }
 }
 
 LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -3057,22 +3082,48 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     switch (msg) {
         case WM_CREATE: {
+            HICON hAppIcon = CreateFluxAppIcon();
+            if (hAppIcon) {
+                SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hAppIcon));
+                SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hAppIcon));
+            }
             auto geom = ctx->view->ComputeLayoutGeometry(0);
             ctx->hSearchEdit = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                geom.search_box_rect.left, geom.search_box_rect.top,
-                geom.search_box_rect.width(), geom.search_box_rect.height(),
+                geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
+                std::max(10, geom.search_box_rect.width() - 95), std::max(10, geom.search_box_rect.height() - 14),
                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_EDIT)),
                 GetModuleHandleW(nullptr), nullptr);
-            SendMessageW(ctx->hSearchEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search filename or URL..."));
+            HFONT hEditFont = CreateFontW(
+                -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            SendMessageW(ctx->hSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hEditFont), TRUE);
+            SendMessageW(ctx->hSearchEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search in downloads..."));
             return 0;
+        }
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORSTATIC: {
+            HDC hdcEdit = reinterpret_cast<HDC>(wParam);
+            HWND hCtl = reinterpret_cast<HWND>(lParam);
+            if (hCtl == ctx->hSearchEdit) {
+                SetTextColor(hdcEdit, RGB(0xF0, 0xF0, 0xF5));
+                SetBkColor(hdcEdit, RGB(0x22, 0x22, 0x26));
+                static HBRUSH hEditBrush = CreateSolidBrush(RGB(0x22, 0x22, 0x26));
+                return reinterpret_cast<LRESULT>(hEditBrush);
+            }
+            break;
         }
         case WM_COMMAND: {
             if (LOWORD(wParam) == IDC_SEARCH_EDIT && HIWORD(wParam) == EN_CHANGE) {
                 wchar_t buf[512]{};
                 GetWindowTextW(ctx->hSearchEdit, buf, 511);
-                ctx->view->SetSearchQuery(WToUtf8(buf));
+                if (ctx->view->IsSettingsCenterOpen()) {
+                    ctx->view->SetSettingsSearchQuery(WToUtf8(buf));
+                } else {
+                    ctx->view->SetSearchQuery(WToUtf8(buf));
+                }
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -3082,12 +3133,6 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
             mmi->ptMinTrackSize.x = ctx->view->GetMetrics().min_window_width;
             mmi->ptMinTrackSize.y = ctx->view->GetMetrics().min_window_height;
-            return 0;
-        }
-        case WM_SHOWWINDOW: {
-            bool vis = (wParam != FALSE);
-            ctx->view->SetWindowVisibility(vis, IsIconic(hwnd) != FALSE);
-            UpdateWindowTimerStateWin32(*ctx);
             return 0;
         }
         case WM_DPICHANGED: {
@@ -3105,26 +3150,29 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SWP_NOZORDER | SWP_NOACTIVATE);
             auto geom = ctx->view->ComputeLayoutGeometry(0);
             if (ctx->hSearchEdit) {
-                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left, geom.search_box_rect.top,
-                           geom.search_box_rect.width(), geom.search_box_rect.height(), TRUE);
+                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
+                           std::max(10, geom.search_box_rect.width() - 95), std::max(10, geom.search_box_rect.height() - 14), TRUE);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_SHOWWINDOW: {
+            bool shown = (wParam != FALSE);
+            ctx->view->SetWindowVisibility(shown, IsIconic(hwnd) != FALSE);
             return 0;
         }
         case WM_SIZE: {
             if (wParam == SIZE_MINIMIZED) {
                 ctx->view->SetWindowVisibility(true, true);
-                UpdateWindowTimerStateWin32(*ctx);
                 return 0;
             }
             ctx->view->SetWindowVisibility(IsWindowVisible(hwnd) != FALSE, false);
-            UpdateWindowTimerStateWin32(*ctx);
             UINT dpi = GetDpiForWindow(hwnd);
             ctx->view->SetWindowDimensions(LOWORD(lParam), HIWORD(lParam), dpi > 0 ? dpi : 96);
             auto geom = ctx->view->ComputeLayoutGeometry(0);
             if (ctx->hSearchEdit) {
-                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left, geom.search_box_rect.top,
-                           geom.search_box_rect.width(), geom.search_box_rect.height(), TRUE);
+                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
+                           std::max(10, geom.search_box_rect.width() - 95), std::max(10, geom.search_box_rect.height() - 14), TRUE);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -3139,20 +3187,45 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             auto hit = ctx->view->HitTestPoint(x, y, 0);
+
+            if (ctx->view->IsSettingsCenterOpen()) {
+                if (hit.type == HitTargetType::kSettingsItemControl && hit.task_id == "default_download_dir") {
+                    std::string chosen_dir = ctx->view->GetDraftSettings().default_download_dir;
+                    if (SelectFolderWithDialogWin32(hwnd, chosen_dir)) {
+                        ctx->view->SetDraftSettingByKey("default_download_dir", chosen_dir);
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                if (hit.type == HitTargetType::kSettingsRestoreDefaultsButton) {
+                    if (MessageBoxW(hwnd, L"Restore all Flux settings to their factory defaults?", L"Confirm Restore Defaults", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                        ctx->view->ActionRestoreDefaultSettings();
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, 0);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+
             ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, 0);
 
-            if (hit.type == HitTargetType::kToolbarButton) {
+            if (hit.type == HitTargetType::kToolbarButton || hit.type == HitTargetType::kAddDownloadButton) {
                 auto geom = ctx->view->ComputeLayoutGeometry(0);
-                if (hit.index >= 0 && static_cast<size_t>(hit.index) < geom.toolbar_buttons.size()) {
+                if (hit.type == HitTargetType::kAddDownloadButton) {
+                    ShowAddUrlQuickDialogWin32(hwnd, *ctx->view, *ctx->controller);
+                } else if (hit.index >= 0 && static_cast<size_t>(hit.index) < geom.toolbar_buttons.size()) {
                     auto aid = geom.toolbar_buttons[static_cast<size_t>(hit.index)].action_id;
                     if (aid == ToolbarActionId::kAddUrl) {
                         ShowAddUrlQuickDialogWin32(hwnd, *ctx->view, *ctx->controller);
-                    } else if (aid == ToolbarActionId::kSettings) {
-                        ShowSettingsModalWin32(hwnd, *ctx->view, *ctx->controller, SettingsCategory::kGeneral);
                     } else if (aid == ToolbarActionId::kOpenFolder) {
                         ctx->view->ActionOpenDestinationFolder(false);
                     }
                 }
+            } else if (hit.type == HitTargetType::kRowInlineAction || hit.type == HitTargetType::kTaskRowActionButton) {
+                ctx->view->SelectTask(hit.task_id);
+                ctx->view->TriggerRowPrimaryAction(hit.task_id);
             } else if (hit.type == HitTargetType::kTaskRow && msg == WM_LBUTTONDBLCLK) {
                 ctx->view->ActionOpenCompletedFile(false);
             }
@@ -3182,7 +3255,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             AppendMenuW(hMenu, tb.can_delete_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_DELETE_DISK, L"Delete File from Disk (Shift+Delete)");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_SETTINGS, L"Settings & Configuration (Ctrl+,)...");
-            AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration & Worker Status...");
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration & Worker Diagnostics...");
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About Flux Download Manager...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
@@ -3199,46 +3272,47 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (MessageBoxW(hwnd, L"Permanently delete the downloaded file from disk as well?", L"Confirm File Deletion", MB_YESNO | MB_ICONWARNING) == IDYES) {
                     ctx->view->ActionDeleteSelectedWithFile();
                 }
-            } else if (cmd == IDM_CTX_SETTINGS) {
-                ShowSettingsModalWin32(hwnd, *ctx->view, *ctx->controller, SettingsCategory::kGeneral);
-            } else if (cmd == IDM_CTX_BROWSER_STAT) {
-                ShowSettingsModalWin32(hwnd, *ctx->view, *ctx->controller, SettingsCategory::kBrowserIntegration);
-            } else if (cmd == IDM_CTX_ABOUT) {
-                ShowSettingsModalWin32(hwnd, *ctx->view, *ctx->controller, SettingsCategory::kAboutAndDiagnostics);
-            }
+            } else if (cmd == IDM_CTX_SETTINGS) ctx->view->OpenSettingsCenter(SettingsCategory::kGeneral);
+            else if (cmd == IDM_CTX_BROWSER_STAT) ctx->view->OpenSettingsCenter(SettingsCategory::kBrowserIntegration);
+            else if (cmd == IDM_CTX_ABOUT) ctx->view->OpenSettingsCenter(SettingsCategory::kAboutAndDiagnostics);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_TIMER: {
             if (wParam == IDT_UI_REFRESH) {
-                ctx->view->AdvanceCosmicAnimation(100);
-                InvalidateRect(hwnd, nullptr, FALSE);
+                auto sb = ctx->view->BuildStatusBar();
+                if (sb.active_downloads > 0) {
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            } else if (wParam == IDT_COSMIC_DRIFT) {
+                BOOL os_anim = TRUE;
+                SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &os_anim, 0);
+                bool user_reduced = ctx->controller->GetSettings().reduced_motion || !os_anim;
+                if (!user_reduced && ctx->view->GetCosmicStarfield().IsAnimationActive()) {
+                    ctx->view->AdvanceCosmicBackground(350);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
             }
-            return 0;
-        }
-        case (WM_APP + 105): {
-            if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
-                ShowWindow(hwnd, SW_RESTORE);
-            }
-            ctx->view->SetWindowVisibility(true, false);
-            UpdateWindowTimerStateWin32(*ctx);
-            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-            SetForegroundWindow(hwnd);
-            if (ctx && ctx->view) {
-                ctx->view->SelectFirstRow();
-            }
-            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_KEYDOWN: {
             bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (ctrl_down && wParam == 'N') {
+            if (wParam == VK_ESCAPE && ctx->view->IsSettingsCenterOpen()) {
+                ctx->view->CloseSettingsCenter(true);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (ctrl_down && (wParam == 'K' || wParam == 'F')) {
+                if (ctx->hSearchEdit) {
+                    SetFocus(ctx->hSearchEdit);
+                    SendMessageW(ctx->hSearchEdit, EM_SETSEL, 0, -1);
+                }
+                return 0;
+            } else if (ctrl_down && wParam == 'N') {
                 ShowAddUrlQuickDialogWin32(hwnd, *ctx->view, *ctx->controller);
-            } else if (ctrl_down && wParam == 'F') {
-                if (ctx->hSearchEdit) SetFocus(ctx->hSearchEdit);
             } else if (ctrl_down && wParam == VK_OEM_COMMA) {
-                ShowSettingsModalWin32(hwnd, *ctx->view, *ctx->controller, SettingsCategory::kGeneral);
+                ctx->view->OpenSettingsCenter(SettingsCategory::kGeneral);
             } else if (wParam == VK_DOWN) ctx->view->HandleKeyShortcut("VK_DOWN");
             else if (wParam == VK_UP) ctx->view->HandleKeyShortcut("VK_UP");
             else if (wParam == VK_HOME) ctx->view->HandleKeyShortcut("VK_HOME");
@@ -3275,18 +3349,15 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (cmd == IDM_TRAY_SHOW) {
                     ShowWindow(hwnd, SW_RESTORE);
                     ctx->view->SetWindowVisibility(true, false);
-                    UpdateWindowTimerStateWin32(*ctx);
                 } else if (cmd == IDM_TRAY_HIDE) {
                     ShowWindow(hwnd, SW_HIDE);
                     ctx->view->SetWindowVisibility(false, false);
-                    UpdateWindowTimerStateWin32(*ctx);
                 } else if (cmd == IDM_TRAY_PAUSE_ALL) ctx->controller->PauseAllTasks();
                 else if (cmd == IDM_TRAY_RESUME_ALL) ctx->controller->ResumeAllTasks();
                 else if (cmd == IDM_TRAY_EXIT) DestroyWindow(hwnd);
             } else if (lParam == WM_LBUTTONDBLCLK) {
                 ShowWindow(hwnd, SW_RESTORE);
                 ctx->view->SetWindowVisibility(true, false);
-                UpdateWindowTimerStateWin32(*ctx);
                 SetForegroundWindow(hwnd);
             }
             return 0;
@@ -3295,7 +3366,6 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (ctx->controller->GetSettings().close_to_tray && ctx->tray_added) {
                 ShowWindow(hwnd, SW_HIDE);
                 ctx->view->SetWindowVisibility(false, false);
-                UpdateWindowTimerStateWin32(*ctx);
                 return 0;
             }
             DestroyWindow(hwnd);
@@ -3306,10 +3376,8 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_DESTROY: {
-            if (ctx->timer_running) {
-                KillTimer(hwnd, IDT_UI_REFRESH);
-                ctx->timer_running = false;
-            }
+            KillTimer(hwnd, IDT_UI_REFRESH);
+            KillTimer(hwnd, IDT_COSMIC_DRIFT);
             if (ctx->tray_added) {
                 Shell_NotifyIconW(NIM_DELETE, &ctx->nid);
                 ctx->tray_added = false;
@@ -3328,29 +3396,20 @@ int DesktopView::RunWin32MessageLoop() {
     INITCOMMONCONTROLSEX icex{sizeof(INITCOMMONCONTROLSEX), ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icex);
 
-    // Honor Windows client-area animation preference if OS animations are disabled
-    BOOL client_anim = TRUE;
-    if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &client_anim, 0) && !client_anim) {
-        auto s = m_controller.GetSettings();
-        if (!s.reduced_motion) {
-            s.reduced_motion = true;
-            m_controller.UpdateSettings(s);
-            m_settings_draft.reduced_motion = true;
-        }
-    }
-
     HINSTANCE hInst = GetModuleHandleW(nullptr);
+    HICON hAppIcon = CreateFluxAppIcon();
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = OpenIdmWndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIconSm = hAppIcon;
     wc.lpszClassName = L"Flux_MainWindowClass";
     RegisterClassExW(&wc);
 
-    Win32WindowContext ctx{this, &m_controller, nullptr, nullptr, {}, false, false};
+    Win32WindowContext ctx{this, &m_controller, nullptr, nullptr, {}, false};
     HWND hwnd = CreateWindowExW(
         0,
         wc.lpszClassName,
@@ -3364,6 +3423,10 @@ int DesktopView::RunWin32MessageLoop() {
 
     BOOL use_dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &use_dark, sizeof(use_dark));
+    COLORREF titlebar_col = RGB(0x16, 0x16, 0x18);
+    DwmSetWindowAttribute(hwnd, 35 /* DWMWA_CAPTION_COLOR */, &titlebar_col, sizeof(titlebar_col));
+    COLORREF titletext_col = RGB(0xFF, 0xFF, 0xFF);
+    DwmSetWindowAttribute(hwnd, 36 /* DWMWA_TEXT_COLOR */, &titletext_col, sizeof(titletext_col));
 
     ctx.nid.cbSize = sizeof(NOTIFYICONDATAW);
     ctx.nid.hWnd = hwnd;
@@ -3374,10 +3437,11 @@ int DesktopView::RunWin32MessageLoop() {
     wcsncpy_s(ctx.nid.szTip, L"Flux Download Manager", _TRUNCATE);
     ctx.tray_added = (Shell_NotifyIconW(NIM_ADD, &ctx.nid) != FALSE);
 
+    SetTimer(hwnd, IDT_UI_REFRESH, 100, nullptr);
+    SetTimer(hwnd, IDT_COSMIC_DRIFT, 350, nullptr);
     bool start_min = m_controller.GetSettings().start_minimized;
-    SetWindowVisibility(!start_min, false);
+    SetWindowVisibility(!start_min, start_min);
     ShowWindow(hwnd, start_min ? SW_HIDE : SW_SHOWDEFAULT);
-    UpdateWindowTimerStateWin32(ctx);
     UpdateWindow(hwnd);
 
     MSG msg{};

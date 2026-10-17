@@ -24,7 +24,6 @@ namespace {
 json::Value TaskToJson(const TaskModel& t) {
     json::Value obj = json::Object{};
     obj["taskId"] = t.task_id;
-    obj["correlationId"] = t.correlation_id;
     obj["taskType"] = TaskTypeToString(t.task_type);
     obj["state"] = TaskStateToString(t.state);
     obj["category"] = t.category;
@@ -82,33 +81,6 @@ void ExtractHeadersMap(
     }
 }
 
-bool IsValidHlsBody(std::string_view sv) {
-    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
-        sv.remove_prefix(1);
-    }
-    if (sv.empty() || sv.front() == '{' || sv.front() == '[') return false;
-    return sv.rfind("#EXTM3U", 0) == 0 ||
-           sv.find("#EXT-X-STREAM-INF") != std::string_view::npos ||
-           sv.find("#EXT-X-TARGETDURATION") != std::string_view::npos;
-}
-
-bool IsValidDashBody(std::string_view sv) {
-    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r' || sv.front() == '\n')) {
-        sv.remove_prefix(1);
-    }
-    if (sv.empty() || sv.front() == '{' || sv.front() == '[') return false;
-    return sv.find("<MPD") != std::string_view::npos;
-}
-
-void NotifyDesktopWindowTaskAdded() {
-#ifdef _WIN32
-    HWND hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
-    if (hwnd) {
-        PostMessageW(hwnd, WM_APP + 105, 0, 0);
-    }
-#endif
-}
-
 } // namespace
 
 std::string IpcServer::DefaultSocketPath() {
@@ -139,25 +111,6 @@ Result<void> IpcServer::Start() {
     if (m_running.load()) return Result<void>::Ok();
 
 #ifdef _WIN32
-    std::wstring wpipe(m_socket_path.begin(), m_socket_path.end());
-    HANDLE hFirst = CreateNamedPipeW(
-        wpipe.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_UNLIMITED_INSTANCES,
-        65536,
-        65536,
-        50,
-        nullptr);
-    if (hFirst == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        if (err == ERROR_ACCESS_DENIED || err == ERROR_ALREADY_EXISTS || err == ERROR_PIPE_BUSY) {
-            return Result<void>::Err("ERR_IPC_PIPE_EXISTS", "Another IPC server instance is already active on " + m_socket_path);
-        }
-    } else {
-        CloseHandle(hFirst);
-    }
-
     m_running.store(true);
     m_accept_thread = std::thread(&IpcServer::AcceptLoop, this);
     return Result<void>::Ok();
@@ -335,6 +288,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         if (proto_ver.rfind("1.", 0) != 0) {
             return MakeRpcError(id, -32001, "ERR_IPC_VERSION_MISMATCH: Expected protocol 1.x, got " + proto_ver).dump();
         }
+        auto s = m_controller.GetSettings();
         json::Value res = json::Object{};
         res["appVersion"] = "0.3.0";
         res["protocolVersion"] = "1.0";
@@ -342,54 +296,46 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         res["workersAvailable"] = m_controller.AreWorkersAvailable();
         json::Array exts = {"zip", "rar", "7z", "iso", "exe", "msi", "mp4", "mkv", "webm", "mp3", "flac", "pdf", "tar", "gz", "bin"};
         res["interceptExtensions"] = std::move(exts);
-        res["minCaptureSizeBytes"] = 1048576;
+        res["minCaptureSizeBytes"] = static_cast<int64_t>(s.min_capture_size_bytes);
         return MakeRpcResult(id, std::move(res)).dump();
     }
 
     // 2. download.offer
     if (method == "download.offer") {
-        std::string corr_id = params["correlationId"].as_string();
         if (!m_capture_enabled.load() || params["bypassModifier"].as_bool(false)) {
             json::Value res = json::Object{};
             res["accepted"] = false;
             res["reason"] = "ERR_IPC_CAPTURE_DISABLED";
-            res["correlationId"] = corr_id;
             return MakeRpcResult(id, std::move(res)).dump();
         }
 
         std::string url = params["url"].as_string();
-        if (url.empty() || url.rfind("blob:", 0) == 0 || url.rfind("data:", 0) == 0) {
+        if (url.rfind("blob:", 0) == 0 || url.rfind("data:", 0) == 0) {
             json::Value res = json::Object{};
             res["accepted"] = false;
             res["reason"] = "BLOB_OR_DATA_URL_MUST_STAY_IN_BROWSER";
-            res["correlationId"] = corr_id;
             return MakeRpcResult(id, std::move(res)).dump();
         }
 
         TaskModel t;
-        t.correlation_id = corr_id;
         t.task_type = TaskType::kHttpFile;
         t.url = url;
         t.page_url = params["tabUrl"].as_string();
         t.file_name = params["filename"].as_string();
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
-        OPENIDM_LOG_INFO("IpcServer", "[" + corr_id + "] download.offer url=" + url + " filename=" + t.file_name);
-
-        auto add_res = m_controller.AddTask(std::move(t), true, false);
+        bool auto_start = m_controller.GetSettings().auto_start_downloads;
+        auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             json::Value res = json::Object{};
             res["accepted"] = false;
             res["reason"] = add_res.error->code + ": " + add_res.error->message;
-            res["correlationId"] = corr_id;
             return MakeRpcResult(id, std::move(res)).dump();
         }
-        NotifyDesktopWindowTaskAdded();
         json::Value res = json::Object{};
         res["accepted"] = true;
         res["taskId"] = add_res.value->task_id;
         res["fileName"] = add_res.value->file_name;
-        res["correlationId"] = add_res.value->correlation_id;
         return MakeRpcResult(id, std::move(res)).dump();
     }
 
@@ -451,104 +397,22 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         return MakeRpcResult(id, std::move(res)).dump();
     }
 
-    // 5. stream.add — Explicit 5-Way Typed Dispatch (Defect B Fix)
-    //   1. HLS_MANIFEST      -> TaskType::kStreamHls (actual #EXTM3U / .m3u8)
-    //   2. DASH_MANIFEST     -> TaskType::kStreamDash (actual <MPD / .mpd)
-    //   3. DIRECT_PROGRESSIVE-> TaskType::kHttpFile (direct progressive media URL)
-    //   4. YOUTUBE_EXTRACTION-> TaskType::kYouTubeExtraction (YouTube / site extraction & adaptive mux)
-    //   5. UNSUPPORTED       -> Reject with explicit error code
+    // 5. stream.add
     if (method == "stream.add") {
-        std::string corr_id = params["correlationId"].as_string();
-        std::string stream_type = params["streamType"].as_string("");
-        std::string source_type = params["sourceType"].as_string("");
+        std::string stream_type = params["streamType"].as_string("HLS");
         std::string manifest_url = params["manifestUrl"].as_string();
         if (manifest_url.empty()) manifest_url = params["url"].as_string();
         std::string cached_body = params["cachedManifestBody"].as_string();
-        std::string extractor_json = params["extractorJson"].as_string();
-        std::string video_url = params["videoUrl"].as_string();
-        std::string paired_audio_url = params["pairedAudioUrl"].as_string();
-
-        if (manifest_url.empty() || manifest_url.rfind("blob:", 0) == 0 || manifest_url.rfind("data:", 0) == 0) {
-            return MakeRpcError(id, -32602, "ERR_UNSUPPORTED_BLOB_SOURCE: Cannot submit empty, blob:, or data: URL without a resolved stream").dump();
-        }
-        if (source_type == "UNSUPPORTED" || stream_type == "UNSUPPORTED") {
-            return MakeRpcError(id, -32602, "ERR_UNSUPPORTED_MEDIA_SOURCE: Unsupported or unresolved media source").dump();
-        }
-
-        // Guard against passing a JSON descriptor as an HLS or DASH manifest
-        size_t first_non_space = cached_body.find_first_not_of(" \t\r\n");
-        bool cached_is_json = (first_non_space != std::string::npos &&
-                               (cached_body[first_non_space] == '{' || cached_body[first_non_space] == '['));
-        if (cached_is_json) {
-            if (stream_type == "HLS" || stream_type == "DASH" ||
-                source_type == "HLS_MANIFEST" || source_type == "DASH_MANIFEST") {
-                return MakeRpcError(id, -32602, "ERR_STREAM_INVALID_MANIFEST: JSON descriptor cannot be passed as an HLS or DASH manifest").dump();
-            }
-            if (extractor_json.empty()) {
-                extractor_json = std::move(cached_body);
-            }
-            cached_body.clear();
-        }
 
         TaskModel t;
-        t.correlation_id = corr_id;
-
-        bool is_youtube = (source_type == "YOUTUBE_EXTRACTION" ||
-                           stream_type == "YOUTUBE" ||
-                           stream_type == "SITE_EXTRACTION" ||
-                           stream_type == "VIMEO" ||
-                           !extractor_json.empty() ||
-                           !paired_audio_url.empty() ||
-                           PathSanitizer::IsWebpageWatchUrl(manifest_url));
-
-        bool is_dash = (!is_youtube &&
-                        (source_type == "DASH_MANIFEST" ||
-                         stream_type == "DASH" ||
-                         stream_type == "MSS" ||
-                         manifest_url.find(".mpd") != std::string::npos ||
-                         IsValidDashBody(cached_body)));
-
-        bool is_hls = (!is_youtube && !is_dash &&
-                       (source_type == "HLS_MANIFEST" ||
-                        stream_type == "HLS" ||
-                        manifest_url.find(".m3u8") != std::string::npos ||
-                        manifest_url.find(".m3u") != std::string::npos ||
-                        IsValidHlsBody(cached_body)));
-
-        bool is_direct = (!is_youtube && !is_dash && !is_hls &&
-                          (source_type == "DIRECT_PROGRESSIVE" ||
-                           stream_type == "HTTP_FILE" ||
-                           stream_type == "DIRECT_MEDIA"));
-
-        if (is_hls) {
-            if (!cached_body.empty() && !IsValidHlsBody(cached_body)) {
-                return MakeRpcError(id, -32602, "ERR_STREAM_INVALID_MANIFEST: Cached body is not a valid #EXTM3U HLS manifest").dump();
-            }
-            t.task_type = TaskType::kStreamHls;
-            t.stream_options.source_type = "HLS_MANIFEST";
-        } else if (is_dash) {
-            if (!cached_body.empty() && !IsValidDashBody(cached_body)) {
-                return MakeRpcError(id, -32602, "ERR_STREAM_INVALID_MANIFEST: Cached body is not a valid <MPD DASH manifest").dump();
-            }
+        if (stream_type == "DASH" || manifest_url.find(".mpd") != std::string::npos) {
             t.task_type = TaskType::kStreamDash;
-            t.stream_options.source_type = "DASH_MANIFEST";
-        } else if (is_youtube) {
-            t.task_type = TaskType::kYouTubeExtraction;
-            t.stream_options.source_type = "YOUTUBE_EXTRACTION";
-            t.stream_options.video_url = video_url;
-            t.stream_options.paired_audio_url = paired_audio_url;
-            t.stream_options.youtube_video_id = params["videoId"].as_string("");
-            t.stream_options.requires_cipher_extraction = params["requiresCipherExtraction"].as_bool(false);
-            t.stream_options.extractor_json = extractor_json;
-            cached_body.clear();
-        } else if (is_direct) {
-            t.task_type = TaskType::kHttpFile;
-            t.stream_options.source_type = "DIRECT_PROGRESSIVE";
-            cached_body.clear();
+        } else if (stream_type == "YOUTUBE" || stream_type == "SITE_EXTRACTION" || stream_type == "VIMEO" ||
+                   stream_type == "HLS" || manifest_url.find(".m3u8") != std::string::npos || !cached_body.empty()) {
+            t.task_type = TaskType::kStreamHls;
         } else {
-            return MakeRpcError(id, -32602, "ERR_UNSUPPORTED_MEDIA_SOURCE: Unrecognized streamType or media source").dump();
+            t.task_type = TaskType::kHttpFile;
         }
-
         t.url = manifest_url;
         t.page_url = params["tabUrl"].as_string();
 
@@ -577,24 +441,16 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         t.stream_options.custom_hls_key_hex = params["customKeyHex"].as_string("");
         t.stream_options.cached_manifest_body = cached_body;
 
-        OPENIDM_LOG_INFO("IpcServer",
-            "[" + corr_id + "] stream.add sourceType=" + t.stream_options.source_type +
-            " taskType=" + TaskTypeToString(t.task_type) +
-            " url=" + manifest_url);
-
-        auto add_res = m_controller.AddTask(std::move(t), true, false);
+        bool auto_start = m_controller.GetSettings().auto_start_downloads;
+        auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             return MakeRpcError(id, -32602, add_res.error->code + ": " + add_res.error->message).dump();
         }
-        NotifyDesktopWindowTaskAdded();
         json::Value res = json::Object{};
         res["accepted"] = true;
         res["taskId"] = add_res.value->task_id;
-        res["taskType"] = TaskTypeToString(add_res.value->task_type);
-        res["sourceType"] = add_res.value->stream_options.source_type;
         res["fileName"] = add_res.value->file_name;
         res["status"] = TaskStateToString(add_res.value->state);
-        res["correlationId"] = add_res.value->correlation_id;
         return MakeRpcResult(id, std::move(res)).dump();
     }
 

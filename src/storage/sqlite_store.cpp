@@ -149,7 +149,6 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
     }
 
     json::Value stream_obj = json::Object{};
-    stream_obj["source_type"] = task.stream_options.source_type;
     stream_obj["video_filter"] = task.stream_options.video_filter;
     stream_obj["audio_filter"] = task.stream_options.audio_filter;
     stream_obj["subtitle_filter"] = task.stream_options.subtitle_filter;
@@ -158,11 +157,6 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
     stream_obj["concurrent_download"] = task.stream_options.concurrent_download;
     stream_obj["custom_hls_key_hex"] = task.stream_options.custom_hls_key_hex;
     stream_obj["cached_manifest_body"] = task.stream_options.cached_manifest_body;
-    stream_obj["video_url"] = task.stream_options.video_url;
-    stream_obj["paired_audio_url"] = task.stream_options.paired_audio_url;
-    stream_obj["youtube_video_id"] = task.stream_options.youtube_video_id;
-    stream_obj["extractor_json"] = task.stream_options.extractor_json;
-    stream_obj["requires_cipher_extraction"] = task.stream_options.requires_cipher_extraction;
 
     const char* sql = R"SQL(
         INSERT INTO tasks (
@@ -452,7 +446,6 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
             std::string s_json = ColText(stmt, 19);
             if (!s_json.empty()) {
                 auto s_val = json::Parse(s_json);
-                t.stream_options.source_type = s_val["source_type"].as_string("");
                 t.stream_options.video_filter = s_val["video_filter"].as_string("best");
                 t.stream_options.audio_filter = s_val["audio_filter"].as_string("all");
                 t.stream_options.subtitle_filter = s_val["subtitle_filter"].as_string("all");
@@ -461,11 +454,6 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
                 t.stream_options.concurrent_download = s_val["concurrent_download"].as_bool(true);
                 t.stream_options.custom_hls_key_hex = s_val["custom_hls_key_hex"].as_string("");
                 t.stream_options.cached_manifest_body = s_val["cached_manifest_body"].as_string("");
-                t.stream_options.video_url = s_val["video_url"].as_string("");
-                t.stream_options.paired_audio_url = s_val["paired_audio_url"].as_string("");
-                t.stream_options.youtube_video_id = s_val["youtube_video_id"].as_string("");
-                t.stream_options.extractor_json = s_val["extractor_json"].as_string("");
-                t.stream_options.requires_cipher_extraction = s_val["requires_cipher_extraction"].as_bool(false);
             }
         } catch (...) {}
 

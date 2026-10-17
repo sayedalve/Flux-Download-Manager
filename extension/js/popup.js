@@ -19,6 +19,14 @@ function extractSourceHost(urlStr) {
   }
 }
 
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function isStreamCandidate(item) {
   if (!item) return false;
   return item.streamType === "HLS" ||
@@ -59,7 +67,7 @@ function renderDetectedMediaList(candidates, options = {}) {
     return '<p class="empty" data-state="loading">Probing tab media &amp; connecting to Flux...</p>';
   }
   if (errorMessage) {
-    return `<div class="error-banner" data-state="error">${errorMessage}</div>`;
+    return `<div class="error-banner" data-state="error">${escapeHtml(errorMessage)}</div>`;
   }
 
   const filtered = filterPopupCandidates(candidates, filterMode, searchQuery);
@@ -73,55 +81,40 @@ function renderDetectedMediaList(candidates, options = {}) {
 
   const itemsHtml = filtered.map(item => {
     const isStream = isStreamCandidate(item);
-    const isUnavailable = Boolean(item.unavailable || item.drmProtected || !item.url);
     const badge = isStream
       ? item.streamType
       : (item.ext ? item.ext.toUpperCase() : (item.streamType || "MEDIA"));
     const badgeClass = isStream ? "badge badge-stream" : "badge";
     const rawName = item.pageTitle || item.fileName || (item.url ? item.url.split("?")[0].split("/").pop() : "media");
-    const sourceHost = extractSourceHost(item.tabUrl || item.url);
+    const safeName = escapeHtml(rawName);
+    const sourceHost = escapeHtml(extractSourceHost(item.tabUrl || item.url));
     const qualityTag = item.resolution
-      ? `<span class="media-size-tag">${item.resolution}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
-      : `<span class="media-size-tag">${formatMediaSize(item.size)}</span>`;
+      ? `<span class="meta-mono">${escapeHtml(item.resolution)}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
+      : `<span class="meta-mono">${formatMediaSize(item.size)}</span>`;
     const variantNote = (item.variants && item.variants.length > 0)
       ? `<small>(+${item.variants.length} sub-playlists grouped)</small>`
       : "";
-    const qualitiesList = Array.isArray(item.qualities) ? item.qualities : [];
-    const qualitySelectHtml = qualitiesList.length > 0
-      ? `<select class="quality-select" data-id="${item.candidateId}" title="Select video quality"${isUnavailable ? " disabled" : ""}>${qualitiesList.map(q => {
-          const qSize = (q.size && q.size > 0) ? (" · " + formatMediaSize(q.size)) : "";
-          const qLabel = (q.label || q.resolution || "Auto") + qSize;
-          return `<option value="${q.id || q.resolution || "best"}">${qLabel}</option>`;
-        }).join("")}</select>`
-      : "";
-
-    const statusText = isUnavailable
-      ? (item.drmProtected ? "DRM Protected" : "Unavailable")
-      : (item.handoffStatus || "Ready");
-    const statusAttr = isUnavailable
-      ? "unavailable"
-      : (statusText.includes("Queued") ? "queued" : (statusText.includes("Fallback") ? "fallback" : "ready"));
-    const actionLabel = isUnavailable
-      ? "Unavailable"
+    const statusText = escapeHtml(item.handoffStatus || "Ready");
+    const isAlreadyQueued = (item.handoffStatus === "Queued in Flux");
+    const actionLabel = isAlreadyQueued
+      ? "Queued in Flux"
       : ((!desktopConnected && !isStream) ? "Browser Download" : "Download in Flux");
+    const btnClass = isAlreadyQueued ? "dl-btn dl-queued" : "dl-btn";
 
-    return `<div class="media-item" data-id="${item.candidateId}" data-stream="${isStream}"${isUnavailable ? ' data-unavailable="true"' : ""}>
+    return `<div class="media-item" data-id="${escapeHtml(item.candidateId)}" data-stream="${isStream}">
       <div class="media-meta">
         <div class="media-title-row">
-          <span class="${badgeClass}">${badge}</span>
-          <strong class="title" title="${rawName}">${rawName}</strong>
+          <span class="${badgeClass}">${escapeHtml(badge)}</span>
+          <strong class="title" title="${safeName}">${safeName}</strong>
         </div>
         <div class="media-sub-row">
           <span>${sourceHost}</span>
           ${qualityTag}
-          <span class="item-status" data-status="${statusAttr}">${statusText}</span>
+          <span class="item-status">${statusText}</span>
           ${variantNote}
         </div>
       </div>
-      <div class="media-actions">
-        ${qualitySelectHtml}
-        <button class="dl-btn" data-url="${item.url || ""}" data-id="${item.candidateId}"${isUnavailable ? " disabled" : ""}>${actionLabel}</button>
-      </div>
+      <button class="${btnClass}" data-url="${escapeHtml(item.url)}" data-id="${escapeHtml(item.candidateId)}">${actionLabel}</button>
     </div>`;
   }).join("\n");
 
@@ -142,37 +135,38 @@ function initPopupUI() {
 
   const mediaListEl = document.getElementById("mediaList");
   const connectionBadge = document.getElementById("connectionBadge");
-  const siteHostLabel = document.getElementById("siteHostLabel");
   const siteToggle = document.getElementById("siteToggle");
   const searchInput = document.getElementById("searchInput");
   const clearListBtn = document.getElementById("clearListBtn");
   const batchDownloadBtn = document.getElementById("batchDownloadBtn");
-  const footerMeta = document.getElementById("footerMeta");
+  const footerSummary = document.getElementById("footerSummary");
   const countAllEl = document.getElementById("countAll");
   const countStreamEl = document.getElementById("countStream");
   const countDirectEl = document.getElementById("countDirect");
   const filterTabs = document.querySelectorAll(".tab-btn");
 
-  function updateTabCountBadges() {
+  function updateCounters() {
     const allCount = Array.isArray(currentCandidates) ? currentCandidates.length : 0;
     const streamCount = filterPopupCandidates(currentCandidates, "stream", "").length;
     const directCount = filterPopupCandidates(currentCandidates, "direct", "").length;
+    const filteredCount = filterPopupCandidates(currentCandidates, activeFilterMode, activeSearchQuery).length;
+
     if (countAllEl) countAllEl.textContent = String(allCount);
     if (countStreamEl) countStreamEl.textContent = String(streamCount);
     if (countDirectEl) countDirectEl.textContent = String(directCount);
-    if (footerMeta) {
-      footerMeta.textContent = allCount > 0
-        ? `${allCount} item${allCount === 1 ? "" : "s"} detected`
-        : "Alt+Click bypasses capture";
+    if (footerSummary) {
+      footerSummary.textContent = filteredCount === 1 ? "1 item" : `${filteredCount} items`;
     }
     if (batchDownloadBtn) {
-      const visible = filterPopupCandidates(currentCandidates, activeFilterMode, activeSearchQuery);
-      batchDownloadBtn.disabled = visible.length === 0;
+      batchDownloadBtn.disabled = (filteredCount === 0);
+    }
+    if (clearListBtn) {
+      clearListBtn.disabled = (allCount === 0);
     }
   }
 
   function refreshListDisplay() {
-    updateTabCountBadges();
+    updateCounters();
     if (!mediaListEl) return;
     mediaListEl.innerHTML = renderDetectedMediaList(currentCandidates, {
       filterMode: activeFilterMode,
@@ -189,11 +183,8 @@ function initPopupUI() {
     buttons.forEach(btn => {
       btn.addEventListener("click", (ev) => {
         const targetBtn = ev.currentTarget || ev.target;
-        if (targetBtn.disabled) return;
         const candidateId = targetBtn.getAttribute("data-id");
         const url = targetBtn.getAttribute("data-url");
-        const qSelect = mediaListEl.querySelector(`.quality-select[data-id="${candidateId}"]`);
-        const qualityId = qSelect ? qSelect.value : "";
         targetBtn.textContent = "Connecting...";
         targetBtn.disabled = true;
 
@@ -202,7 +193,6 @@ function initPopupUI() {
             action: "downloadMedia",
             candidateId,
             url,
-            qualityId,
             tabId: currentTabId,
             tabUrl: currentTabUrl
           }, (resp) => {
@@ -210,6 +200,7 @@ function initPopupUI() {
             if (!lastErr && resp && resp.success) {
               const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
               targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Flux";
+              targetBtn.classList.add("dl-queued");
               const taskId = (resp.result && resp.result.taskId) ? resp.result.taskId : "";
               if (taskId) targetBtn.setAttribute("data-task-id", taskId);
               const itemCand = currentCandidates.find(c => c.candidateId === candidateId);
@@ -244,9 +235,6 @@ function initPopupUI() {
     const queryAndLoad = (tabId, tabUrl) => {
       currentTabId = tabId;
       currentTabUrl = tabUrl || "";
-      if (siteHostLabel) {
-        siteHostLabel.textContent = currentTabUrl ? extractSourceHost(currentTabUrl) : "Active tab";
-      }
       chrome.runtime.sendMessage({
         action: "getMediaList",
         tabId: currentTabId,

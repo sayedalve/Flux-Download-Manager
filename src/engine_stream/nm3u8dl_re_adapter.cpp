@@ -1112,12 +1112,12 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     }
 
     std::string watch_url = task.url;
-    std::string video_url = StripGooglevideoRangeParams(task.stream_options.video_url);
-    std::string audio_url = StripGooglevideoRangeParams(task.stream_options.paired_audio_url);
+    std::string video_url;
+    std::string audio_url;
     std::string hls_manifest_url;
     std::string dash_manifest_url;
-    bool requires_cipher = task.stream_options.requires_cipher_extraction;
-    bool requires_audio_mux = !audio_url.empty();
+    bool requires_cipher = false;
+    bool requires_audio_mux = false;
 
     std::string req_filter = ToLowerStr(TrimView(task.stream_options.video_filter));
     bool wants_audio_only = (req_filter == "audio" || req_filter == "audio-only");
@@ -1130,10 +1130,11 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         }
     }
 
-    // 1. Parse structured extractor_json if provided by browser extension
-    if (!task.stream_options.extractor_json.empty()) {
+    // 1. Parse structured manifest body if provided as JSON
+    if (!task.stream_options.cached_manifest_body.empty() &&
+        (task.stream_options.cached_manifest_body.front() == '{' || task.stream_options.cached_manifest_body.front() == '[')) {
         try {
-            auto root = json::Parse(task.stream_options.extractor_json);
+            auto root = json::Parse(task.stream_options.cached_manifest_body);
             if (root.is_object()) {
                 if (root["qualities"].is_array() && !req_filter.empty() && req_filter != "best") {
                     for (const auto& q : root["qualities"].as_array()) {

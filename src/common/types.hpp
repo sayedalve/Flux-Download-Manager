@@ -15,8 +15,7 @@ enum class TaskType {
     kHttpFile,
     kStreamHls,
     kStreamDash,
-    kStreamMss,
-    kYouTubeExtraction
+    kStreamMss
 };
 
 enum class TaskState {
@@ -109,7 +108,6 @@ struct StreamTrack {
 };
 
 struct StreamSelectionOptions {
-    std::string source_type;              // "HLS_MANIFEST", "DASH_MANIFEST", "DIRECT_PROGRESSIVE", "YOUTUBE_EXTRACTION"
     std::string video_filter{"best"};     // -sv argument
     std::string audio_filter{"all"};      // -sa argument
     std::string subtitle_filter{"all"};   // -ss argument
@@ -117,17 +115,11 @@ struct StreamSelectionOptions {
     uint32_t thread_count{8};
     bool concurrent_download{true};       // -mt
     std::string custom_hls_key_hex;       // Optional user-supplied AES-128 key
-    std::string cached_manifest_body;     // Actual HLS (#EXTM3U) or DASH (<MPD) manifest text ONLY
-    std::string video_url;                // Pre-resolved YouTube video stream URL (if available)
-    std::string paired_audio_url;         // Pre-resolved YouTube audio stream URL (if separate adaptive track)
-    std::string youtube_video_id;         // YouTube video ID
-    std::string extractor_json;           // Structured YouTube/site extractor descriptor (never passed as .m3u8)
-    bool requires_cipher_extraction{false};
+    std::string cached_manifest_body;     // Optional cached manifest from Cat Catch Deep Search
 };
 
 struct TaskModel {
     std::string task_id;
-    std::string correlation_id;
     TaskType task_type{TaskType::kHttpFile};
     TaskState state{TaskState::kQueued};
     std::string queue_id{"main"};
@@ -176,21 +168,50 @@ struct QueueConfig {
 };
 
 struct AppSettings {
-    std::string theme{"dark"}; // "dark", "light", "system"
+    std::string theme{"dark"}; // Locked to Cosmic Dark ("dark") in UI; preserves field for storage compatibility
     uint32_t max_concurrent_tasks{3};
     uint64_t speed_limit_bps{0};
     uint32_t default_connections_per_task{8};
     std::string default_download_dir;
+    bool category_subfolders_enabled{true};
+    ConflictPolicy conflict_policy{ConflictPolicy::kAutoRename};
+    bool auto_start_downloads{true};
+    int stall_timeout_ms{3000};
+    uint64_t min_split_bytes{131072};
     bool browser_capture_enabled{true};
+    uint64_t min_capture_size_bytes{1048576};
     bool close_to_tray{true};
     bool start_minimized{false};
     bool reduced_motion{false};
+    bool show_completion_notification{true};
+
+    bool operator==(const AppSettings& other) const {
+        return theme == other.theme &&
+               max_concurrent_tasks == other.max_concurrent_tasks &&
+               speed_limit_bps == other.speed_limit_bps &&
+               default_connections_per_task == other.default_connections_per_task &&
+               default_download_dir == other.default_download_dir &&
+               category_subfolders_enabled == other.category_subfolders_enabled &&
+               conflict_policy == other.conflict_policy &&
+               auto_start_downloads == other.auto_start_downloads &&
+               stall_timeout_ms == other.stall_timeout_ms &&
+               min_split_bytes == other.min_split_bytes &&
+               browser_capture_enabled == other.browser_capture_enabled &&
+               min_capture_size_bytes == other.min_capture_size_bytes &&
+               close_to_tray == other.close_to_tray &&
+               start_minimized == other.start_minimized &&
+               reduced_motion == other.reduced_motion &&
+               show_completion_notification == other.show_completion_notification;
+    }
+    bool operator!=(const AppSettings& other) const { return !(*this == other); }
 };
 
 std::string TaskTypeToString(TaskType t);
 TaskType TaskTypeFromString(const std::string& s);
 std::string TaskStateToString(TaskState s);
 TaskState TaskStateFromString(const std::string& s);
+std::string ConflictPolicyToString(ConflictPolicy p);
+ConflictPolicy ConflictPolicyFromString(const std::string& s);
 std::string InferCategoryFromFilename(const std::string& filename);
 int64_t NowEpochMs();
 std::string GenerateUuidV4();

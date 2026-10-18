@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "brisk_engine/http_client.hpp"
+#include "common/crypto_utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -502,6 +503,15 @@ Result<ParsedUrl> HttpClient::ParseUrl(std::string_view url) {
         return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Empty URL host");
     }
 
+    auto at_pos = authority.rfind('@');
+    if (at_pos != std::string::npos) {
+        out.userinfo = authority.substr(0, at_pos);
+        authority = authority.substr(at_pos + 1);
+        if (authority.empty()) {
+            return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Empty URL host after userinfo");
+        }
+    }
+
     if (authority.front() == '[') {
         auto close_b = authority.find(']');
         if (close_b == std::string::npos) return Result<ParsedUrl>::Err("ERR_INVALID_URL", "Invalid IPv6 host");
@@ -544,6 +554,22 @@ Result<ParsedUrl> HttpClient::ParseUrl(std::string_view url) {
 
     out.is_loopback_or_private = IsLoopbackHost(out.host);
     return Result<ParsedUrl>::Ok(std::move(out));
+}
+
+bool HttpClient::IsLinkExpiredStatus(int status_code, std::string_view www_authenticate) {
+    if (status_code == 403 || status_code == 410) return true;
+    if (status_code == 401) {
+        if (www_authenticate.empty()) return true;
+        std::string auth_lower = ToLower(www_authenticate);
+        if (auth_lower.find("basic") != std::string::npos ||
+            auth_lower.find("ntlm") != std::string::npos ||
+            auth_lower.find("negotiate") != std::string::npos ||
+            auth_lower.find("digest") != std::string::npos) {
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 Result<HttpResponseMeta> HttpClient::PerformGet(
@@ -596,6 +622,20 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
                         ++it;
                     }
                 }
+            }
+        }
+
+        // Auto-inject HTTP Basic Authorization from URL userinfo if not explicitly provided
+        if (!pu.userinfo.empty()) {
+            bool has_auth = false;
+            for (const auto& [hk, hv] : current_headers) {
+                if (ToLower(hk) == "authorization") {
+                    has_auth = true;
+                    break;
+                }
+            }
+            if (!has_auth) {
+                current_headers["Authorization"] = "Basic " + CryptoUtils::Base64Encode(pu.userinfo);
             }
         }
 
@@ -759,8 +799,15 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             if (meta.status_code == 407) {
                 return Result<HttpResponseMeta>::Err("ERR_PROXY_AUTH_REQUIRED", "Proxy authentication required (HTTP 407)", false, true);
             }
-            if (meta.status_code == 401 || meta.status_code == 403 || meta.status_code == 410) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH", "HTTP " + std::to_string(meta.status_code), false, true);
+            std::string www_auth;
+            auto auth_it = meta.raw_headers.find("www-authenticate");
+            if (auth_it != meta.raw_headers.end()) www_auth = auth_it->second;
+
+            if (IsLinkExpiredStatus(meta.status_code, www_auth)) {
+                return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH", "HTTP " + std::to_string(meta.status_code) + " (Link Expired or Auth Required)", false, true);
+            }
+            if (meta.status_code == 401) {
+                return Result<HttpResponseMeta>::Err("ERR_HTTP_AUTH_CHALLENGE", "HTTP 401 Authorization Challenge Required", false, true);
             }
             if (meta.status_code == 404) return Result<HttpResponseMeta>::Err("ERR_HTTP_404_NOT_FOUND", "HTTP 404 Not Found", false, false);
             if (meta.status_code == 412) return Result<HttpResponseMeta>::Err("ERR_HTTP_VALIDATOR_MISMATCH", "HTTP 412 Precondition Failed", false, true);
@@ -1014,9 +1061,17 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
 
         if (meta.status_code >= 400) {
             cleanup_conn();
-            if (meta.status_code == 401 || meta.status_code == 403 || meta.status_code == 410) {
+            std::string www_auth;
+            auto auth_it = meta.raw_headers.find("www-authenticate");
+            if (auth_it != meta.raw_headers.end()) www_auth = auth_it->second;
+
+            if (IsLinkExpiredStatus(meta.status_code, www_auth)) {
                 return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH",
-                    "HTTP " + std::to_string(meta.status_code) + " (Authentication or Expired URL)", false, true);
+                    "HTTP " + std::to_string(meta.status_code) + " (Link Expired or Auth Required)", false, true);
+            }
+            if (meta.status_code == 401) {
+                return Result<HttpResponseMeta>::Err("ERR_HTTP_AUTH_CHALLENGE",
+                    "HTTP 401 Authorization Challenge Required", false, true);
             }
             if (meta.status_code == 404) {
                 return Result<HttpResponseMeta>::Err("ERR_HTTP_404_NOT_FOUND", "HTTP 404 Not Found", false, false);

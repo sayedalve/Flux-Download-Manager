@@ -59,7 +59,7 @@ endif()
 add_executable(flux ${FLUX_CORE_SOURCES} src/app/main.cpp ${FLUX_RC_SOURCES})
 add_executable(flux-nmh src/nmh/main.cpp ${FLUX_RC_SOURCES})
 add_executable(flux_unit_tests ${FLUX_CORE_SOURCES} tests/cpp/unit_tests.cpp)
-add_executable(N_m3u8DL-RE src/brisk_engine/http_client.cpp src/worker_stream/nm3u8dl_re_worker.cpp)
+add_executable(N_m3u8DL-RE src/common/crypto_utils.cpp src/brisk_engine/http_client.cpp src/worker_stream/nm3u8dl_re_worker.cpp)
 
 # Build prerequisite: unit tests expect worker binary to be available
 add_dependencies(flux_unit_tests N_m3u8DL-RE)

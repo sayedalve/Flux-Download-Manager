@@ -19,8 +19,12 @@
 #include "engine_ftp/ftp_client.hpp"
 #include "engine_stream/rtsp_mms_adapter.hpp"
 #include "engine_torrent/bencode.hpp"
+#include "engine_torrent/multi_file_storage.hpp"
+#include "engine_torrent/peer_wire_protocol.hpp"
+#include "engine_torrent/piece_manager.hpp"
 #include "engine_torrent/torrent_engine.hpp"
 #include "engine_torrent/torrent_parser.hpp"
+#include "engine_torrent/tracker_client.hpp"
 #include "security/antivirus_scanner.hpp"
 #include "storage/import_export.hpp"
 #include "storage/sqlite_store.hpp"
@@ -1703,12 +1707,24 @@ bool TestBencodeAndTorrentParser() {
     std::atomic<uint64_t> t_speed{0};
 
     auto tor_exec = TorrentEngine::ExecuteTorrentDownload(tor_task, tinfo, t_pause, t_cancel, t_speed, nullptr);
-    ASSERT_TRUE(!tor_exec.ok(), "BitTorrent execution must fail cleanly without protocol engine");
-    ASSERT_TRUE(tor_exec.error->code == "ERR_TORRENT_UNSUPPORTED", "Returns ERR_TORRENT_UNSUPPORTED");
+    ASSERT_TRUE(!tor_exec.ok(), "BitTorrent execution must fail cleanly on incomplete metainfo");
+    ASSERT_TRUE(tor_exec.error->code == "ERR_TORRENT_MALFORMED", "Returns ERR_TORRENT_MALFORMED on zero-piece metainfo");
     ASSERT_TRUE(tor_task.state == openidm::TaskState::kFailed, "Task state marked as kFailed");
     ASSERT_TRUE(tor_task.downloaded_bytes == 0, "Downloaded bytes must remain 0");
     ASSERT_TRUE(tor_task.completed_segments == 0, "Completed pieces must remain 0");
     ASSERT_TRUE(!std::filesystem::exists("/tmp/test_torrent_dir/test.iso"), "No dummy or placeholder files created on disk");
+
+    // Test with complete metainfo but unreachable trackers/peers
+    TorrentInfo tinfo_valid;
+    tinfo_valid.name = "test_valid.iso";
+    tinfo_valid.total_length = 32768;
+    tinfo_valid.piece_length = 32768;
+    tinfo_valid.pieces.push_back(std::vector<uint8_t>(20, 0x11));
+    tinfo_valid.announce = "http://127.0.0.1:1/announce";
+    tor_task.url = "test_valid.torrent";
+    auto tor_valid_exec = TorrentEngine::ExecuteTorrentDownload(tor_task, tinfo_valid, t_pause, t_cancel, t_speed, nullptr);
+    ASSERT_TRUE(!tor_valid_exec.ok(), "BitTorrent execution fails cleanly when peers unreachable");
+    ASSERT_TRUE(tor_valid_exec.error->code == "ERR_TORRENT_NO_PEERS", "Returns ERR_TORRENT_NO_PEERS when peers unavailable");
     return true;
 }
 
@@ -2145,11 +2161,551 @@ bool TestSchedulerStopTimesAndPostCompletionActions() {
     return true;
 }
 
+bool TestPeerWireProtocolFramingAndCompactPeers() {
+    using namespace openidm::torrent;
+
+    // 1. Peer ID format
+    std::string peer_id = PeerWireProtocol::GeneratePeerId();
+    ASSERT_TRUE(peer_id.size() == 20, "Peer ID is exactly 20 bytes");
+    ASSERT_TRUE(peer_id.rfind("-FL0100-", 0) == 0, "Peer ID has -FL0100- prefix");
+
+    // 2. Handshake serialization and verification
+    std::vector<uint8_t> info_hash(20, 0x5A);
+    auto hs_bytes = PeerWireProtocol::CreateHandshake(info_hash, peer_id);
+    ASSERT_TRUE(hs_bytes.size() == 68, "Handshake length is 68 bytes");
+    ASSERT_TRUE(hs_bytes[0] == 19, "Handshake pstrlen is 19");
+    ASSERT_TRUE(std::memcmp(&hs_bytes[1], "BitTorrent protocol", 19) == 0, "Handshake protocol string");
+    ASSERT_TRUE(std::memcmp(&hs_bytes[28], info_hash.data(), 20) == 0, "Handshake info_hash matches");
+    ASSERT_TRUE(std::memcmp(&hs_bytes[48], peer_id.data(), 20) == 0, "Handshake peer_id matches");
+
+    std::string recvd_peer_id;
+    ASSERT_TRUE(PeerWireProtocol::VerifyHandshake(hs_bytes.data(), hs_bytes.size(), info_hash, &recvd_peer_id), "Verify valid handshake");
+    ASSERT_TRUE(recvd_peer_id == peer_id, "Extracted peer ID matches");
+
+    std::vector<uint8_t> wrong_hash(20, 0x11);
+    ASSERT_TRUE(!PeerWireProtocol::VerifyHandshake(hs_bytes.data(), hs_bytes.size(), wrong_hash), "Reject wrong info-hash");
+    ASSERT_TRUE(!PeerWireProtocol::VerifyHandshake(hs_bytes.data(), 50, info_hash), "Reject truncated handshake");
+
+    // 3. Keep-Alive, Choke, Unchoke, Interested
+    auto ka = PeerWireProtocol::CreateKeepAlive();
+    ASSERT_TRUE(ka.size() == 4 && ka[0] == 0 && ka[1] == 0 && ka[2] == 0 && ka[3] == 0, "KeepAlive is 4 zero bytes");
+
+    auto unchoke = PeerWireProtocol::CreateUnchoke();
+    ASSERT_TRUE(unchoke.size() == 5 && unchoke[4] == 1, "Unchoke message format");
+    auto unchoke_parsed = PeerWireProtocol::ParseMessage(unchoke.data(), unchoke.size());
+    ASSERT_TRUE(unchoke_parsed.has_value() && unchoke_parsed->id == BtMessageId::kUnchoke, "Parse Unchoke");
+
+    // 4. Have & Bitfield
+    auto have_msg = PeerWireProtocol::CreateHave(1337);
+    auto have_parsed = PeerWireProtocol::ParseMessage(have_msg.data(), have_msg.size());
+    ASSERT_TRUE(have_parsed.has_value() && have_parsed->id == BtMessageId::kHave && have_parsed->piece_index == 1337, "Create and parse Have");
+
+    std::vector<bool> bits = {true, false, true, true, false, false, false, true, true};
+    auto bf_msg = PeerWireProtocol::CreateBitfield(bits);
+    auto bf_parsed = PeerWireProtocol::ParseMessage(bf_msg.data(), bf_msg.size());
+    ASSERT_TRUE(bf_parsed.has_value() && bf_parsed->id == BtMessageId::kBitfield, "Create and parse Bitfield");
+    ASSERT_TRUE(bf_parsed->payload.size() == 2, "Bitfield payload size for 9 bits is 2 bytes");
+    ASSERT_TRUE((bf_parsed->payload[0] & 0x80) != 0, "Bit 0 is set");
+    ASSERT_TRUE((bf_parsed->payload[0] & 0x40) == 0, "Bit 1 is clear");
+
+    // 5. Request & Piece
+    auto req_msg = PeerWireProtocol::CreateRequest(7, 16384, 16384);
+    auto req_parsed = PeerWireProtocol::ParseMessage(req_msg.data(), req_msg.size());
+    ASSERT_TRUE(req_parsed.has_value() && req_parsed->id == BtMessageId::kRequest, "Parse Request");
+    ASSERT_TRUE(req_parsed->piece_index == 7 && req_parsed->block_begin == 16384 && req_parsed->block_length == 16384, "Request fields match");
+
+    const uint8_t sample_blk[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    auto pc_msg = PeerWireProtocol::CreatePiece(7, 0, sample_blk, 4);
+    auto pc_parsed = PeerWireProtocol::ParseMessage(pc_msg.data(), pc_msg.size());
+    ASSERT_TRUE(pc_parsed.has_value() && pc_parsed->id == BtMessageId::kPiece, "Parse Piece");
+    ASSERT_TRUE(pc_parsed->piece_index == 7 && pc_parsed->block_begin == 0 && pc_parsed->payload.size() == 4, "Piece payload matches");
+    ASSERT_TRUE(pc_parsed->payload[0] == 0xDE && pc_parsed->payload[3] == 0xEF, "Piece bytes match");
+
+    // 6. Compact Peer Unpacking (aria2 unpackcompact)
+    // 192.168.1.105:6881 -> C0 A8 01 69 1A E1
+    const uint8_t compact_peer[6] = {192, 168, 1, 105, 0x1A, 0xE1};
+    auto [ip4, port4] = PeerWireProtocol::UnpackCompactIpv4(compact_peer);
+    ASSERT_TRUE(ip4 == "192.168.1.105", "Unpack IPv4 address");
+    ASSERT_TRUE(port4 == 6881, "Unpack IPv4 port");
+
+    std::string compact_12(reinterpret_cast<const char*>(compact_peer), 6);
+    const uint8_t peer2[6] = {10, 0, 0, 1, 0x00, 0x50}; // 10.0.0.1:80
+    compact_12.append(reinterpret_cast<const char*>(peer2), 6);
+    auto peers_list = PeerWireProtocol::ExtractPeersFromCompact(compact_12);
+    ASSERT_TRUE(peers_list.size() == 2, "Extracted 2 peers from 12-byte compact list");
+    ASSERT_TRUE(peers_list[0].ip == "192.168.1.105" && peers_list[0].port == 6881, "Peer 0 matches");
+    ASSERT_TRUE(peers_list[1].ip == "10.0.0.1" && peers_list[1].port == 80, "Peer 1 matches");
+
+    return true;
+}
+
+bool TestMultiFileStorageMappingAndBoundarySplitting() {
+    using namespace openidm::torrent;
+    std::error_code ec;
+    std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / "flux_test_storage";
+    std::filesystem::remove_all(temp_dir, ec);
+    std::filesystem::create_directories(temp_dir, ec);
+
+    TorrentInfo info;
+    info.name = "multi_pkg";
+    info.total_length = 4000;
+    info.piece_length = 1000;
+
+    TorrentFileEntry f1{"sub/file_a.bin", 1000, 0};
+    TorrentFileEntry f2{"sub/file_b.bin", 2000, 1000};
+    TorrentFileEntry f3{"file_c.bin", 1000, 3000};
+    info.files = {f1, f2, f3};
+
+    MultiFileStorage storage;
+    ASSERT_TRUE(storage.Initialize(temp_dir, info).ok(), "Storage initialized");
+    ASSERT_TRUE(storage.AllocateFiles().ok(), "Files allocated");
+
+    // Write a 1500-byte block starting at offset 500
+    // Spans file_a.bin [500..1000) and file_b.bin [0..1000)
+    std::vector<uint8_t> test_bytes(1500);
+    for (size_t i = 0; i < test_bytes.size(); ++i) {
+        test_bytes[i] = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+    }
+
+    ASSERT_TRUE(storage.WriteBytes(500, test_bytes.data(), test_bytes.size()).ok(), "Write across boundary succeeded");
+
+    // Read back and verify exact byte matching
+    std::vector<uint8_t> read_bytes(1500, 0);
+    ASSERT_TRUE(storage.ReadBytes(500, read_bytes.data(), read_bytes.size()).ok(), "Read across boundary succeeded");
+    ASSERT_TRUE(read_bytes == test_bytes, "Read back bytes match written bytes exactly");
+
+    // Verify disk files directly
+    std::filesystem::path p1 = temp_dir / "sub" / "file_a.bin";
+    std::filesystem::path p2 = temp_dir / "sub" / "file_b.bin";
+    ASSERT_TRUE(std::filesystem::exists(p1), "file_a exists on disk");
+    ASSERT_TRUE(std::filesystem::exists(p2), "file_b exists on disk");
+
+    // Write another block spanning file_b.bin into file_c.bin at offset 2800 (length 500)
+    std::vector<uint8_t> span2(500, 0x42);
+    ASSERT_TRUE(storage.WriteBytes(2800, span2.data(), span2.size()).ok(), "Write across second boundary");
+    std::vector<uint8_t> read_span2(500, 0);
+    ASSERT_TRUE(storage.ReadBytes(2800, read_span2.data(), read_span2.size()).ok(), "Read across second boundary");
+    ASSERT_TRUE(read_span2 == span2, "Second boundary slice matches");
+
+    std::filesystem::remove_all(temp_dir, ec);
+    return true;
+}
+
+bool TestPieceManagerAndBlockScheduling() {
+    using namespace openidm::torrent;
+    std::error_code ec;
+    std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / "flux_test_piecemgr";
+    std::filesystem::remove_all(temp_dir, ec);
+    std::filesystem::create_directories(temp_dir, ec);
+
+    // Create 2 pieces of 32 KB each (total 64 KB)
+    TorrentInfo info;
+    info.name = "test_pieces.bin";
+    info.total_length = 65536;
+    info.piece_length = 32768;
+
+    std::vector<uint8_t> piece0_data(32768, 'A');
+    std::vector<uint8_t> piece1_data(32768, 'B');
+
+    std::vector<uint8_t> hash0 = openidm::CryptoUtils::ComputeBufferSha1Raw(piece0_data.data(), piece0_data.size());
+    std::vector<uint8_t> hash1 = openidm::CryptoUtils::ComputeBufferSha1Raw(piece1_data.data(), piece1_data.size());
+    info.pieces = {hash0, hash1};
+
+    auto storage = std::make_shared<MultiFileStorage>();
+    ASSERT_TRUE(storage->Initialize(temp_dir, info).ok(), "Storage init");
+    storage->AllocateFiles();
+
+    PieceManager mgr(info, storage);
+    ASSERT_TRUE(mgr.TotalPieces() == 2, "Total pieces is 2");
+    ASSERT_TRUE(mgr.CompletedPieces() == 0, "Initial completed pieces is 0");
+    ASSERT_TRUE(!mgr.IsAllCompleted(), "Not all completed initially");
+
+    // Peer offers piece 0 and 1
+    std::vector<bool> peer_have = {true, true};
+    auto reqs = mgr.GetNextRequestsForPeer(peer_have, 4);
+    // Piece size 32768 -> two 16 KB blocks (0..16384, 16384..32768)
+    ASSERT_TRUE(reqs.size() == 2, "Generated 2 block requests for piece 0");
+    ASSERT_TRUE(reqs[0].piece_index == 0 && reqs[0].begin == 0 && reqs[0].length == 16384, "Block 0");
+    ASSERT_TRUE(reqs[1].piece_index == 0 && reqs[1].begin == 16384 && reqs[1].length == 16384, "Block 1");
+
+    // Feed block 0 of piece 0
+    bool verified = false, corrupt = false;
+    mgr.ProcessBlock(0, 0, piece0_data.data(), 16384, verified, corrupt);
+    ASSERT_TRUE(!verified && !corrupt, "First block processed; piece not complete yet");
+    ASSERT_TRUE(mgr.CompletedPieces() == 0, "Piece 0 not yet marked complete");
+
+    // Feed block 1 of piece 0 -> completes piece and triggers SHA-1 verification
+    mgr.ProcessBlock(0, 16384, piece0_data.data() + 16384, 16384, verified, corrupt);
+    ASSERT_TRUE(verified && !corrupt, "Piece 0 complete and verified by SHA-1");
+    ASSERT_TRUE(mgr.CompletedPieces() == 1, "Completed pieces is now 1");
+    ASSERT_TRUE(mgr.DownloadedBytes() == 32768, "Downloaded bytes updated to 32768");
+    ASSERT_TRUE(mgr.HavePieces()[0] == true, "HavePieces[0] marked true");
+
+    // Feed corrupt block data for piece 1
+    std::vector<uint8_t> corrupt_data(16384, 'Z');
+    mgr.ProcessBlock(1, 0, corrupt_data.data(), 16384, verified, corrupt);
+    mgr.ProcessBlock(1, 16384, piece1_data.data() + 16384, 16384, verified, corrupt);
+    ASSERT_TRUE(!verified && corrupt, "Corrupt piece detected by SHA-1 verification and rejected");
+    ASSERT_TRUE(mgr.CompletedPieces() == 1, "Piece 1 not marked complete due to corruption");
+
+    std::filesystem::remove_all(temp_dir, ec);
+    return true;
+}
+
+bool TestTrackerClientQueryEncodingAndResponseParsing() {
+    using namespace openidm::torrent;
+
+    // 1. URL percent encoding of raw binary info-hash
+    const uint8_t binary_hash[5] = {0x00, 0x12, 0xFF, 'A', 'z'};
+    std::string enc = TrackerClient::PercentEncodeBinary(binary_hash, 5);
+    ASSERT_TRUE(enc == "%00%12%FFAz", "Binary percent encoding preserves unreserved chars and encodes non-printables");
+
+    // Bencoded dict: d8:completei42e10:incompletei7e8:intervali1800e5:peers12:\xC0\xA8\x01\x69\x1A\xE1\x0A\x00\x00\x01\x00\x50 + e
+    const char kRespBytes[] = "d8:completei42e10:incompletei7e8:intervali1800e5:peers12:\xC0\xA8\x01\x69\x1A\xE1\x0A\x00\x00\x01\x00\x50" "e";
+    std::string bencoded_resp(kRespBytes, sizeof(kRespBytes) - 1);
+    auto tr_res = TrackerClient::ParseTrackerResponse(bencoded_resp);
+    ASSERT_TRUE(tr_res.ok(), "Parse valid tracker response");
+    ASSERT_TRUE(tr_res.value->complete == 42, "Seeders is 42");
+    ASSERT_TRUE(tr_res.value->incomplete == 7, "Leechers is 7");
+    ASSERT_TRUE(tr_res.value->interval == 1800, "Interval is 1800s");
+    ASSERT_TRUE(tr_res.value->peers.size() == 2, "Unpacked 2 peers from compact binary list");
+    ASSERT_TRUE(tr_res.value->peers[0].ip == "192.168.1.105" && tr_res.value->peers[0].port == 6881, "Peer 0 matches");
+    ASSERT_TRUE(tr_res.value->peers[1].ip == "10.0.0.1" && tr_res.value->peers[1].port == 80, "Peer 1 matches");
+
+    // 3. Tracker Failure Reason parsing
+    std::string fail_resp = "d14:failure reason26:Torrent passkey is invalide";
+    auto fail_res = TrackerClient::ParseTrackerResponse(fail_resp);
+    ASSERT_TRUE(!fail_res.ok(), "Tracker failure response detected");
+    ASSERT_TRUE(fail_res.error->code == "ERR_TORRENT_TRACKER_FAILURE", "Code is ERR_TORRENT_TRACKER_FAILURE");
+    ASSERT_TRUE(fail_res.error->message == "Torrent passkey is invalid", "Error message contains failure reason");
+
+    return true;
+}
+
+bool TestHttpRangeSatisfactionValidation() {
+    using namespace openidm::brisk;
+
+    // Simulate aria2 isRangeSatisfied logic
+    uint64_t total_bytes = 10485760;
+    uint64_t curr = 1048576;
+
+    // 1. Valid 206 Partial Content response
+    HttpResponseMeta meta_valid;
+    meta_valid.status_code = 206;
+    meta_valid.is_partial_content = true;
+    meta_valid.range_start = 1048576;
+    meta_valid.range_end = 2097151;
+    meta_valid.range_total = 10485760;
+
+    bool valid_satisfied = (meta_valid.status_code == 206 && meta_valid.is_partial_content &&
+                            meta_valid.range_start == curr &&
+                            (meta_valid.range_total == 0 || meta_valid.range_total == total_bytes));
+    ASSERT_TRUE(valid_satisfied, "Valid 206 response satisfies range");
+
+    // 2. Server returned 206 but entity size changed (remote file modified)
+    HttpResponseMeta meta_mismatch;
+    meta_mismatch.status_code = 206;
+    meta_mismatch.is_partial_content = true;
+    meta_mismatch.range_start = 1048576;
+    meta_mismatch.range_end = 2097151;
+    meta_mismatch.range_total = 20971520; // Size changed on server!
+
+    bool entity_mismatch = (total_bytes > 0 && meta_mismatch.range_total > 0 && meta_mismatch.range_total != total_bytes);
+    ASSERT_TRUE(entity_mismatch, "Detected remote entity length change mid-download");
+
+    // 3. Server returned 200 OK starting from byte 0 instead of 206
+    HttpResponseMeta meta_ignored_range;
+    meta_ignored_range.status_code = 200;
+    meta_ignored_range.is_partial_content = false;
+    meta_ignored_range.range_start = 0;
+
+    bool range_ignored = (meta_ignored_range.status_code != 206 || !meta_ignored_range.is_partial_content || meta_ignored_range.range_start != curr);
+    ASSERT_TRUE(range_ignored, "Server ignoring Range header is caught and rejected");
+
+    return true;
+}
+
+bool TestDuplicateTaskDetectionThreeTiers() {
+    using namespace openidm::core;
+
+    // 1. URL Normalization
+    std::string norm1 = DuplicateDetector::NormalizeUrl("  HTTP://Example.COM:80/path/file.zip?token=123#frag  ");
+    ASSERT_TRUE(norm1 == "http://example.com/path/file.zip?token=123", "Normalized URL strips fragment, lowers host/scheme, removes default port");
+
+    std::string norm2 = DuplicateDetector::NormalizeUrl("https://API.Server.org:8443/data/v1/?query=yes#section");
+    ASSERT_TRUE(norm2 == "https://api.server.org:8443/data/v1/?query=yes", "Non-default port and query preserved");
+
+    // 2. Setup tasks list
+    std::vector<openidm::TaskModel> tasks;
+    openidm::TaskModel t1;
+    t1.task_id = "task-url-1";
+    t1.url = "https://cdn.example.com/downloads/setup.exe?v=1";
+    t1.file_name = "setup.exe";
+    t1.total_bytes = 10485760;
+    t1.etag = "\"33a64df551425fcc55e4d42a148795d9f25f89d4\"";
+    t1.created_at_ms = 1000;
+    tasks.push_back(t1);
+
+    openidm::TaskModel t2;
+    t2.task_id = "task-name-size-1";
+    t2.url = "https://mirror1.example.org/files/linux-distro.iso";
+    t2.file_name = "linux-distro.iso";
+    t2.total_bytes = 2147483648ULL;
+    t2.etag = "\"iso-hash-111\"";
+    t2.created_at_ms = 2000;
+    tasks.push_back(t2);
+
+    openidm::TaskModel t3;
+    t3.task_id = "task-etag-1";
+    t3.url = "https://cdn.example.com/assets/video_hd.mp4";
+    t3.file_name = "video_hd.mp4";
+    t3.total_bytes = 524288000;
+    t3.etag = "\"strong-etag-video-999\"";
+    t3.created_at_ms = 3000;
+    tasks.push_back(t3);
+
+    // Tier 1: Match by URL (even with different casing, whitespace, or fragment)
+    auto match_url = DuplicateDetector::FindDuplicate(tasks, "  HTTPS://CDN.EXAMPLE.COM:443/downloads/setup.exe?v=1#download  ");
+    ASSERT_TRUE(match_url.kind == DuplicateKind::kSameUrl, "Tier 1: Matched by Same URL");
+    ASSERT_TRUE(match_url.matched_task.task_id == "task-url-1", "Matched correct task ID");
+
+    // Tier 2: Match by File Name and Size (different URL, but same case-insensitive name & size)
+    auto match_name_size = DuplicateDetector::FindDuplicate(tasks, "https://mirror2.different.net/archive/LINUX-DISTRO.ISO", "LINUX-DISTRO.ISO", 2147483648ULL);
+    ASSERT_TRUE(match_name_size.kind == DuplicateKind::kSameNameAndSize, "Tier 2: Matched by Same Name & Size");
+    ASSERT_TRUE(match_name_size.matched_task.task_id == "task-name-size-1", "Matched correct task ID");
+
+    // Rejection on size 0 or mismatch
+    auto no_match_size0 = DuplicateDetector::FindDuplicate(tasks, "https://mirror2.different.net/archive/linux-distro.iso", "linux-distro.iso", 0);
+    ASSERT_TRUE(no_match_size0.kind == DuplicateKind::kNone, "Size 0 does not trigger name-and-size match");
+
+    // Tier 3: Match by Strong ETag on Same Host (different URL and name, but same host and strong ETag)
+    auto match_etag = DuplicateDetector::FindDuplicate(tasks, "https://cdn.example.com/rest/get_video?id=55", "renamed.mp4", 100, "\"strong-etag-video-999\"");
+    ASSERT_TRUE(match_etag.kind == DuplicateKind::kSameEtag, "Tier 3: Matched by Strong ETag on same host");
+    ASSERT_TRUE(match_etag.matched_task.task_id == "task-etag-1", "Matched correct task ID");
+
+    // Rejection of Weak ETag
+    auto match_weak_etag = DuplicateDetector::FindDuplicate(tasks, "https://cdn.example.com/rest/get_video?id=55", "renamed.mp4", 100, "W/\"strong-etag-video-999\"");
+    ASSERT_TRUE(match_weak_etag.kind == DuplicateKind::kNone, "Weak ETag (W/) rejected for duplicate detection");
+
+    // Rejection of ETag on different host
+    auto match_diff_host_etag = DuplicateDetector::FindDuplicate(tasks, "https://unrelated-host.org/get", "renamed.mp4", 100, "\"strong-etag-video-999\"");
+    ASSERT_TRUE(match_diff_host_etag.kind == DuplicateKind::kNone, "ETag match rejected across different hosts");
+
+    // Tier Precedence: URL match takes precedence over Name & Size match
+    auto match_precedence = DuplicateDetector::FindDuplicate(tasks, "https://cdn.example.com/downloads/setup.exe?v=1", "linux-distro.iso", 2147483648ULL);
+    ASSERT_TRUE(match_precedence.kind == DuplicateKind::kSameUrl, "Tier 1 takes precedence over Tier 2");
+    ASSERT_TRUE(match_precedence.matched_task.task_id == "task-url-1", "URL match preferred");
+
+    // 4. Motrix Reference Reuse: BTIH info-hash normalization & magnet link deduplication
+    std::string hex_norm = DuplicateDetector::NormalizeBtInfoHash("D1E05F7C32BF24F6E1F0E4708E33E9B11D8D3F66");
+    ASSERT_TRUE(hex_norm == "d1e05f7c32bf24f6e1f0e4708e33e9b11d8d3f66", "40-hex infohash lowercased");
+
+    std::string base32_zeros = DuplicateDetector::NormalizeBtInfoHash("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    ASSERT_TRUE(base32_zeros == "0000000000000000000000000000000000000000", "32-base32 zeros decoded to 40-hex");
+
+    std::string base32_ones = DuplicateDetector::NormalizeBtInfoHash("77777777777777777777777777777777");
+    ASSERT_TRUE(base32_ones == "ffffffffffffffffffffffffffffffffffffffff", "32-base32 all-ones decoded to 40-hex");
+
+    // Setup magnet task with 40-hex hash
+    openidm::TaskModel t_magnet;
+    t_magnet.task_id = "task-magnet-1";
+    t_magnet.url = "magnet:?xt=urn:btih:ffffffffffffffffffffffffffffffffffffffff&dn=TestTorrent";
+    t_magnet.file_name = "TestTorrent";
+    t_magnet.created_at_ms = 4000;
+    tasks.push_back(t_magnet);
+
+    // Incoming duplicate magnet link with 32-base32 hash and disparate tracker params
+    auto match_magnet = DuplicateDetector::FindDuplicate(tasks, "magnet:?xt=urn:btih:77777777777777777777777777777777&tr=http%3A%2F%2Ftracker.example.com%2Fannounce#extra");
+    ASSERT_TRUE(match_magnet.kind == DuplicateKind::kSameUrl, "Matched magnet link via BTIH normalization across Base32/Hex");
+    ASSERT_TRUE(match_magnet.matched_task.task_id == "task-magnet-1", "Matched correct magnet task ID");
+
+    // 5. Motrix Reference Reuse: FinalNamePicker .part file collision prevention
+    std::filesystem::path temp_dir = std::filesystem::temp_directory_path() / ("test_motrix_part_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(temp_dir);
+    std::filesystem::path primary = temp_dir / "collision_test.bin";
+    std::filesystem::path part_slot1 = temp_dir / "collision_test (1).bin.part";
+
+    // Create primary file and (1).part file
+    {
+        std::ofstream(primary) << "primary";
+        std::ofstream(part_slot1) << "partial_download";
+    }
+
+    auto safe_res = openidm::PathSanitizer::ResolveSafeOutputPath(temp_dir, "collision_test.bin", openidm::ConflictPolicy::kAutoRename);
+    ASSERT_TRUE(safe_res.ok(), "Safe output path resolved successfully");
+    // Should skip collision_test (1).bin because collision_test (1).bin.part exists, picking (2)
+    ASSERT_TRUE(safe_res.value->filename().string() == "collision_test (2).bin", "Avoided slot with existing in-progress .part file, picked slot (2)");
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+
+    return true;
+}
+
+bool TestExpiredLinkRefreshAndCookieReplacement() {
+    using namespace openidm;
+
+    // 1. IsLinkExpiredStatus verification
+    ASSERT_TRUE(brisk::HttpClient::IsLinkExpiredStatus(403), "HTTP 403 Forbidden is link expired");
+    ASSERT_TRUE(brisk::HttpClient::IsLinkExpiredStatus(410), "HTTP 410 Gone is link expired");
+    ASSERT_TRUE(brisk::HttpClient::IsLinkExpiredStatus(401, ""), "HTTP 401 without auth header is link expired");
+    ASSERT_TRUE(!brisk::HttpClient::IsLinkExpiredStatus(401, "Basic realm=\"Access\""), "HTTP 401 with Basic auth challenge is not link expired");
+    ASSERT_TRUE(!brisk::HttpClient::IsLinkExpiredStatus(401, "NTLM"), "HTTP 401 with NTLM challenge is not link expired");
+    ASSERT_TRUE(!brisk::HttpClient::IsLinkExpiredStatus(404), "HTTP 404 is not link expired");
+    ASSERT_TRUE(!brisk::HttpClient::IsLinkExpiredStatus(200), "HTTP 200 is not link expired");
+
+    // 2. Controller RefreshTaskUrl end-to-end state and cookie replacement test
+    std::string temp_db = (std::filesystem::temp_directory_path() / ("test_refresh_" + GenerateUuidV4() + ".db")).string();
+    ControllerConfig cfg;
+    cfg.state_db_path = temp_db;
+    cfg.default_download_dir = std::filesystem::temp_directory_path();
+    cfg.temp_root_dir = std::filesystem::temp_directory_path();
+
+    DownloadController controller(cfg);
+    auto init_res = controller.Initialize();
+    ASSERT_TRUE(init_res.ok(), "Initialize controller for refresh test");
+
+    TaskModel t;
+    t.task_id = "task-refresh-1";
+    t.url = "https://cdn.example.com/expired-presigned-url?sig=old123";
+    t.file_name = "archive.tar.gz";
+    t.downloaded_bytes = 4194304;
+    t.total_bytes = 16777216;
+    t.headers["Cookie"] = "session=stale_session_token_old; id=123";
+    t.headers["User-Agent"] = "CustomAgent/1.0";
+    t.auth_headers["Authorization"] = "Bearer old-bearer-token";
+    t.state = TaskState::kPaused;
+    t.error_code = "ERR_HTTP_403_EXPIRED_OR_AUTH";
+    t.error_message = "HTTP 403 (Link Expired or Auth Required)";
+    t.retry_count = 3;
+
+    // Create partial segment
+    Segment seg0{0, 0, 4194304, 16777215, false};
+    t.segments.push_back(seg0);
+
+    auto add_res = controller.AddTask(t, false, true);
+    ASSERT_TRUE(add_res.ok(), "Task added");
+
+    // Refresh URL with new URL, new Cookie, and new Authorization header
+    std::map<std::string, std::string> new_headers = {
+        {"Cookie", "session=fresh_session_token_new"},
+        {"X-Custom-Header", "Value123"}
+    };
+    std::map<std::string, std::string> new_auth = {
+        {"Authorization", "Bearer refreshed-new-bearer"}
+    };
+
+    auto ref_res = controller.RefreshTaskUrl(
+        "task-refresh-1",
+        "https://cdn.example.com/fresh-presigned-url?sig=new999",
+        new_headers,
+        new_auth);
+    ASSERT_TRUE(ref_res.ok(), "RefreshTaskUrl succeeds");
+
+    auto updated_opt = controller.GetTask("task-refresh-1");
+    ASSERT_TRUE(updated_opt.has_value(), "Task found after refresh");
+    const auto& up = *updated_opt;
+
+    // Verify URL updated
+    ASSERT_TRUE(up.url == "https://cdn.example.com/fresh-presigned-url?sig=new999", "URL refreshed");
+
+    // Verify Cookie cleanly replaced (not merged with stale cookie)
+    ASSERT_TRUE(up.headers.at("Cookie") == "session=fresh_session_token_new", "Cookie replaced without old session lingering");
+    ASSERT_TRUE(up.headers.at("Cookie").find("stale_session_token_old") == std::string::npos, "Old cookie scrubbed");
+    ASSERT_TRUE(up.headers.at("User-Agent") == "CustomAgent/1.0", "Preserved existing headers");
+    ASSERT_TRUE(up.headers.at("X-Custom-Header") == "Value123", "Added new headers");
+
+    // Verify Auth header replaced
+    ASSERT_TRUE(up.auth_headers.at("Authorization") == "Bearer refreshed-new-bearer", "Auth header replaced");
+
+    // Verify partial segments and downloaded bytes preserved
+    ASSERT_TRUE(up.downloaded_bytes == 4194304, "Downloaded bytes preserved on disk");
+    ASSERT_TRUE(up.total_bytes == 16777216, "Total bytes preserved");
+    ASSERT_TRUE(up.segments.size() == 1 && up.segments[0].current_offset == 4194304, "Segment cursor preserved for immediate resume");
+
+    // Verify errors cleared and state queued with fresh retries
+    ASSERT_TRUE(up.error_code.empty() && up.error_message.empty(), "Error state cleared");
+    ASSERT_TRUE(up.retry_count == 0, "Retry count reset for fresh link");
+    ASSERT_TRUE(up.state == TaskState::kQueued, "Task queued for resume");
+
+    controller.Shutdown();
+    std::error_code ec;
+    std::filesystem::remove(temp_db, ec);
+    return true;
+}
+
+bool TestSegmentSchedulerChunkNormalizationAndTruncationGuard() {
+    using namespace openidm::brisk;
+
+    uint64_t total_bytes = 10000;
+    SegmentScheduler scheduler(total_bytes, 4);
+
+    // Segment 0: completed [0, 4999] with cursor at 5000, BUT completed flag was false (crash right after last byte)
+    // Segment 1: incomplete [5000, 9999] with cursor at 6000
+    std::vector<openidm::Segment> unnormalized_segments = {
+        openidm::Segment{0, 0, 5000, 4999, false}, // current_offset == end_offset + 1, completed = false
+        openidm::Segment{1, 5000, 6000, 9999, false}
+    };
+
+    ASSERT_TRUE(SegmentScheduler::ValidateSegmentPartition(unnormalized_segments, total_bytes),
+                "ValidateSegmentPartition accepts consistent cursors where is_fully_read is true");
+
+    scheduler.Initialize(unnormalized_segments);
+
+    auto snapshots = scheduler.GetSnapshots();
+    ASSERT_TRUE(snapshots.size() == 2, "2 segments restored");
+    ASSERT_TRUE(snapshots[0].completed, "Segment 0 normalized to completed=true (XDM normalizeRestoredChunks)");
+    ASSERT_TRUE(!snapshots[1].completed, "Segment 1 remains incomplete");
+    ASSERT_TRUE(!scheduler.AllCompleted(), "Scheduler knows task is not finished yet");
+
+    // Steal or acquire next segment: should immediately pick segment 1 without spawning worker for segment 0
+    auto seg = scheduler.AcquireNextOrStealSegment(false);
+    ASSERT_TRUE(seg != nullptr, "Acquired segment");
+    ASSERT_TRUE(seg->segment_id == 1, "Acquired segment 1; segment 0 was skipped because normalized to completed");
+
+    // Simulate segment 1 finishing: cursor advances to 10000
+    seg->current_offset.store(10000);
+    seg->completed.store(true);
+
+    ASSERT_TRUE(scheduler.AllCompleted(), "All segments complete after segment 1 finished");
+
+    return true;
+}
+
+bool TestUrlUserinfoExtractionAndBasicAuthGeneration() {
+    using namespace openidm;
+    using namespace openidm::brisk;
+
+    // 1. Parse URL with userinfo (username:password)
+    auto p1 = HttpClient::ParseUrl("http://admin:secret123@127.0.0.1:8080/downloads/file.bin?token=abc");
+    ASSERT_TRUE(p1.ok(), "ParseUrl parses URL with userinfo");
+    ASSERT_TRUE(p1.value->userinfo == "admin:secret123", "Extracted userinfo");
+    ASSERT_TRUE(p1.value->host == "127.0.0.1", "Extracted clean host without userinfo");
+    ASSERT_TRUE(p1.value->port == 8080, "Extracted port 8080");
+    ASSERT_TRUE(p1.value->path_and_query == "/downloads/file.bin?token=abc", "Path and query correct");
+
+    // 2. Base64 encoding/decoding of credentials
+    std::string b64 = CryptoUtils::Base64Encode(p1.value->userinfo);
+    ASSERT_TRUE(b64 == "YWRtaW46c2VjcmV0MTIz", "Base64 encoding matches admin:secret123");
+    auto dec = CryptoUtils::Base64Decode(b64);
+    std::string dec_str(dec.begin(), dec.end());
+    ASSERT_TRUE(dec_str == "admin:secret123", "Base64 decoding restores original string");
+
+    // 3. Parse URL with IPv6 host and userinfo
+    auto p2 = HttpClient::ParseUrl("https://user:p@ss@[::1]:8443/api/v1");
+    ASSERT_TRUE(p2.ok(), "ParseUrl parses IPv6 host with userinfo");
+    ASSERT_TRUE(p2.value->userinfo == "user:p@ss", "Extracted userinfo before @");
+    ASSERT_TRUE(p2.value->host == "::1", "Extracted clean IPv6 host");
+    ASSERT_TRUE(p2.value->port == 8443, "Extracted port 8443");
+
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 42;
+    const int total = 51;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -2201,6 +2757,15 @@ int main() {
     run(40, "TestAlternateUrlsAndMirrorValidation", TestAlternateUrlsAndMirrorValidation);
     run(41, "TestFtpReliabilityEpsvAndResumeTruncation", TestFtpReliabilityEpsvAndResumeTruncation);
     run(42, "TestSchedulerStopTimesAndPostCompletionActions", TestSchedulerStopTimesAndPostCompletionActions);
+    run(43, "TestPeerWireProtocolFramingAndCompactPeers", TestPeerWireProtocolFramingAndCompactPeers);
+    run(44, "TestMultiFileStorageMappingAndBoundarySplitting", TestMultiFileStorageMappingAndBoundarySplitting);
+    run(45, "TestPieceManagerAndBlockScheduling", TestPieceManagerAndBlockScheduling);
+    run(46, "TestTrackerClientQueryEncodingAndResponseParsing", TestTrackerClientQueryEncodingAndResponseParsing);
+    run(47, "TestHttpRangeSatisfactionValidation", TestHttpRangeSatisfactionValidation);
+    run(48, "TestDuplicateTaskDetectionThreeTiers", TestDuplicateTaskDetectionThreeTiers);
+    run(49, "TestExpiredLinkRefreshAndCookieReplacement", TestExpiredLinkRefreshAndCookieReplacement);
+    run(50, "TestSegmentSchedulerChunkNormalizationAndTruncationGuard", TestSegmentSchedulerChunkNormalizationAndTruncationGuard);
+    run(51, "TestUrlUserinfoExtractionAndBasicAuthGeneration", TestUrlUserinfoExtractionAndBasicAuthGeneration);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

@@ -16,6 +16,9 @@ tools/win-x64/*
 *.exe
 *.dll
 
+# Reference repositories
+third_party/reference_repos/
+
 # Release archives
 *.zip
 *.tar.gz

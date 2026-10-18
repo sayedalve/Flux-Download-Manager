@@ -72,8 +72,12 @@ void SegmentScheduler::Initialize(const std::vector<Segment>& existing_segments)
 
     if (!existing_segments.empty() && ValidateSegmentPartition(existing_segments, m_total_bytes)) {
         for (const auto& s : existing_segments) {
+            // XDM normalizeRestoredChunks: a crash or pause right after writing the last byte
+            // of a chunk persists current_offset == end_offset + 1 but completed == false.
+            // Normalize it to completed = true so resume never leaves it in an incomplete state.
+            bool is_complete = s.completed || (s.current_offset > s.end_offset);
             auto live = std::make_shared<LiveSegment>(
-                s.segment_id, s.start_offset, s.current_offset, s.end_offset, s.completed);
+                s.segment_id, s.start_offset, s.current_offset, s.end_offset, is_complete);
             m_segments.push_back(live);
             if (s.segment_id >= m_next_segment_id) {
                 m_next_segment_id = s.segment_id + 1;

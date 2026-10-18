@@ -370,17 +370,25 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
 
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!force_duplicate) {
-        for (const auto& [id, existing] : m_tasks) {
-            bool matches = (existing.url == task.url);
-            if (!matches && !task.correlation_id.empty() && existing.correlation_id == task.correlation_id) {
-                matches = true;
-            }
-            if (matches &&
-                (existing.state == TaskState::kQueued ||
-                 existing.state == TaskState::kProbing ||
-                 existing.state == TaskState::kDownloading ||
-                 existing.state == TaskState::kMuxing)) {
+        auto dup = core::DuplicateDetector::FindDuplicate(m_tasks, task.url, task.file_name, task.total_bytes, task.etag);
+        if (dup.kind != core::DuplicateKind::kNone) {
+            const auto& existing = dup.matched_task;
+            if (existing.state == TaskState::kQueued ||
+                existing.state == TaskState::kProbing ||
+                existing.state == TaskState::kDownloading ||
+                existing.state == TaskState::kMuxing) {
                 return Result<TaskModel>::Ok(existing);
+            }
+        }
+        if (!task.correlation_id.empty()) {
+            for (const auto& [id, existing] : m_tasks) {
+                if (existing.correlation_id == task.correlation_id &&
+                    (existing.state == TaskState::kQueued ||
+                     existing.state == TaskState::kProbing ||
+                     existing.state == TaskState::kDownloading ||
+                     existing.state == TaskState::kMuxing)) {
+                    return Result<TaskModel>::Ok(existing);
+                }
             }
         }
     }
@@ -428,6 +436,16 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     m_tasks[task.task_id] = task;
     m_cv.notify_all();
     return Result<TaskModel>::Ok(task);
+}
+
+core::DuplicateMatch DownloadController::CheckDuplicateTask(
+    const std::string& url,
+    const std::string& file_name,
+    uint64_t file_size,
+    const std::string& etag,
+    const std::string& exclude_task_id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return core::DuplicateDetector::FindDuplicate(m_tasks, url, file_name, file_size, etag, exclude_task_id);
 }
 
 Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const std::filesystem::path& staged_file_path) {
@@ -1489,8 +1507,36 @@ Result<void> DownloadController::RefreshTaskUrl(
     if (it == m_tasks.end()) return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
 
     it->second.url = new_url;
+
+    // Clean replacement of auth headers
+    if (!new_auth_headers.empty()) {
+        it->second.auth_headers = new_auth_headers;
+    }
+
+    // Clean replacement of cookies (XDM rule: refreshed cookie replaces stale one instead of merging)
+    bool has_new_cookie = false;
+    for (const auto& [k, v] : new_headers) {
+        std::string kl = k;
+        for (char& c : kl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (kl == "cookie") {
+            has_new_cookie = true;
+            break;
+        }
+    }
+    if (has_new_cookie) {
+        for (auto hit = it->second.headers.begin(); hit != it->second.headers.end();) {
+            std::string kl = hit->first;
+            for (char& c : kl) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (kl == "cookie") {
+                hit = it->second.headers.erase(hit);
+            } else {
+                ++hit;
+            }
+        }
+    }
     for (const auto& [k, v] : new_headers) it->second.headers[k] = v;
-    for (const auto& [k, v] : new_auth_headers) it->second.auth_headers[k] = v;
+
+    it->second.retry_count = 0;
     it->second.state = TaskState::kQueued;
     it->second.status_detail = "Queued (Refreshed URL)";
     it->second.error_code.clear();

@@ -224,4 +224,62 @@ Result<std::string> CryptoUtils::UnprotectSecret(const std::vector<uint8_t>& cip
 #endif
 }
 
+std::string CryptoUtils::Base64Encode(std::string_view data) {
+    static const char kChars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    while (i < data.size()) {
+        uint32_t octet_a = static_cast<uint8_t>(data[i++]);
+        uint32_t octet_b = (i < data.size()) ? static_cast<uint8_t>(data[i++]) : 0;
+        uint32_t octet_c = (i < data.size()) ? static_cast<uint8_t>(data[i++]) : 0;
+
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+        out.push_back(kChars[(triple >> 18) & 0x3F]);
+        out.push_back(kChars[(triple >> 12) & 0x3F]);
+        out.push_back((i > data.size() + 1) ? '=' : kChars[(triple >> 6) & 0x3F]);
+        out.push_back((i > data.size()) ? '=' : kChars[triple & 0x3F]);
+    }
+    return out;
+}
+
+std::vector<uint8_t> CryptoUtils::Base64Decode(std::string_view data) {
+    static const int8_t kLookup[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    std::vector<uint8_t> out;
+    out.reserve((data.size() * 3) / 4);
+    uint32_t val = 0;
+    int valb = -8;
+    for (char c : data) {
+        if (c == '=' || c == '\r' || c == '\n' || c == ' ') continue;
+        int8_t d = kLookup[static_cast<uint8_t>(c)];
+        if (d == -1) continue;
+        val = (val << 6) | static_cast<uint32_t>(d);
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
 } // namespace openidm

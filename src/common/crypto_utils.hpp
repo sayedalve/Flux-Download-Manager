@@ -22,6 +22,10 @@ public:
     // Uses Windows DPAPI (CryptProtectData) on Windows 11, and OpenSSL AES-256-GCM with per-user OS key on POSIX.
     static Result<std::vector<uint8_t>> ProtectSecret(std::string_view plaintext);
     static Result<std::string> UnprotectSecret(const std::vector<uint8_t>& ciphertext);
+
+    // RFC 4648 Base64 encoding and decoding
+    static std::string Base64Encode(std::string_view data);
+    static std::vector<uint8_t> Base64Decode(std::string_view data);
 };
 
 } // namespace openidm

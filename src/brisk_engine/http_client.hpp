@@ -19,6 +19,7 @@ struct ParsedUrl {
     uint16_t port{80};
     std::string path_and_query{"/"};
     bool is_loopback_or_private{false};
+    std::string userinfo; // e.g. "user:pass"
 };
 
 struct HttpResponseMeta {
@@ -116,6 +117,9 @@ public:
         const HttpNetworkOptions& net_opts = {},
         bool allow_loopback = false,
         int timeout_ms = 10000);
+
+    // Determines if an HTTP response status indicates an expired link or session (XDM / RFC 7235)
+    static bool IsLinkExpiredStatus(int status_code, std::string_view www_authenticate = "");
 };
 
 } // namespace openidm::brisk

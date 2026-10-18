@@ -338,7 +338,9 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             }
         } else {
             uint64_t actual_part_sz = std::filesystem::file_size(part_path, ec);
-            if (actual_part_sz < total_bytes) {
+            if (actual_part_sz != total_bytes) {
+                // XDM tempFileIntact rule: partial file on resume must match expected total_bytes exactly.
+                // If it was enlarged by disk corruption or shorter than expected, normalize file size.
                 part_file.Truncate(total_bytes);
             }
         }
@@ -467,10 +469,19 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 fatal_abort.store(true);
                                 return false;
                             }
+                            // Range satisfaction validation (aria2 HttpRequest::isRangeSatisfied)
                             if (meta.status_code != 206 || !meta.is_partial_content || meta.range_start != curr) {
                                 server_ignored_range = true;
                                 disable_splitting.store(true);
                                 OPENIDM_LOG_WARN("BriskEngine", "Server ignored Range header on worker; aborting secondary range stream");
+                                return false;
+                            }
+                            if (total_bytes > 0 && meta.range_total > 0 && meta.range_total != total_bytes) {
+                                std::lock_guard<std::mutex> lk(err_mu);
+                                fatal_error = Error{"ERR_HTTP_VALIDATOR_MISMATCH",
+                                    "Remote entity length changed mid-download (expected " +
+                                    std::to_string(total_bytes) + ", got " + std::to_string(meta.range_total) + ")", false, false};
+                                fatal_abort.store(true);
                                 return false;
                             }
                             return true;

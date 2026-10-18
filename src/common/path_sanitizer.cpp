@@ -349,7 +349,9 @@ Result<std::filesystem::path> PathSanitizer::ResolveSafeOutputPath(
     std::string ext = target.extension().string();
     for (int i = 1; i <= 9999; ++i) {
         std::filesystem::path candidate = canonical_dir / (stem + " (" + std::to_string(i) + ")" + ext);
-        if (!std::filesystem::exists(candidate, ec)) {
+        // Motrix FinalNamePicker isTaken pattern: verify neither the candidate output file
+        // NOR its corresponding in-progress .part file exists before picking the slot.
+        if (!std::filesystem::exists(candidate, ec) && !std::filesystem::exists(candidate.string() + ".part", ec)) {
             return Result<std::filesystem::path>::Ok(candidate);
         }
     }

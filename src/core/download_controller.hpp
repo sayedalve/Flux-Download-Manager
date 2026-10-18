@@ -20,6 +20,7 @@
 #include "archive/zip_preview.hpp"
 #include "brisk_engine/http_download_engine.hpp"
 #include "common/types.hpp"
+#include "core/duplicate_detector.hpp"
 #include "crawler/site_grabber.hpp"
 #include "engine_ftp/ftp_client.hpp"
 #include "engine_stream/nm3u8dl_re_adapter.hpp"
@@ -56,6 +57,14 @@ public:
     // Unified task creation (HTTP_FILE, STREAM_HLS, STREAM_DASH)
     // Automatically deduplicates active/queued tasks for the same URL unless force_duplicate=true.
     Result<TaskModel> AddTask(TaskModel task, bool start_immediately = true, bool force_duplicate = false);
+
+    // Checks for duplicate tasks across 3 priority tiers: SAME_URL, SAME_NAME_AND_SIZE, SAME_ETAG (XDM pattern)
+    core::DuplicateMatch CheckDuplicateTask(
+        const std::string& url,
+        const std::string& file_name = "",
+        uint64_t file_size = 0,
+        const std::string& etag = "",
+        const std::string& exclude_task_id = "") const;
 
     // Ingest an already completed/transferred file (e.g. from browser-generated Blob/Data transfer)
     // Moves staged file to final destination, runs AV scan, stores task in DB, and notifies UI.

@@ -83,6 +83,28 @@ std::string ExtractExtensionLower(const std::string& filename) {
     }
     return ext;
 }
+
+bool IsTimeInScheduledWindow(const std::string& cur, const std::string& start, const std::string& stop) {
+    if (cur.size() != 5) return false;
+    if (start.empty() && stop.empty()) return true;
+    if (!start.empty() && stop.empty()) {
+        return cur >= start;
+    }
+    if (start.empty() && !stop.empty()) {
+        return cur < stop;
+    }
+    // Both start and stop are present
+    if (start < stop) {
+        // Normal intraday window, e.g. 14:00 to 18:00
+        return cur >= start && cur < stop;
+    } else if (start > stop) {
+        // Overnight window crossing midnight, e.g. 23:00 to 06:00
+        return cur >= start || cur < stop;
+    } else {
+        // start == stop
+        return false;
+    }
+}
 } // namespace
 
 namespace openidm {
@@ -136,8 +158,10 @@ void DownloadController::LoadPersistedSettingsLocked() {
     if (!sres.ok() || sres.value->empty()) return;
     try {
         auto val = json::Parse(*sres.value);
-        if (!val.is_object()) return;
-        m_settings.theme = val["theme"].as_string("dark");
+        m_settings.theme = val["theme"].as_string("coral_dark");
+        if (m_settings.theme == "dark") {
+            m_settings.theme = "coral_dark";
+        }
         m_settings.max_concurrent_tasks = std::clamp<uint32_t>(
             static_cast<uint32_t>(val["maxConcurrentTasks"].as_int64(m_cfg.max_concurrent_tasks)), 1u, 16u);
         m_settings.speed_limit_bps = static_cast<uint64_t>(val["speedLimitBps"].as_int64(m_cfg.global_speed_limit_bps));
@@ -639,27 +663,33 @@ void DownloadController::ScheduleLoop() {
         std::string cur_hh_mm(time_str);
 
         for (auto& [id, t] : m_tasks) {
-            // Check scheduled start time
-            if (t.scheduled && t.state == TaskState::kPaused && !t.schedule_time_local.empty()) {
-                if (cur_hh_mm >= t.schedule_time_local &&
-                    (t.schedule_stop_time_local.empty() || cur_hh_mm < t.schedule_stop_time_local)) {
-                    t.scheduled = false;
+            // Check scheduled start & stop time strictly on scheduled tasks
+            if (t.scheduled) {
+                bool in_window = IsTimeInScheduledWindow(cur_hh_mm, t.schedule_time_local, t.schedule_stop_time_local);
+                if (t.state == TaskState::kPaused && in_window) {
                     t.state = TaskState::kQueued;
                     t.status_detail = "Queued (Schedule Started)";
-                    m_store.UpsertTask(t);
-                }
-            }
-            // Check scheduled stop time on active/queued tasks
-            if (!t.schedule_stop_time_local.empty() && cur_hh_mm >= t.schedule_stop_time_local) {
-                if (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kQueued) {
-                    auto ait = m_active.find(id);
-                    if (ait != m_active.end()) {
-                        ait->second->pause_requested.store(true);
+                    if (t.schedule_stop_time_local.empty()) {
+                        // One-shot start schedule has fired
+                        t.scheduled = false;
+                        t.schedule_time_local.clear();
                     }
-                    t.state = TaskState::kPaused;
-                    t.pause_reason = PauseReason::kUser;
-                    t.status_detail = "Paused (Scheduled Stop " + t.schedule_stop_time_local + ")";
                     m_store.UpsertTask(t);
+                } else if (!in_window && !t.schedule_stop_time_local.empty()) {
+                    if (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kQueued) {
+                        auto ait = m_active.find(id);
+                        if (ait != m_active.end()) {
+                            ait->second->pause_requested.store(true);
+                        }
+                        t.state = TaskState::kPaused;
+                        t.pause_reason = PauseReason::kUser;
+                        t.status_detail = "Paused (Scheduled Stop " + t.schedule_stop_time_local + ")";
+                        // Cleanly expire the schedule once stop time has arrived so it never blocks manual Resume or Retry!
+                        t.scheduled = false;
+                        t.schedule_time_local.clear();
+                        t.schedule_stop_time_local.clear();
+                        m_store.UpsertTask(t);
+                    }
                 }
             }
         }
@@ -669,19 +699,19 @@ void DownloadController::ScheduleLoop() {
         if (queues_res.ok()) {
             for (const auto& q : *queues_res.value) {
                 if (q.schedule_enabled) {
-                    if (!q.start_time_local.empty() && cur_hh_mm >= q.start_time_local &&
-                        (q.stop_time_local.empty() || cur_hh_mm < q.stop_time_local)) {
+                    bool in_queue_window = IsTimeInScheduledWindow(cur_hh_mm, q.start_time_local, q.stop_time_local);
+                    if (in_queue_window) {
                         for (auto& [id, t] : m_tasks) {
                             if (t.queue_id == q.queue_id && t.state == TaskState::kPaused &&
-                                t.pause_reason != PauseReason::kUser) {
+                                t.pause_reason != PauseReason::kUser && !t.scheduled) {
                                 t.state = TaskState::kQueued;
                                 t.status_detail = "Queued (Queue Schedule Started)";
                                 m_store.UpsertTask(t);
                             }
                         }
-                    } else if (!q.stop_time_local.empty() && cur_hh_mm >= q.stop_time_local) {
+                    } else if (!q.stop_time_local.empty()) {
                         for (auto& [id, t] : m_tasks) {
-                            if (t.queue_id == q.queue_id &&
+                            if (t.queue_id == q.queue_id && !t.scheduled &&
                                 (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kQueued)) {
                                 auto ait = m_active.find(id);
                                 if (ait != m_active.end()) {
@@ -904,9 +934,12 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                     it->second.downloaded_bytes = tp.downloaded_bytes;
                     it->second.total_bytes = tp.total_bytes;
                     it->second.speed_bps = tp.speed_bps;
+                    it->second.uploaded_bytes = tp.uploaded_bytes;
+                    it->second.upload_speed_bps = tp.upload_speed_bps;
                     it->second.completed_segments = tp.completed_pieces;
                     it->second.total_segments = tp.total_pieces;
                     it->second.status_detail = tp.status_detail;
+                    local_task.uploaded_bytes = tp.uploaded_bytes;
                 }
             },
             m_global_limiter);
@@ -1144,7 +1177,7 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
     if (ctrl->cancel_requested.load()) {
         local_task.state = TaskState::kCanceled;
         local_task.status_detail = "Canceled";
-    } else if (ctrl->pause_requested.load() && local_task.state != TaskState::kCompleted) {
+    } else if (ctrl->pause_requested.load() && local_task.state != TaskState::kCompleted && local_task.state != TaskState::kFailed) {
         local_task.state = TaskState::kPaused;
         local_task.status_detail = "Paused";
     }
@@ -1170,6 +1203,8 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 t.total_bytes = local_task.total_bytes;
                 t.downloaded_bytes = local_task.downloaded_bytes;
                 t.speed_bps = 0;
+                t.upload_speed_bps = 0;
+                t.uploaded_bytes = local_task.uploaded_bytes;
                 t.stream_percent = local_task.stream_percent;
                 t.completed_segments = local_task.completed_segments;
                 t.total_segments = local_task.total_segments;
@@ -1290,6 +1325,8 @@ Result<void> DownloadController::ResumeTask(const std::string& task_id) {
     if (it == m_tasks.end()) return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
     if (it->second.state == TaskState::kPaused || it->second.state == TaskState::kFailed) {
         it->second.scheduled = false;
+        it->second.schedule_time_local.clear();
+        it->second.schedule_stop_time_local.clear();
         it->second.pause_reason = PauseReason::kNone;
         it->second.state = TaskState::kQueued;
         it->second.status_detail = "Queued (Resuming)";
@@ -1363,19 +1400,32 @@ Result<void> DownloadController::RetryTask(const std::string& task_id) {
         return Result<void>::Err("ERR_INVALID_STATE", "Only failed, canceled, or paused tasks can be retried");
     }
 
-    // If task was canceled or failed due to validator mismatch / corruption, reset segments for a fresh download
+    // Deactivate any old schedules on Retry so task runs immediately
+    t.scheduled = false;
+    t.schedule_time_local.clear();
+    t.schedule_stop_time_local.clear();
+    t.pause_reason = PauseReason::kNone;
+
+    // Clean up temporary files on Retry for failed/canceled stream tasks or validator mismatches
     if (t.state == TaskState::kCanceled ||
+        t.task_type == TaskType::kStreamHls ||
+        t.task_type == TaskType::kStreamDash ||
         t.error_code == "ERR_HTTP_VALIDATOR_MISMATCH" ||
-        t.error_code == "ERR_STORAGE_PART_CORRUPTED") {
+        t.error_code == "ERR_STORAGE_PART_CORRUPTED" ||
+        t.error_code == "ERR_YOUTUBE_EXTRACTION_FAILED" ||
+        t.error_code == "ERR_STREAM_WORKER_CRASH" ||
+        t.error_code == "ERR_YOUTUBE_EMPTY_TRACK") {
         std::error_code ec;
         if (!t.part_path.empty()) {
             std::filesystem::remove_all(t.part_path, ec);
         }
-        t.part_path.clear();
-        t.segments.clear();
-        t.downloaded_bytes = 0;
-        t.etag.clear();
-        t.last_modified.clear();
+        if (t.error_code == "ERR_HTTP_VALIDATOR_MISMATCH" || t.error_code == "ERR_STORAGE_PART_CORRUPTED") {
+            t.part_path.clear();
+            t.segments.clear();
+            t.downloaded_bytes = 0;
+            t.etag.clear();
+            t.last_modified.clear();
+        }
     }
 
     ++t.retry_count;
@@ -1658,8 +1708,8 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
         m_settings.min_capture_size_bytes = std::clamp<uint64_t>(m_settings.min_capture_size_bytes, 0ULL, 10737418240ULL);
         m_settings.max_auto_retries = std::clamp<uint32_t>(m_settings.max_auto_retries, 0u, 50u);
         m_settings.retry_interval_sec = std::clamp<uint32_t>(m_settings.retry_interval_sec, 1u, 3600u);
-        if (m_settings.theme != "dark" && m_settings.theme != "light" && m_settings.theme != "system") {
-            m_settings.theme = "dark";
+        if (m_settings.theme != "coral_dark" && m_settings.theme != "dark" && m_settings.theme != "light" && m_settings.theme != "system" && m_settings.theme != "classic_blue") {
+            m_settings.theme = "coral_dark";
         }
         if (!m_settings.default_download_dir.empty()) {
             m_cfg.default_download_dir = m_settings.default_download_dir;
@@ -1685,7 +1735,7 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
 
 Result<AppSettings> DownloadController::RestoreDefaultSettings() {
     AppSettings defaults;
-    defaults.theme = "dark";
+    defaults.theme = "coral_dark";
     defaults.max_concurrent_tasks = 3;
     defaults.speed_limit_bps = 0;
     defaults.default_connections_per_task = 8;

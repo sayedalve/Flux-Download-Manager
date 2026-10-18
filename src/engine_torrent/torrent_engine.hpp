@@ -21,6 +21,8 @@ struct TorrentProgress {
     uint64_t downloaded_bytes{0};
     uint64_t total_bytes{0};
     uint64_t speed_bps{0};
+    uint64_t uploaded_bytes{0};
+    uint64_t upload_speed_bps{0};
     uint32_t completed_pieces{0};
     uint32_t total_pieces{0};
     std::string status_detail;

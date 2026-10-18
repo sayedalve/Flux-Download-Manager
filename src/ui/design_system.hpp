@@ -144,11 +144,11 @@ struct LayoutMetrics {
     int focus_ring_width{2};
 
     // Typography ramp (in pixels at current DPI)
-    int font_caption_px{11};
-    int font_body_px{13};
-    int font_body_strong_px{13};
-    int font_subtitle_px{15};
-    int font_title_px{18};
+    int font_caption_px{12};
+    int font_body_px{14};
+    int font_body_strong_px{14};
+    int font_subtitle_px{16};
+    int font_title_px{20};
 };
 
 // Pre-rendered deterministic star node (zero dynamic allocations or per-frame RNG)
@@ -351,12 +351,12 @@ public:
         m.corner_radius = ScaleForDpi(6, dpi);
         m.focus_ring_width = std::max(1, ScaleForDpi(2, dpi));
 
-        // Enforce >= 11pt/px caption floor and >= 13px body floor
-        m.font_caption_px = ScaleForDpi(11, dpi);
-        m.font_body_px = ScaleForDpi(13, dpi);
-        m.font_body_strong_px = ScaleForDpi(13, dpi);
-        m.font_subtitle_px = ScaleForDpi(15, dpi);
-        m.font_title_px = ScaleForDpi(18, dpi);
+        // Enforce >= 12px caption floor and >= 14px body floor for modern Windows 11 readability
+        m.font_caption_px = ScaleForDpi(12, dpi);
+        m.font_body_px = ScaleForDpi(14, dpi);
+        m.font_body_strong_px = ScaleForDpi(14, dpi);
+        m.font_subtitle_px = ScaleForDpi(16, dpi);
+        m.font_title_px = ScaleForDpi(20, dpi);
         return m;
     }
 
@@ -443,8 +443,9 @@ public:
 
     static ThemePalette ResolvePalette(std::string_view theme_setting, bool os_prefers_light = false) {
         if (theme_setting == "light") return GetLightPalette();
-        if (theme_setting == "dark" || theme_setting == "cosmic") return GetDarkPalette();
+        if (theme_setting == "classic_blue" || theme_setting == "cosmic_blue") return GetDarkPalette();
         if (theme_setting == "system") return os_prefers_light ? GetLightPalette() : GetRedesignPalette();
+        // "coral_dark", "coral", "charcoal", "dark", or any unrecognized string maps to the Coral Charcoal Redesign Palette
         return GetRedesignPalette();
     }
 

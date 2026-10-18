@@ -142,6 +142,10 @@ function renderDetectedMediaList(candidates, options = {}) {
         return `<option value="${qid}" ${isSelected ? "selected" : ""}>${qlbl}</option>`;
       }).join("");
       qualityDropdownHtml = `<select class="quality-select" data-id="${escapeHtml(item.candidateId)}" aria-label="Select stream quality">${optsHtml}</select>`;
+    } else if (Array.isArray(item.qualities) && item.qualities.length === 1) {
+      const singleQ = item.qualities[0];
+      const singleLbl = escapeHtml(singleQ.label || singleQ.resolution || item.resolution || "Single stream");
+      qualityDropdownHtml = `<span class="meta-mono" style="margin-right:6px;" title="Detected quality">${singleLbl}</span>`;
     }
 
     return `<div class="media-item" data-id="${escapeHtml(item.candidateId)}" data-stream="${isStream}">
@@ -252,6 +256,26 @@ function initPopupUI() {
 
   function attachItemClickListeners() {
     if (!mediaListEl) return;
+    const qualitySelects = mediaListEl.querySelectorAll(".quality-select");
+    qualitySelects.forEach(sel => {
+      sel.addEventListener("change", (ev) => {
+        const selTarget = ev.currentTarget || ev.target;
+        const candId = selTarget.getAttribute("data-id");
+        const cand = currentCandidates.find(c => c.candidateId === candId);
+        if (cand && Array.isArray(cand.qualities)) {
+          const chosen = cand.qualities.find(q => (q.id || q.resolution) === selTarget.value);
+          if (chosen) {
+            cand.resolution = chosen.resolution || chosen.id;
+            const itemBox = selTarget.closest ? selTarget.closest(".media-item") : null;
+            const metaMono = itemBox ? itemBox.querySelector(".meta-mono") : null;
+            if (metaMono) {
+              metaMono.textContent = cand.resolution + (cand.size > 0 ? " · " + formatMediaSize(cand.size) : "");
+            }
+          }
+        }
+      });
+    });
+
     const buttons = mediaListEl.querySelectorAll(".dl-btn");
     buttons.forEach(btn => {
       btn.addEventListener("click", (ev) => {
@@ -351,7 +375,7 @@ function initPopupUI() {
   }
 
   function fetchTabData(explicitTabId = null) {
-    if (typeof chrome !== "undefined" || !chrome.tabs || !chrome.runtime) return;
+    if (typeof chrome === "undefined" || !chrome.tabs || !chrome.runtime) return;
 
     const queryAndLoad = (tabId, tabUrl) => {
       currentTabId = tabId;

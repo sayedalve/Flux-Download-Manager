@@ -249,9 +249,11 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
 
         OPENIDM_LOG_INFO("TorrentEngine", "Handshake established with peer " + peer.ip + " (" + remote_peer_id + ")");
 
-        // Send Interested message
+        // Send Interested and Unchoke messages
         auto interested = PeerWireProtocol::CreateInterested();
         send(sock.s, reinterpret_cast<const char*>(interested.data()), static_cast<int>(interested.size()), 0);
+        auto unchoke_msg = PeerWireProtocol::CreateUnchoke();
+        send(sock.s, reinterpret_cast<const char*>(unchoke_msg.data()), static_cast<int>(unchoke_msg.size()), 0);
 
         std::vector<bool> peer_have(torrent_info.num_pieces(), false);
         bool peer_choked_us = true;
@@ -334,8 +336,45 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
                             tp.completed_pieces = task.completed_segments;
                             tp.total_pieces = task.total_segments;
                             tp.speed_bps = task.speed_bps;
+                            tp.uploaded_bytes = task.uploaded_bytes;
+                            tp.upload_speed_bps = task.upload_speed_bps;
                             tp.status_detail = task.status_detail;
                             on_progress(tp);
+                        }
+                    }
+                } else if (msg.id == BtMessageId::kRequest) {
+                    if (msg.piece_index < torrent_info.num_pieces() &&
+                        msg.block_length > 0 && msg.block_length <= 32768 &&
+                        msg.piece_index < piece_mgr->HavePieces().size() &&
+                        piece_mgr->HavePieces()[msg.piece_index]) {
+                        uint64_t piece_len = torrent_info.get_piece_size(msg.piece_index);
+                        if (static_cast<uint64_t>(msg.block_begin) + msg.block_length <= piece_len) {
+                            uint64_t torrent_offset = static_cast<uint64_t>(msg.piece_index) * torrent_info.piece_length + msg.block_begin;
+                            std::vector<uint8_t> block_buf(msg.block_length);
+                            auto r_res = storage->ReadBytes(torrent_offset, block_buf.data(), msg.block_length);
+                            if (r_res.ok()) {
+                                auto p_msg = PeerWireProtocol::CreatePiece(msg.piece_index, msg.block_begin, block_buf.data(), msg.block_length);
+                                send(sock.s, reinterpret_cast<const char*>(p_msg.data()), static_cast<int>(p_msg.size()), 0);
+                                task.uploaded_bytes += msg.block_length;
+                                auto now = std::chrono::steady_clock::now();
+                                auto elapsed_ms = std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count());
+                                task.upload_speed_bps = (task.uploaded_bytes * 1000ULL) / static_cast<uint64_t>(elapsed_ms);
+
+                                if (on_progress) {
+                                    TorrentProgress tp;
+                                    tp.task_id = task.task_id;
+                                    tp.state = TaskState::kDownloading;
+                                    tp.downloaded_bytes = task.downloaded_bytes;
+                                    tp.total_bytes = total_bytes;
+                                    tp.completed_pieces = task.completed_segments;
+                                    tp.total_pieces = task.total_segments;
+                                    tp.speed_bps = task.speed_bps;
+                                    tp.uploaded_bytes = task.uploaded_bytes;
+                                    tp.upload_speed_bps = task.upload_speed_bps;
+                                    tp.status_detail = task.status_detail;
+                                    on_progress(tp);
+                                }
+                            }
                         }
                     }
                 }
@@ -371,7 +410,7 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
         task.status_detail = "Completed (BitTorrent)";
 
         // Announce completion to tracker
-        TrackerClient::AnnounceAny(announce_urls, torrent_info.info_hash_raw, client_peer_id, 6881, 0, total_bytes, 0, "completed", 5000);
+        TrackerClient::AnnounceAny(announce_urls, torrent_info.info_hash_raw, client_peer_id, 6881, task.uploaded_bytes, total_bytes, 0, "completed", 5000);
 
         if (on_progress) {
             TorrentProgress tp;
@@ -381,6 +420,9 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
             tp.total_bytes = total_bytes;
             tp.completed_pieces = task.total_segments;
             tp.total_pieces = task.total_segments;
+            tp.speed_bps = 0;
+            tp.uploaded_bytes = task.uploaded_bytes;
+            tp.upload_speed_bps = 0;
             tp.status_detail = task.status_detail;
             on_progress(tp);
         }

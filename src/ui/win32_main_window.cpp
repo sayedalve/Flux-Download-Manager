@@ -2,6 +2,7 @@
 #include "ui/win32_main_window.hpp"
 
 #include "brisk_engine/http_client.hpp"
+#include "common/crypto_utils.hpp"
 #include "common/logger.hpp"
 #include "common/path_sanitizer.hpp"
 
@@ -74,7 +75,7 @@ DesktopView::DesktopView(DownloadController& controller, ipc::IpcServer* ipc_ser
     m_draft_settings = settings;
     m_starfield.SetReducedMotion(settings.reduced_motion);
     m_starfield.SetWindowState(!settings.start_minimized, settings.start_minimized);
-    SetTheme("coral", false);
+    SetTheme(settings.theme, false);
 }
 
 void DesktopView::SetWindowDimensions(int width, int height, uint32_t dpi) {
@@ -277,6 +278,10 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
                 return {HitTargetType::kSettingsItemControl, static_cast<int>(i), sv.visible_items[i].key, sv.visible_items[i].description};
             }
         }
+        if (sv.modal_rect.Contains(x, y)) {
+            return {HitTargetType::kSettingsModalBackground, 0, "", ""};
+        }
+        return {HitTargetType::kSettingsBackdrop, 0, "", "Click outside to close settings"};
     }
 
     auto geom = ComputeLayoutGeometry(scroll_offset);
@@ -312,7 +317,7 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
         }
     }
     for (size_t i = 0; i < geom.table_columns.size(); ++i) {
-        if (geom.table_columns[i].rect.Contains(x, y)) {
+        if (geom.table_columns[i].rect.width() > 0 && geom.table_columns[i].rect.height() > 0 && geom.table_columns[i].rect.Contains(x, y)) {
             return {HitTargetType::kTableHeaderColumn, static_cast<int>(i), "", "Sort by " + geom.table_columns[i].title};
         }
     }
@@ -364,6 +369,14 @@ bool DesktopView::HandleMouseClick(int x, int y, bool double_click, size_t scrol
                 return r.ok();
             }
             case HitTargetType::kSettingsCancelButton: {
+                if (HasUnsavedSettingsChanges()) {
+#ifdef _WIN32
+                    if (m_hwnd) {
+                        int res = MessageBoxW(m_hwnd, L"You have unsaved changes. Discard changes and close settings?", L"Discard Changes", MB_YESNO | MB_ICONQUESTION);
+                        if (res != IDYES) return true;
+                    }
+#endif
+                }
                 CloseSettingsCenter(true);
                 return true;
             }
@@ -371,8 +384,23 @@ bool DesktopView::HandleMouseClick(int x, int y, bool double_click, size_t scrol
                 ActionRestoreDefaultSettings();
                 return true;
             }
+            case HitTargetType::kSettingsBackdrop: {
+                if (HasUnsavedSettingsChanges()) {
+#ifdef _WIN32
+                    if (m_hwnd) {
+                        int res = MessageBoxW(m_hwnd, L"You have unsaved changes. Discard changes and close settings?", L"Discard Changes", MB_YESNO | MB_ICONQUESTION);
+                        if (res != IDYES) return true;
+                    }
+#endif
+                }
+                CloseSettingsCenter(true);
+                return true;
+            }
+            case HitTargetType::kSettingsModalBackground: {
+                return true;
+            }
             default:
-                break;
+                return true;
         }
     }
 
@@ -453,10 +481,10 @@ HitTestResult DesktopView::HandleMouseMove(int x, int y, size_t scroll_offset) {
 }
 
 void DesktopView::SetTheme(std::string_view theme_name, bool os_prefers_light) {
-    if (theme_name == "light" || theme_name == "system" || theme_name == "dark" || theme_name == "coral" || theme_name == "redesign") {
+    if (theme_name == "light" || theme_name == "system" || theme_name == "dark" || theme_name == "coral" || theme_name == "coral_dark" || theme_name == "redesign" || theme_name == "classic_blue") {
         m_theme_name = std::string(theme_name);
     } else {
-        m_theme_name = "coral";
+        m_theme_name = "coral_dark";
     }
     m_palette = DesignSystem::ResolvePalette(m_theme_name, os_prefers_light);
 }
@@ -1031,7 +1059,7 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
         uint64_t effective_size = (t.total_bytes > 0) ? t.total_bytes : t.downloaded_bytes;
         row.size_text = (effective_size > 0) ? FormatSizePretty(effective_size) : "Unknown";
         row.added_time_text = FormatFriendlyTime(t.created_at_ms);
-        row.upload_speed_text = "0 KB/s";
+        row.upload_speed_text = (t.upload_speed_bps > 0) ? FormatSpeed(t.upload_speed_bps) : "0 KB/s";
         row.checked = (m_checked_task_ids.count(t.task_id) > 0);
 
         if (t.state == TaskState::kDownloading) {
@@ -1246,8 +1274,11 @@ StatusBarViewModel DesktopView::BuildStatusBar() const {
         } else if (t.state == TaskState::kQueued) {
             ++sb.remaining_queued;
         }
+        sb.total_upload_speed_bps += t.upload_speed_bps;
     }
     sb.formatted_total_speed = FormatSpeed(sb.total_speed_bps);
+    sb.formatted_total_upload_speed = FormatSpeed(sb.total_upload_speed_bps);
+    sb.speed_limit_state = IsSpeedLimiterActive() ? "ON" : "OFF";
     sb.browser_ipc_listening = (m_ipc_server != nullptr);
     sb.browser_capture_enabled = m_controller.GetSettings().browser_capture_enabled;
     sb.workers_ready = m_controller.AreWorkersAvailable();
@@ -1255,6 +1286,7 @@ StatusBarViewModel DesktopView::BuildStatusBar() const {
     std::ostringstream msg;
     msg << "Active: " << sb.active_downloads
         << " | Speed: " << sb.formatted_total_speed
+        << " | Upload: " << sb.formatted_total_upload_speed
         << " | Queued: " << sb.remaining_queued
         << " | Browser Capture: " << (sb.browser_capture_enabled ? "Enabled" : "Paused")
         << " | Stream Workers: " << (sb.workers_ready ? "Ready" : "Missing");
@@ -2283,6 +2315,44 @@ Result<void> DesktopView::ActionDeleteSelectedWithFile() {
     return last_res;
 }
 
+Result<void> DesktopView::ActionMoveSelectedToRecycleBin() {
+    if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
+    std::set<std::string> ids = m_checked_task_ids;
+    if (ids.empty()) ids.insert(m_selected_task_id);
+    Result<void> last_res = Result<void>::Ok();
+    for (const auto& id : ids) {
+        auto t = m_controller.GetTask(id);
+        if (t.has_value()) {
+            std::filesystem::path fp = std::filesystem::path(t->save_dir) / t->file_name;
+            std::error_code ec;
+            if (std::filesystem::exists(fp, ec)) {
+#ifdef _WIN32
+                std::wstring wpath = fp.wstring();
+                wpath.push_back(L'\0'); // Double-null terminated buffer for SHFileOperationW
+                SHFILEOPSTRUCTW op{};
+                op.wFunc = FO_DELETE;
+                op.pFrom = wpath.c_str();
+                op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+                int ret = SHFileOperationW(&op);
+                if (ret != 0 || op.fAnyOperationsAborted) {
+                    last_res = Result<void>::Err("ERR_RECYCLE_BIN_FAILED", "Failed to move file to Recycle Bin: error code " + std::to_string(ret));
+                    continue; // Do not remove task if file operation failed
+                }
+#else
+                std::filesystem::remove(fp, ec);
+#endif
+            }
+        }
+        auto r = m_controller.RemoveTask(id, false);
+        if (!r.ok()) last_res = r;
+    }
+    m_checked_task_ids.clear();
+    m_select_all_checked = false;
+    SelectFirstRow();
+    m_last_feedback_message = "Moved file(s) to Recycle Bin and removed task(s) from list";
+    return last_res;
+}
+
 Result<int> DesktopView::ActionClearCompletedHistory() {
     auto r = m_controller.ClearCompletedHistory();
     if (r.ok()) {
@@ -2451,6 +2521,14 @@ Result<std::vector<crawler::GrabbedItem>> DesktopView::ActionLaunchSiteGrabber(
 bool DesktopView::HandleKeyShortcut(const std::string& key_chord) {
     if (key_chord == "Escape" || key_chord == "VK_ESCAPE") {
         if (m_settings_center_open) {
+            if (HasUnsavedSettingsChanges()) {
+#ifdef _WIN32
+                if (m_hwnd) {
+                    int res = MessageBoxW(m_hwnd, L"You have unsaved changes. Discard changes and close settings?", L"Discard Changes", MB_YESNO | MB_ICONQUESTION);
+                    if (res != IDYES) return true;
+                }
+#endif
+            }
             CloseSettingsCenter(true);
             return true;
         }
@@ -2483,6 +2561,12 @@ bool DesktopView::HandleKeyShortcut(const std::string& key_chord) {
         return true;
     }
     if (key_chord == "Shift+Delete") {
+#ifdef _WIN32
+        if (m_hwnd) {
+            ShowDeleteConfirmationDialogWin32(m_hwnd, *this, m_controller);
+            return true;
+        }
+#endif
         ActionDeleteSelectedWithFile();
         return true;
     }
@@ -2632,6 +2716,13 @@ constexpr int IDM_CTX_ANTIVIRUS    = 3013;
 constexpr int IDM_CTX_ZIP_PREVIEW   = 3014;
 constexpr int IDM_CTX_EXPORT_TASKS  = 3015;
 constexpr int IDM_CTX_IMPORT_TASKS  = 3016;
+constexpr int IDM_CTX_RENAME        = 3017;
+constexpr int IDM_CTX_MOVE_TO       = 3018;
+constexpr int IDM_CTX_COPY_URL      = 3019;
+constexpr int IDM_CTX_REFRESH_URL   = 3020;
+constexpr int IDM_CTX_ADD_MIRROR    = 3021;
+constexpr int IDM_CTX_SCHEDULE      = 3022;
+constexpr int IDM_CTX_FILE_INTEGRITY = 3023;
 
 struct Win32WindowContext {
     DesktopView* view{nullptr};
@@ -2796,12 +2887,19 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
                 24, 258, 280, 180, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5005)), hInst, nullptr);
             SendMessageW(ctx->hQualityCombo, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
-            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Best Available Quality"));
-            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"1080p (Full HD)"));
-            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"720p (HD)"));
-            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"480p (Standard)"));
-            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"360p (Low)"));
-            SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Audio Only (MP3 / M4A)"));
+            bool is_video_stream = false;
+            if (!ctx->existing_task_id.empty()) {
+                auto t = ctx->controller->GetTask(ctx->existing_task_id);
+                if (t.has_value() && (t->task_type == TaskType::kStreamHls || t->task_type == TaskType::kStreamDash || t->category == "Video")) {
+                    is_video_stream = true;
+                }
+            }
+            if (is_video_stream) {
+                SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Best Available Quality (Auto)"));
+                SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Audio Only (Extract Audio)"));
+            } else {
+                SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Original / Direct File (Server Default)"));
+            }
             SendMessageW(ctx->hQualityCombo, CB_SETCURSEL, 0, 0);
 
             // File Size Label
@@ -2953,6 +3051,23 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         }
                     }
                 }
+
+                bool is_stream_url = (u.find("youtube.com") != std::string::npos ||
+                                      u.find("youtu.be") != std::string::npos ||
+                                      u.find(".m3u8") != std::string::npos ||
+                                      u.find(".mpd") != std::string::npos);
+                int count = static_cast<int>(SendMessageW(ctx->hQualityCombo, CB_GETCOUNT, 0, 0));
+                bool has_stream_items = (count > 1);
+                if (is_stream_url && !has_stream_items) {
+                    SendMessageW(ctx->hQualityCombo, CB_RESETCONTENT, 0, 0);
+                    SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Best Available Quality (Auto)"));
+                    SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Audio Only (Extract Audio)"));
+                    SendMessageW(ctx->hQualityCombo, CB_SETCURSEL, 0, 0);
+                } else if (!is_stream_url && has_stream_items) {
+                    SendMessageW(ctx->hQualityCombo, CB_RESETCONTENT, 0, 0);
+                    SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Original / Direct File (Server Default)"));
+                    SendMessageW(ctx->hQualityCombo, CB_SETCURSEL, 0, 0);
+                }
                 return 0;
             }
 
@@ -3012,12 +3127,10 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (sd.empty()) sd = ctx->controller->GetSettings().default_download_dir;
 
                 int cur_sel = static_cast<int>(SendMessageW(ctx->hQualityCombo, CB_GETCURSEL, 0, 0));
-                std::string vfilter = "best";
-                if (cur_sel == 1) vfilter = "1080p";
-                else if (cur_sel == 2) vfilter = "720p";
-                else if (cur_sel == 3) vfilter = "480p";
-                else if (cur_sel == 4) vfilter = "360p";
-                else if (cur_sel == 5) vfilter = "audio";
+                wchar_t sel_buf[128]{};
+                SendMessageW(ctx->hQualityCombo, CB_GETLBTEXT, cur_sel, reinterpret_cast<LPARAM>(sel_buf));
+                std::wstring wsel(sel_buf);
+                std::string vfilter = (wsel.find(L"Audio Only") != std::wstring::npos) ? "audio" : "best";
 
                 bool start_now = (SendMessageW(ctx->hStartChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 bool sched = (SendMessageW(ctx->hScheduleChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -3224,6 +3337,482 @@ void ShowNewDownloadDialogWin32(
 void ShowAddUrlQuickDialogWin32(HWND hwnd, DesktopView& view, DownloadController& controller) {
     ShowNewDownloadDialogWin32(hwnd, view, controller, "");
 }
+
+void CopyTextToClipboardWin32(HWND hwnd, const std::string& text) {
+    if (text.empty()) return;
+    std::wstring wtext = Utf8ToW(text);
+    if (!OpenClipboard(hwnd)) return;
+    EmptyClipboard();
+    size_t bytes = (wtext.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hGlob) {
+        void* p = GlobalLock(hGlob);
+        if (p) {
+            std::memcpy(p, wtext.c_str(), bytes);
+            GlobalUnlock(hGlob);
+            SetClipboardData(CF_UNICODETEXT, hGlob);
+        }
+    }
+    CloseClipboard();
+}
+
+struct SimpleInputDialogContext {
+    std::wstring title;
+    std::wstring prompt;
+    std::wstring initial_value;
+    std::wstring result_value;
+    bool submitted{false};
+    HWND hEdit{nullptr};
+    HWND hOkBtn{nullptr};
+    HWND hCancelBtn{nullptr};
+    HFONT hFontBody{nullptr};
+    HFONT hFontBold{nullptr};
+    HBRUSH hBgBrush{nullptr};
+    HBRUSH hEditBrush{nullptr};
+};
+
+LRESULT CALLBACK SimpleInputDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<SimpleInputDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = static_cast<SimpleInputDialogContext*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    if (!ctx) return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    switch (msg) {
+        case WM_CREATE: {
+            ctx->hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hBgBrush = CreateSolidBrush(RGB(0x18, 0x18, 0x1E));
+            ctx->hEditBrush = CreateSolidBrush(RGB(0x20, 0x20, 0x28));
+
+            HINSTANCE hInst = GetModuleHandleW(nullptr);
+            ctx->hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->initial_value.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                24, 60, 432, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(7001)), hInst, nullptr);
+            SendMessageW(ctx->hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            SendMessageW(ctx->hEdit, EM_SETSEL, 0, -1);
+
+            ctx->hOkBtn = CreateWindowExW(0, L"BUTTON", L"OK",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                236, 108, 100, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(7002)), hInst, nullptr);
+
+            ctx->hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                356, 108, 100, 32, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(7003)), hInst, nullptr);
+            return 0;
+        }
+        case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (!dis) return FALSE;
+            HDC hdc = dis->hDC;
+            RECT rc = dis->rcItem;
+            bool is_sel = (dis->itemState & ODS_SELECTED) != 0;
+            if (dis->CtlID == 7002) { // OK button (Coral Red accent #FF4F57)
+                ColorRgba bg = is_sel ? ColorRgba{0xE0, 0x43, 0x4B, 255} : ColorRgba{0xFF, 0x4F, 0x57, 255};
+                DrawRoundedBoxGdi(hdc, rc, 16, bg, bg, 0);
+                SelectObject(hdc, ctx->hFontBold);
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, L"OK", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            } else if (dis->CtlID == 7003) { // Cancel button
+                ColorRgba bg = is_sel ? ColorRgba{0x28, 0x28, 0x32, 255} : ColorRgba{0x20, 0x20, 0x28, 255};
+                ColorRgba border{0x44, 0x44, 0x50, 255};
+                DrawRoundedBoxGdi(hdc, rc, 16, bg, border, 1);
+                SelectObject(hdc, ctx->hFontBody);
+                SetTextColor(hdc, RGB(0xDE, 0xDF, 0xE4));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, L"Cancel", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CTLCOLOREDIT: {
+            HDC hdcEdit = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdcEdit, RGB(0xF2, 0xF2, 0xF3));
+            SetBkColor(hdcEdit, RGB(0x20, 0x20, 0x28));
+            return reinterpret_cast<LRESULT>(ctx->hEditBrush);
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, ctx->hBgBrush);
+            SetBkMode(hdc, TRANSPARENT);
+            SelectObject(hdc, ctx->hFontBold);
+            SetTextColor(hdc, RGB(0xF2, 0xF2, 0xF3));
+            RECT prc{24, 20, 456, 52};
+            DrawTextW(hdc, ctx->prompt.c_str(), -1, &prc, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            if (id == 7002) { // OK
+                wchar_t buf[2048]{};
+                GetWindowTextW(ctx->hEdit, buf, 2047);
+                ctx->result_value = buf;
+                ctx->submitted = true;
+                DestroyWindow(hwnd);
+                return 0;
+            } else if (id == 7003) { // Cancel
+                ctx->submitted = false;
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_DESTROY: {
+            if (ctx->hFontBody) DeleteObject(ctx->hFontBody);
+            if (ctx->hFontBold) DeleteObject(ctx->hFontBold);
+            if (ctx->hBgBrush) DeleteObject(ctx->hBgBrush);
+            if (ctx->hEditBrush) DeleteObject(ctx->hEditBrush);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, const std::wstring& prompt, const std::wstring& initial_value, std::wstring& out_value) {
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = SimpleInputDlgProc;
+        wc.hInstance = hInst;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wc.lpszClassName = L"Flux_SimpleInputDialogClass";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    SimpleInputDialogContext ctx;
+    ctx.title = title;
+    ctx.prompt = prompt;
+    ctx.initial_value = initial_value;
+
+    RECT prc{};
+    GetWindowRect(hwnd_parent, &prc);
+    int dlg_w = 480;
+    int dlg_h = 190;
+    int dlg_x = prc.left + (prc.right - prc.left - dlg_w) / 2;
+    int dlg_y = prc.top + (prc.bottom - prc.top - dlg_h) / 2;
+
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        L"Flux_SimpleInputDialogClass",
+        title.c_str(),
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        dlg_x, dlg_y, dlg_w, dlg_h,
+        hwnd_parent, nullptr, hInst, &ctx);
+
+    if (!hDlg) return false;
+
+    BOOL use_dark = TRUE;
+    DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark, sizeof(use_dark));
+
+    EnableWindow(hwnd_parent, FALSE);
+    SetForegroundWindow(hDlg);
+    SetFocus(ctx.hEdit);
+
+    MSG msg{};
+    while (IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_ESCAPE) {
+                DestroyWindow(hDlg);
+                break;
+            } else if (msg.wParam == VK_RETURN) {
+                SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(7002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hOkBtn));
+                break;
+            }
+        }
+        if (!IsDialogMessageW(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    EnableWindow(hwnd_parent, TRUE);
+    SetForegroundWindow(hwnd_parent);
+    if (ctx.submitted) {
+        out_value = ctx.result_value;
+        return true;
+    }
+    return false;
+}
+
+struct DeleteConfirmDialogContext {
+    DesktopView* view{nullptr};
+    DownloadController* controller{nullptr};
+    std::vector<std::string> task_ids;
+    std::vector<std::pair<std::string, std::string>> files_info;
+    HWND hDlg{nullptr};
+    HWND hRecycleBtn{nullptr};
+    HWND hPermanentBtn{nullptr};
+    HWND hCancelBtn{nullptr};
+    HFONT hFontBody{nullptr};
+    HFONT hFontBold{nullptr};
+    HFONT hFontTitle{nullptr};
+    HFONT hFontSmall{nullptr};
+    HBRUSH hBgBrush{nullptr};
+};
+
+LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ctx = reinterpret_cast<DeleteConfirmDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        ctx = static_cast<DeleteConfirmDialogContext*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+    if (!ctx) return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    switch (msg) {
+        case WM_CREATE: {
+            ctx->hDlg = hwnd;
+            ctx->hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontTitle = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hFontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+            ctx->hBgBrush = CreateSolidBrush(RGB(0x18, 0x18, 0x1E));
+
+            HINSTANCE hInst = GetModuleHandleW(nullptr);
+
+            // 1. Move to Recycle Bin Button
+            ctx->hRecycleBtn = CreateWindowExW(0, L"BUTTON", L"Move to Recycle Bin",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                24, 185, 160, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6001)), hInst, nullptr);
+
+            // 2. Permanently Delete Button (Coral Red Accent #FF4F57)
+            ctx->hPermanentBtn = CreateWindowExW(0, L"BUTTON", L"Permanently Delete",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                196, 185, 175, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6002)), hInst, nullptr);
+
+            // 3. Cancel Button
+            ctx->hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                383, 185, 105, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6003)), hInst, nullptr);
+
+            return 0;
+        }
+        case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (!dis) return FALSE;
+            HDC hdc = dis->hDC;
+            RECT rc = dis->rcItem;
+            bool is_sel = (dis->itemState & ODS_SELECTED) != 0;
+
+            if (dis->CtlID == 6001) { // Recycle Bin (Surface elevated, subtle border)
+                ColorRgba bg = is_sel ? ColorRgba{0x28, 0x28, 0x32, 255} : ColorRgba{0x20, 0x20, 0x28, 255};
+                ColorRgba border{0x44, 0x44, 0x50, 255};
+                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, 1);
+                SelectObject(hdc, ctx->hFontBold);
+                SetTextColor(hdc, RGB(0xF2, 0xF2, 0xF3));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, L"Move to Recycle Bin", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            } else if (dis->CtlID == 6002) { // Permanently Delete (Coral Red Accent #FF4F57)
+                ColorRgba bg = is_sel ? ColorRgba{0xE0, 0x43, 0x4B, 255} : ColorRgba{0xFF, 0x4F, 0x57, 255};
+                DrawRoundedBoxGdi(hdc, rc, 18, bg, bg, 0);
+                SelectObject(hdc, ctx->hFontBold);
+                SetTextColor(hdc, RGB(255, 255, 255));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, L"Permanently Delete", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            } else if (dis->CtlID == 6003) { // Cancel
+                ColorRgba bg = is_sel ? ColorRgba{0x28, 0x28, 0x32, 255} : ColorRgba{0x20, 0x20, 0x28, 255};
+                ColorRgba border{0x44, 0x44, 0x50, 255};
+                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, 1);
+                SelectObject(hdc, ctx->hFontBody);
+                SetTextColor(hdc, RGB(0xA4, 0xA5, 0xAC));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, L"Cancel", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, ctx->hBgBrush);
+
+            SetBkMode(hdc, TRANSPARENT);
+            SelectObject(hdc, ctx->hFontTitle);
+            SetTextColor(hdc, RGB(0xF2, 0xF2, 0xF3));
+            TextOutW(hdc, 24, 18, L"Delete Download File(s)", 23);
+
+            RECT accent_rc{24, 46, 488, 48};
+            HBRUSH hAccent = CreateSolidBrush(RGB(0xFF, 0x4F, 0x57));
+            FillRect(hdc, &accent_rc, hAccent);
+            DeleteObject(hAccent);
+
+            SelectObject(hdc, ctx->hFontBody);
+            SetTextColor(hdc, RGB(0xDE, 0xDF, 0xE4));
+            std::wstring q_text;
+            if (ctx->files_info.size() == 1) {
+                q_text = L"Are you sure you want to delete '" + Utf8ToW(ctx->files_info[0].first) + L"'?";
+            } else {
+                q_text = L"Are you sure you want to delete " + std::to_wstring(ctx->files_info.size()) + L" selected downloads?";
+            }
+            RECT q_rc{24, 60, 488, 90};
+            DrawTextW(hdc, q_text.c_str(), -1, &q_rc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS);
+
+            SelectObject(hdc, ctx->hFontSmall);
+            SetTextColor(hdc, RGB(0x8E, 0x8E, 0x98));
+            std::wstring sub_text = L"Choose 'Move to Recycle Bin' to allow restoring later, or 'Permanently Delete' to remove from disk immediately.";
+            RECT s_rc{24, 98, 488, 140};
+            DrawTextW(hdc, sub_text.c_str(), -1, &s_rc, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+            if (!ctx->files_info.empty()) {
+                std::wstring path_str = L"Path: " + Utf8ToW(ctx->files_info[0].second);
+                RECT p_rc{24, 145, 488, 170};
+                DrawTextW(hdc, path_str.c_str(), -1, &p_rc, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            if (id == 6001) { // Recycle Bin
+                ctx->view->ActionMoveSelectedToRecycleBin();
+                DestroyWindow(hwnd);
+                return 0;
+            } else if (id == 6002) { // Permanently Delete
+                ctx->view->ActionDeleteSelectedWithFile();
+                DestroyWindow(hwnd);
+                return 0;
+            } else if (id == 6003) { // Cancel
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+        case WM_DESTROY: {
+            if (ctx->hFontBody) DeleteObject(ctx->hFontBody);
+            if (ctx->hFontBold) DeleteObject(ctx->hFontBold);
+            if (ctx->hFontTitle) DeleteObject(ctx->hFontTitle);
+            if (ctx->hFontSmall) DeleteObject(ctx->hFontSmall);
+            if (ctx->hBgBrush) DeleteObject(ctx->hBgBrush);
+            return 0;
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+} // namespace
+
+void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadController& controller) {
+    auto checked = view.GetCheckedTaskIds();
+    std::vector<std::string> ids;
+    if (!checked.empty()) {
+        ids.assign(checked.begin(), checked.end());
+    } else if (!view.GetSelectedTaskId().empty()) {
+        ids.push_back(view.GetSelectedTaskId());
+    }
+    if (ids.empty()) return;
+
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(WNDCLASSEXW);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc = DeleteConfirmDlgProc;
+        wc.hInstance = hInst;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wc.lpszClassName = L"Flux_DeleteConfirmDlgClass";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    DeleteConfirmDialogContext ctx;
+    ctx.view = &view;
+    ctx.controller = &controller;
+    ctx.task_ids = ids;
+    for (const auto& tid : ids) {
+        auto t = controller.GetTask(tid);
+        if (t.has_value()) {
+            ctx.files_info.push_back({t->file_name, t->save_dir});
+        }
+    }
+
+    RECT prc{};
+    GetWindowRect(hwnd_parent, &prc);
+    int dlg_w = 516;
+    int dlg_h = 270;
+    int dlg_x = prc.left + (prc.right - prc.left - dlg_w) / 2;
+    int dlg_y = prc.top + (prc.bottom - prc.top - dlg_h) / 2;
+
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
+        L"Flux_DeleteConfirmDlgClass",
+        L"Delete Download — Flux",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+        dlg_x, dlg_y, dlg_w, dlg_h,
+        hwnd_parent, nullptr, hInst, &ctx);
+
+    if (!hDlg) return;
+
+    BOOL use_dark = TRUE;
+    DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark, sizeof(use_dark));
+
+    EnableWindow(hwnd_parent, FALSE);
+    SetForegroundWindow(hDlg);
+    SetFocus(ctx.hPermanentBtn);
+
+    MSG msg{};
+    while (IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0)) {
+        if (msg.message == WM_KEYDOWN) {
+            if (msg.wParam == VK_ESCAPE) {
+                DestroyWindow(hDlg);
+                break;
+            } else if (msg.wParam == VK_RETURN) {
+                HWND focused = GetFocus();
+                if (focused == ctx.hRecycleBtn) {
+                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6001, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hRecycleBtn));
+                } else if (focused == ctx.hCancelBtn) {
+                    DestroyWindow(hDlg);
+                } else {
+                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hPermanentBtn));
+                }
+                break;
+            }
+        }
+        if (!IsDialogMessageW(hDlg, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    EnableWindow(hwnd_parent, TRUE);
+    SetForegroundWindow(hwnd_parent);
+    InvalidateRect(hwnd_parent, nullptr, TRUE);
+}
+
+namespace {
 
 void PaintCosmicBackgroundStars(HDC hdc, const DesktopView& view) {
     auto stars = view.BuildCosmicBackgroundStars();
@@ -3838,10 +4427,19 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             sort_label = view.IsSortAscending() ? L"Size (Small)" : L"Size (Large)";
             break;
         case SortColumn::kStatus:
-            sort_label = L"Status";
+            sort_label = view.IsSortAscending() ? L"Status (Asc)" : L"Status (Desc)";
             break;
         case SortColumn::kSpeed:
-            sort_label = L"Speed";
+            sort_label = view.IsSortAscending() ? L"Speed (Slow)" : L"Speed (Fast)";
+            break;
+        case SortColumn::kDownloadType:
+            sort_label = view.IsSortAscending() ? L"Upload (Low)" : L"Upload (High)";
+            break;
+        case SortColumn::kProgress:
+            sort_label = view.IsSortAscending() ? L"Progress (Low)" : L"Progress (High)";
+            break;
+        case SortColumn::kEta:
+            sort_label = view.IsSortAscending() ? L"ETA (Short)" : L"ETA (Long)";
             break;
         default:
             sort_label = L"Newest";
@@ -3881,11 +4479,17 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     // 2. Table Column Headers
     RECT header_rc = ToWinRect(geom.table_header_rect);
     SelectObject(hdc, hFontSmallBold);
-    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
     for (size_t col_idx = 0; col_idx < geom.table_columns.size(); ++col_idx) {
         const auto& col = geom.table_columns[col_idx];
+        if (col.rect.width() <= 0) continue;
         RECT crc = ToWinRect(col.rect);
         std::wstring wt = Utf8ToW(col.title);
+        if (view.GetSortColumn() == col.sort_column) {
+            wt += view.IsSortAscending() ? L" \x25B2" : L" \x25BC";
+            SetTextColor(hdc, pal.accent_primary.ToWin32ColorRef());
+        } else {
+            SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+        }
         DrawTextW(hdc, wt.c_str(), -1, &crc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     RECT hdr_div{0, header_rc.bottom - 1, w, header_rc.bottom};
@@ -4075,17 +4679,19 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     RECT dl_stat_rc{timer_cx + timer_r * 2 + 8, status_rc.top, timer_cx + timer_r * 2 + DesignSystem::ScaleForDpi(120, m.dpi), status_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     auto sb = view.BuildStatusBar();
-    std::wstring wstat_dl = std::wstring(L"\x2913 ") + (sb.active_downloads > 0 ? L"4.8 MB/s" : L"0 B/s");
+    std::wstring wstat_dl = std::wstring(L"\x2913 ") + Utf8ToW(sb.formatted_total_speed);
     DrawTextW(hdc, wstat_dl.c_str(), -1, &dl_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + DesignSystem::ScaleForDpi(90, m.dpi), status_rc.bottom};
+    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + DesignSystem::ScaleForDpi(110, m.dpi), status_rc.bottom};
     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-    DrawTextW(hdc, L"\x2912 0 B/s", -1, &ul_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    std::wstring wstat_ul = std::wstring(L"\x2912 ") + Utf8ToW(sb.formatted_total_upload_speed);
+    DrawTextW(hdc, wstat_ul.c_str(), -1, &ul_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     RECT pri_rc{ul_stat_rc.right + 10, status_rc.top, ul_stat_rc.right + DesignSystem::ScaleForDpi(90, m.dpi), status_rc.bottom};
     int pri_r = DesignSystem::ScaleForDpi(4, m.dpi);
-    HPEN hDotPen = CreatePen(PS_SOLID, 1, pal.accent_primary.ToWin32ColorRef());
-    HBRUSH hDotBrush = CreateSolidBrush(pal.accent_primary.ToWin32ColorRef());
+    ColorRgba dot_color = limiter ? pal.accent_primary : pal.surface_elevated;
+    HPEN hDotPen = CreatePen(PS_SOLID, 1, dot_color.ToWin32ColorRef());
+    HBRUSH hDotBrush = CreateSolidBrush(dot_color.ToWin32ColorRef());
     HGDIOBJ op = SelectObject(hdc, hDotPen);
     HGDIOBJ ob = SelectObject(hdc, hDotBrush);
     Ellipse(hdc, pri_rc.left, timer_cy - pri_r, pri_rc.left + pri_r * 2, timer_cy + pri_r);
@@ -4096,8 +4702,9 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
 
     RECT pri_txt_rc{pri_rc.left + pri_r * 2 + 6, status_rc.top, pri_rc.right, status_rc.bottom};
     SelectObject(hdc, hFontSmallBold);
-    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    DrawTextW(hdc, L"HIGH", -1, &pri_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(hdc, limiter ? pal.text_primary.ToWin32ColorRef() : pal.text_secondary.ToWin32ColorRef());
+    std::wstring wlimit = limiter ? L"LIMIT ON" : L"NORMAL";
+    DrawTextW(hdc, wlimit.c_str(), -1, &pri_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     if (!rows.empty()) {
         std::string right_fn = rows[0].full_filename_tooltip;
@@ -4390,6 +4997,9 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kSize && ctx->view->IsSortAscending() ? MF_CHECKED : 0), 106, L"Size (Smallest)");
                 AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kStatus ? MF_CHECKED : 0), 107, L"Status");
                 AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kSpeed ? MF_CHECKED : 0), 108, L"Speed (Fastest)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kProgress && !ctx->view->IsSortAscending() ? MF_CHECKED : 0), 109, L"Progress (Highest)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kProgress && ctx->view->IsSortAscending() ? MF_CHECKED : 0), 110, L"Progress (Lowest)");
+                AppendMenuW(hMenu, MF_STRING | (ctx->view->GetSortColumn() == SortColumn::kEta && ctx->view->IsSortAscending() ? MF_CHECKED : 0), 111, L"ETA (Shortest)");
                 int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(hMenu);
                 if (cmd == 101) ctx->view->SetSort(SortColumn::kCreatedAt, false);
@@ -4400,6 +5010,9 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 else if (cmd == 106) ctx->view->SetSort(SortColumn::kSize, true);
                 else if (cmd == 107) ctx->view->SetSort(SortColumn::kStatus, true);
                 else if (cmd == 108) ctx->view->SetSort(SortColumn::kSpeed, false);
+                else if (cmd == 109) ctx->view->SetSort(SortColumn::kProgress, false);
+                else if (cmd == 110) ctx->view->SetSort(SortColumn::kProgress, true);
+                else if (cmd == 111) ctx->view->SetSort(SortColumn::kEta, true);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -4466,27 +5079,52 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 ctx->view->SelectTask(hit.task_id);
             }
             auto tb = ctx->view->ComputeToolbarState();
+            std::string sel = ctx->view->GetSelectedTaskId();
+            auto sel_task = sel.empty() ? std::nullopt : ctx->controller->GetTask(sel);
+            bool has_sel = sel_task.has_value();
+            bool is_completed = (has_sel && sel_task->state == TaskState::kCompleted);
+
             HMENU hMenu = CreatePopupMenu();
+
+            // Group 1: Open / Navigate
+            AppendMenuW(hMenu, tb.can_open_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_OPEN_FILE, L"Open File (Enter)");
+            AppendMenuW(hMenu, tb.can_open_folder ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_OPEN_FOLDER, L"Show in Folder");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+            // Group 2: Transfer Controls
             AppendMenuW(hMenu, tb.can_start ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_START, L"Start Download");
             AppendMenuW(hMenu, tb.can_pause ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_PAUSE, L"Pause Download");
             AppendMenuW(hMenu, tb.can_resume ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_RESUME, L"Resume Download");
             AppendMenuW(hMenu, tb.can_retry ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_RETRY, L"Retry Download (F5)");
             AppendMenuW(hMenu, tb.can_cancel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_CANCEL, L"Cancel Download");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(hMenu, tb.can_open_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_OPEN_FILE, L"Open Completed File (Enter)");
-            AppendMenuW(hMenu, tb.can_open_folder ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_OPEN_FOLDER, L"Open Destination Folder");
+
+            // Group 3: Task Management & URLs
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_RENAME, L"Rename File...");
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_MOVE_TO, L"Move To Folder...");
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_COPY_URL, L"Copy URL to Clipboard");
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_REFRESH_URL, L"Change / Refresh URL...");
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_ADD_MIRROR, L"Add Mirror URL...");
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_SCHEDULE, L"Schedule Download...");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(hMenu, tb.can_remove ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_REMOVE_LIST, L"Remove from List (Delete)");
-            AppendMenuW(hMenu, tb.can_delete_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_DELETE_DISK, L"Delete File from Disk (Shift+Delete)");
-            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+            // Group 4: Integrity & Security
+            AppendMenuW(hMenu, (has_sel && is_completed) ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_FILE_INTEGRITY, L"File Integrity (SHA-256 Checksum)...");
             AppendMenuW(hMenu, tb.can_open_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_ANTIVIRUS, L"Scan with Antivirus (Windows Defender)...");
             AppendMenuW(hMenu, tb.can_open_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_ZIP_PREVIEW, L"Preview Archive Contents (ZIP)...");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+            // Group 5: Removal & Deletion
+            AppendMenuW(hMenu, tb.can_remove ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_REMOVE_LIST, L"Remove from List (Delete)");
+            AppendMenuW(hMenu, tb.can_delete_file ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_DELETE_DISK, L"Delete File... (Shift+Delete)");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+
+            // Group 6: Tasks Import/Export & Application
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_EXPORT_TASKS, L"Export Tasks (JSON / CSV)...");
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_IMPORT_TASKS, L"Import Tasks from File...");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_SETTINGS, L"Settings & Configuration (Ctrl+,)...");
-            AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration & Worker Diagnostics...");
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration Diagnostics...");
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About Flux Download Manager...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
@@ -4498,13 +5136,119 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             else if (cmd == IDM_CTX_CANCEL) ctx->view->ActionCancelSelected();
             else if (cmd == IDM_CTX_OPEN_FILE) ctx->view->ActionOpenCompletedFile(false);
             else if (cmd == IDM_CTX_OPEN_FOLDER) ctx->view->ActionOpenDestinationFolder(false);
-            else if (cmd == IDM_CTX_REMOVE_LIST) ctx->view->ActionRemoveSelectedFromList();
-            else if (cmd == IDM_CTX_DELETE_DISK) {
-                if (MessageBoxW(hwnd, L"Permanently delete the downloaded file from disk as well?", L"Confirm File Deletion", MB_YESNO | MB_ICONWARNING) == IDYES) {
-                    ctx->view->ActionDeleteSelectedWithFile();
+            else if (cmd == IDM_CTX_RENAME) {
+                if (has_sel) {
+                    std::wstring new_name;
+                    if (ShowSimpleInputDialogWin32(hwnd, L"Rename Download", L"Enter new file name:", Utf8ToW(sel_task->file_name), new_name)) {
+                        std::string clean_name = PathSanitizer::SanitizeFileName(WToUtf8(new_name));
+                        if (!clean_name.empty()) {
+                            std::filesystem::path old_p = std::filesystem::path(sel_task->save_dir) / sel_task->file_name;
+                            std::filesystem::path new_p = std::filesystem::path(sel_task->save_dir) / clean_name;
+                            std::error_code ec;
+                            if (std::filesystem::exists(old_p, ec)) {
+                                std::filesystem::rename(old_p, new_p, ec);
+                            }
+                            sel_task->file_name = clean_name;
+                            ctx->controller->UpdateTask(*sel_task);
+                            ctx->view->SetFeedbackMessage("Renamed download to " + clean_name);
+                        }
+                    }
                 }
+            } else if (cmd == IDM_CTX_MOVE_TO) {
+                if (has_sel) {
+                    std::string chosen_dir = sel_task->save_dir;
+                    if (SelectFolderWithDialogWin32(hwnd, chosen_dir) && chosen_dir != sel_task->save_dir) {
+                        std::filesystem::path old_p = std::filesystem::path(sel_task->save_dir) / sel_task->file_name;
+                        std::filesystem::path new_p = std::filesystem::path(chosen_dir) / sel_task->file_name;
+                        std::error_code ec;
+                        if (std::filesystem::exists(old_p, ec)) {
+                            std::filesystem::rename(old_p, new_p, ec);
+                        }
+                        sel_task->save_dir = chosen_dir;
+                        ctx->controller->UpdateTask(*sel_task);
+                        ctx->view->SetFeedbackMessage("Moved download to " + chosen_dir);
+                    }
+                }
+            } else if (cmd == IDM_CTX_COPY_URL) {
+                if (has_sel) {
+                    CopyTextToClipboardWin32(hwnd, sel_task->url);
+                    ctx->view->SetFeedbackMessage("Copied download URL to clipboard");
+                }
+            } else if (cmd == IDM_CTX_REFRESH_URL) {
+                if (has_sel) {
+                    std::wstring new_url_w;
+                    if (ShowSimpleInputDialogWin32(hwnd, L"Refresh / Change URL", L"Enter updated download URL (e.g. refreshed signed link):", Utf8ToW(sel_task->url), new_url_w)) {
+                        std::string new_u = WToUtf8(new_url_w);
+                        while (!new_u.empty() && (new_u.front() == ' ' || new_u.front() == '\t')) new_u.erase(0, 1);
+                        while (!new_u.empty() && (new_u.back() == ' ' || new_u.back() == '\t')) new_u.pop_back();
+                        if (!new_u.empty()) {
+                            auto r = ctx->controller->RefreshTaskUrl(sel, new_u);
+                            if (r.ok()) {
+                                ctx->view->SetFeedbackMessage("Updated download URL");
+                            } else {
+                                MessageBoxW(hwnd, Utf8ToW(r.error->message).c_str(), L"Failed to Update URL", MB_OK | MB_ICONERROR);
+                            }
+                        }
+                    }
+                }
+            } else if (cmd == IDM_CTX_ADD_MIRROR) {
+                if (has_sel) {
+                    std::wstring mirror_w;
+                    if (ShowSimpleInputDialogWin32(hwnd, L"Add Mirror URL", L"Enter alternate download mirror URL:", L"", mirror_w)) {
+                        std::string mir = WToUtf8(mirror_w);
+                        while (!mir.empty() && (mir.front() == ' ' || mir.front() == '\t')) mir.erase(0, 1);
+                        while (!mir.empty() && (mir.back() == ' ' || mir.back() == '\t')) mir.pop_back();
+                        if (!mir.empty()) {
+                            auto r = ctx->controller->AddAlternateUrl(sel, mir);
+                            if (r.ok()) {
+                                ctx->view->SetFeedbackMessage("Added alternate mirror URL");
+                            } else {
+                                MessageBoxW(hwnd, Utf8ToW(r.error->message).c_str(), L"Failed to Add Mirror", MB_OK | MB_ICONERROR);
+                            }
+                        }
+                    }
+                }
+            } else if (cmd == IDM_CTX_SCHEDULE) {
+                if (has_sel) {
+                    std::wstring init_t = sel_task->schedule_time_local.empty() ? L"23:00" : Utf8ToW(sel_task->schedule_time_local);
+                    std::wstring time_w;
+                    if (ShowSimpleInputDialogWin32(hwnd, L"Schedule Download", L"Enter scheduled start time (24-hour HH:MM format, e.g. 23:00):", init_t, time_w)) {
+                        std::string t_str = WToUtf8(time_w);
+                        auto r = ctx->controller->SetTaskSchedule(sel, t_str, "");
+                        if (r.ok()) {
+                            ctx->view->SetFeedbackMessage("Scheduled download for " + t_str);
+                        } else {
+                            MessageBoxW(hwnd, Utf8ToW(r.error->message).c_str(), L"Schedule Failed", MB_OK | MB_ICONWARNING);
+                        }
+                    }
+                }
+            } else if (cmd == IDM_CTX_FILE_INTEGRITY) {
+                if (has_sel) {
+                    std::filesystem::path fp = std::filesystem::path(sel_task->save_dir) / sel_task->file_name;
+                    std::error_code ec;
+                    if (!std::filesystem::exists(fp, ec)) {
+                        MessageBoxW(hwnd, L"Completed file does not exist on disk.", L"File Missing", MB_OK | MB_ICONWARNING);
+                    } else {
+                        auto sha_res = CryptoUtils::ComputeFileSha256Hex(fp);
+                        if (sha_res.ok()) {
+                            std::string hash = *sha_res.value;
+                            std::wstring msg_text = L"File: " + Utf8ToW(sel_task->file_name) + L"\n"
+                                                  + L"SHA-256 Checksum:\n" + Utf8ToW(hash) + L"\n\n"
+                                                  + L"Copy checksum to clipboard?";
+                            if (MessageBoxW(hwnd, msg_text.c_str(), L"File Integrity (SHA-256)", MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+                                CopyTextToClipboardWin32(hwnd, hash);
+                                ctx->view->SetFeedbackMessage("Copied SHA-256 hash to clipboard");
+                            }
+                        } else {
+                            MessageBoxW(hwnd, Utf8ToW(sha_res.error->message).c_str(), L"Checksum Computation Error", MB_OK | MB_ICONERROR);
+                        }
+                    }
+                }
+            } else if (cmd == IDM_CTX_REMOVE_LIST) {
+                ctx->view->ActionRemoveSelectedFromList();
+            } else if (cmd == IDM_CTX_DELETE_DISK) {
+                ShowDeleteConfirmationDialogWin32(hwnd, *ctx->view, *ctx->controller);
             } else if (cmd == IDM_CTX_ANTIVIRUS) {
-                std::string sel = ctx->view->GetSelectedTaskId();
                 if (!sel.empty()) {
                     auto rep = ctx->controller->ScanTaskFile(sel);
                     if (rep.ok()) {
@@ -4536,7 +5280,6 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
             } else if (cmd == IDM_CTX_ZIP_PREVIEW) {
-                std::string sel = ctx->view->GetSelectedTaskId();
                 if (!sel.empty()) {
                     auto t = ctx->controller->GetTask(sel);
                     if (t.has_value()) {

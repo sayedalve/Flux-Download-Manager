@@ -146,6 +146,8 @@ struct TaskModel {
     uint64_t total_bytes{0};
     uint64_t downloaded_bytes{0};
     uint64_t speed_bps{0};
+    uint64_t uploaded_bytes{0};                       // Real upload accounting for BitTorrent (0 for HTTP/Streams)
+    uint64_t upload_speed_bps{0};                     // Outgoing payload transfer rate
     uint64_t speed_limit_bps{0};                      // Per-task bandwidth limit in bps (0 = no task-specific limit)
     double stream_percent{0.0};
     uint32_t completed_segments{0};
@@ -186,7 +188,7 @@ struct QueueConfig {
 };
 
 struct AppSettings {
-    std::string theme{"dark"}; // Locked to Cosmic Dark ("dark") in UI; preserves field for storage compatibility
+    std::string theme{"coral_dark"}; // Flux Coral Charcoal identity ("coral_dark")
     uint32_t max_concurrent_tasks{3};
     uint64_t speed_limit_bps{0};
     uint32_t default_connections_per_task{8};

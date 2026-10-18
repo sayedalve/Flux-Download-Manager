@@ -1502,7 +1502,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         if (!cookie_str.empty()) {
             std::ofstream cfs(yt_cfg_file, std::ios::trunc);
             if (cfs) {
-                cfs << "--add-header \"Cookie: " << cookie_str << "\"\n";
+                cfs << "--add-header\nCookie: " << cookie_str << "\n";
             }
         }
 
@@ -1512,13 +1512,14 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             ytdlp_fmt = "bestaudio[ext=m4a]/bestaudio/best";
         } else if (target_height > 0) {
             std::string hs = std::to_string(target_height);
-            ytdlp_fmt = "bestvideo[height<=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=" + hs + "]+bestaudio/best[height<=" + hs + "]/best";
+            ytdlp_fmt = "bestvideo[height=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=" + hs + "]+bestaudio/"
+                        "bestvideo[height<=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=" + hs + "]+bestaudio/"
+                        "best[height<=" + hs + "]/best";
         }
         std::vector<std::string> yt_args = {
             "--newline",
             "--no-playlist",
             "--no-warnings",
-            "--extractor-args", "youtube:player_client=android,ios,mweb",
             "--ffmpeg-location", m_cfg.ffmpeg_binary_path.string(),
             "-f", ytdlp_fmt,
             "--merge-output-format", fmt,
@@ -1536,6 +1537,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         yt_args.push_back(watch_url);
 
         static const std::regex kYtDlpProgRe(R"(\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([0-9.]+)(KiB|MiB|GiB))");
+        static const std::regex kYtDlpSpeedRe(R"(at\s+([0-9.]+)(B|KiB|MiB|GiB)/s)");
         std::string last_yt_err;
         auto parse_yt_line = [&](const std::string& line) {
             if (line.empty()) return;
@@ -1553,6 +1555,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                     sp.percent = 99.0;
                     sp.downloaded_bytes = task.downloaded_bytes;
                     sp.total_bytes = task.total_bytes;
+                    sp.speed_bps = 0;
                     sp.status_line = task.status_detail;
                     on_progress(sp);
                 }
@@ -1569,6 +1572,17 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 uint64_t tot_b = static_cast<uint64_t>(sz_val * mult);
                 uint64_t dl_b = static_cast<uint64_t>((pct / 100.0) * tot_b);
 
+                std::smatch sm;
+                if (std::regex_search(line, sm, kYtDlpSpeedRe)) {
+                    double sp_val = std::stod(sm[1].str());
+                    std::string sp_unit = sm[2].str();
+                    double sp_mult = 1.0;
+                    if (sp_unit == "KiB") sp_mult = 1024.0;
+                    else if (sp_unit == "MiB") sp_mult = 1048576.0;
+                    else if (sp_unit == "GiB") sp_mult = 1073741824.0;
+                    task.speed_bps = static_cast<uint64_t>(sp_val * sp_mult);
+                }
+
                 task.state = TaskState::kDownloading;
                 task.stream_percent = pct;
                 task.downloaded_bytes = dl_b;
@@ -1581,6 +1595,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                     sp.percent = pct;
                     sp.downloaded_bytes = dl_b;
                     sp.total_bytes = tot_b;
+                    sp.speed_bps = task.speed_bps;
                     sp.status_line = task.status_detail;
                     on_progress(sp);
                 }
@@ -1788,6 +1803,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         if (!ofs) {
             return Result<void>::Err("ERR_STORAGE_WRITE", "Failed to open temporary track file: " + dest_path.string());
         }
+        auto track_start = std::chrono::steady_clock::now();
         uint64_t track_total = 0;
         uint64_t track_dl = 0;
         auto res = brisk::HttpClient::PerformGet(
@@ -1814,6 +1830,10 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 track_dl += len;
                 cumulative_bytes += len;
 
+                auto now = std::chrono::steady_clock::now();
+                auto elapsed_ms = std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(now - track_start).count());
+                task.speed_bps = (track_dl * 1000ULL) / static_cast<uint64_t>(elapsed_ms);
+
                 double track_pct = (track_total > 0) ? ((static_cast<double>(track_dl) * 100.0) / static_cast<double>(track_total)) : 50.0;
                 double overall_pct = ((static_cast<double>(track_idx - 1) * 100.0) + track_pct) / static_cast<double>(total_tracks);
 
@@ -1834,6 +1854,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                     sp.percent = task.stream_percent;
                     sp.downloaded_bytes = task.downloaded_bytes;
                     sp.total_bytes = task.total_bytes;
+                    sp.speed_bps = task.speed_bps;
                     sp.completed_segments = task.completed_segments;
                     sp.total_segments = task.total_segments;
                     sp.status_line = task.status_detail;

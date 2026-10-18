@@ -84,6 +84,8 @@ enum class HitTargetType {
     kSettingsApplyButton,
     kSettingsCancelButton,
     kSettingsRestoreDefaultsButton,
+    kSettingsModalBackground,
+    kSettingsBackdrop,
     kSelectAllCheckbox,
     kSortDropdown,
     kFilterDropdown,
@@ -233,10 +235,13 @@ struct StatusBarViewModel {
     size_t active_downloads{0};
     uint64_t total_speed_bps{0};
     std::string formatted_total_speed;
+    uint64_t total_upload_speed_bps{0};
+    std::string formatted_total_upload_speed;
     size_t remaining_queued{0};
     bool browser_ipc_listening{false};
     bool browser_capture_enabled{true};
     bool workers_ready{false};
+    std::string speed_limit_state;
     std::string status_message;
 };
 
@@ -471,6 +476,7 @@ public:
     Result<void> ActionCancelSelected();
     Result<void> ActionRemoveSelectedFromList();
     Result<void> ActionDeleteSelectedWithFile();
+    Result<void> ActionMoveSelectedToRecycleBin();
     Result<int> ActionClearCompletedHistory();
     Result<std::filesystem::path> ActionOpenCompletedFile(bool dry_run = false);
     Result<std::filesystem::path> ActionOpenDestinationFolder(bool dry_run = false);
@@ -494,6 +500,7 @@ public:
     BrowserIntegrationStatusView GetBrowserIntegrationStatus() const;
     AboutDialogView GetAboutDialogView() const;
     const std::string& GetLastFeedbackMessage() const { return m_last_feedback_message; }
+    void SetFeedbackMessage(std::string msg) { m_last_feedback_message = std::move(msg); }
 
     std::string RenderQueueTableText() const;
     std::string RenderFullDesktopSnapshotText() const;
@@ -515,7 +522,7 @@ private:
     int m_window_width{1180};
     int m_window_height{720};
     LayoutMetrics m_metrics;
-    std::string m_theme_name{"dark"};
+    std::string m_theme_name{"coral_dark"};
     ThemePalette m_palette;
     CosmicStarfield m_starfield;
 
@@ -550,5 +557,11 @@ private:
     HWND m_hwnd{nullptr};
 #endif
 };
+
+#ifdef _WIN32
+void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadController& controller);
+bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, const std::wstring& prompt, const std::wstring& initial_value, std::wstring& out_value);
+void CopyTextToClipboardWin32(HWND hwnd, const std::string& text);
+#endif
 
 } // namespace openidm::ui

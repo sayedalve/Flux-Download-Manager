@@ -818,7 +818,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         }
 
         uint64_t bytes_delivered = 0;
-        std::vector<uint8_t> rbuf(16384);
+        std::vector<uint8_t> rbuf(65536);
         while (!meta.has_content_length || bytes_delivered < meta.content_length) {
             if (cancel_flag.load()) {
                 cleanup_winhttp();

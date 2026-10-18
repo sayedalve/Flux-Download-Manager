@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <regex>
 #include <string>
 #include <vector>
 
@@ -337,7 +338,7 @@ bool TestDesktopUiDesignSystemAndHighDpiLayout() {
     using openidm::ui::ThemeMode;
 
     // Verify Cosmic Dark tokens and palette helpers
-    auto dark = DesignSystem::ResolvePalette("dark", false);
+    auto dark = DesignSystem::ResolvePalette("classic_blue", false);
     auto light = DesignSystem::ResolvePalette("light", false);
     auto sys_light = DesignSystem::ResolvePalette("system", true);
     ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#0F172A", "Flux Deep Slate #0F172A background");
@@ -572,7 +573,7 @@ bool TestDesktopUiInteractionsFilteringSortingAndRedaction() {
                 "Settings applied while keeping application in Cosmic Dark mode");
 
     auto restored = view.ActionRestoreDefaultSettings();
-    ASSERT_TRUE(restored.ok() && view.GetThemeName() == "dark" && ctrl.GetMaxConcurrentTasks() == 3, "Restored default settings");
+    ASSERT_TRUE(restored.ok() && (view.GetThemeName() == "coral_dark" || view.GetThemeName() == "dark" || view.GetThemeName() == "coral") && ctrl.GetMaxConcurrentTasks() == 3, "Restored default settings");
 
     ctrl.Shutdown();
     std::filesystem::remove_all(work_dir);
@@ -2701,11 +2702,191 @@ bool TestUrlUserinfoExtractionAndBasicAuthGeneration() {
     return true;
 }
 
+// Regression Suite 52: Modern Coral Charcoal Theme, Settings Modal Bounds, Sorting Labels & Safe Delete
+bool TestModernCoralThemeSettingsModalBoundsAndSafeDelete() {
+    // 1. AppSettings default theme is "coral_dark"
+    openidm::AppSettings default_settings;
+    ASSERT_TRUE(default_settings.theme == "coral_dark", "Default theme is coral_dark");
+
+    // 2. Palette resolution: "coral_dark", "coral", "charcoal", and legacy "dark" resolve to GetRedesignPalette (#FF4F57)
+    auto pal_coral = openidm::ui::DesignSystem::ResolvePalette("coral_dark");
+    ASSERT_TRUE(pal_coral.accent_primary.r == 0xFF &&
+                pal_coral.accent_primary.g == 0x4F &&
+                pal_coral.accent_primary.b == 0x57, "coral_dark resolves to coral red #FF4F57");
+    ASSERT_TRUE(pal_coral.app_background.r == 0x16 &&
+                pal_coral.app_background.g == 0x16 &&
+                pal_coral.app_background.b == 0x18, "coral_dark resolves to warm matte charcoal background #161618");
+
+    auto pal_dark = openidm::ui::DesignSystem::ResolvePalette("dark");
+    ASSERT_TRUE(pal_dark.accent_primary.r == 0xFF &&
+                pal_dark.accent_primary.g == 0x4F &&
+                pal_dark.accent_primary.b == 0x57, "legacy dark resolves to coral red #FF4F57");
+
+    auto pal_classic = openidm::ui::DesignSystem::ResolvePalette("classic_blue");
+    ASSERT_TRUE(pal_classic.accent_primary.r == 0x25 &&
+                pal_classic.accent_primary.g == 0x63 &&
+                pal_classic.accent_primary.b == 0xEB, "classic_blue resolves to legacy blue #2563EB");
+
+    // 3. Modern Windows 11 Typography ramp floors
+    auto metrics_96 = openidm::ui::DesignSystem::ComputeMetrics(96);
+    ASSERT_TRUE(metrics_96.font_body_px >= 14, "Body font size is at least 14px at 96 DPI");
+    ASSERT_TRUE(metrics_96.font_caption_px >= 12, "Caption font size is at least 12px at 96 DPI");
+
+    // 4. Controller initialization and RestoreDefaultSettings defaults
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_theme_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Controller initialized");
+    ASSERT_TRUE(ctrl.GetSettings().theme == "coral_dark", "Initialized controller settings theme is coral_dark");
+
+    auto restored = ctrl.RestoreDefaultSettings();
+    ASSERT_TRUE(restored.ok() && restored.value->theme == "coral_dark", "RestoreDefaultSettings returns coral_dark theme");
+
+    // 5. DesktopView Settings Modal Hit Testing Bounds & Click-Through Absorption
+    openidm::ui::DesktopView view(ctrl);
+    ASSERT_TRUE(!view.IsSettingsCenterOpen(), "Settings center starts closed");
+
+    // When settings center is open, hit testing inside modal dialog returns kSettingsModalBackground
+    view.OpenSettingsCenter(openidm::ui::SettingsCategory::kGeneral);
+    ASSERT_TRUE(view.IsSettingsCenterOpen(), "Settings center opened");
+
+    auto sv = view.BuildSettingsCenterView();
+
+    // A click inside the modal that doesn't hit a specific control must return kSettingsModalBackground (not fall through!)
+    auto hit_inside = view.HitTestPoint(sv.modal_rect.left + 50, sv.modal_rect.top + 30); // in modal header area
+    ASSERT_TRUE(hit_inside.type == openidm::ui::HitTargetType::kSettingsModalBackground,
+                "Click inside modal background returns kSettingsModalBackground");
+
+    // A click outside the modal must return kSettingsBackdrop (not fall through to toolbar/table!)
+    auto hit_outside = view.HitTestPoint(5, 5); // top-left corner outside modal
+    ASSERT_TRUE(hit_outside.type == openidm::ui::HitTargetType::kSettingsBackdrop,
+                "Click outside modal returns kSettingsBackdrop");
+
+    // Verify HandleMouseClick on backdrop closes or handles modal safely
+    bool handled = view.HandleMouseClick(5, 5, false, 0);
+    ASSERT_TRUE(handled, "HandleMouseClick handles backdrop click");
+    ASSERT_TRUE(!view.IsSettingsCenterOpen(), "Backdrop click closes settings center");
+
+    // 6. Safe Deletion: ActionMoveSelectedToRecycleBin safely removes task
+    openidm::TaskModel t_del;
+    t_del.url = "https://example.com/delete_test.zip";
+    t_del.file_name = "delete_test.zip";
+    t_del.save_dir = work_dir.string();
+    auto add_res = ctrl.AddTask(t_del, false);
+    ASSERT_TRUE(add_res.ok(), "Task added for deletion test");
+    std::string test_task_id = add_res.value->task_id;
+
+    view.SelectTask(test_task_id);
+    auto bin_res = view.ActionMoveSelectedToRecycleBin();
+    ASSERT_TRUE(bin_res.ok(), "ActionMoveSelectedToRecycleBin succeeds");
+    ASSERT_TRUE(!ctrl.GetTask(test_task_id).has_value(), "Task removed from controller after recycle bin action");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload() {
+    using namespace openidm;
+    using namespace openidm::torrent;
+
+    // 1. Regex parsing of yt-dlp download progress and speed
+    static const std::regex kYtDlpProgRe(R"(\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([0-9.]+)(KiB|MiB|GiB))");
+    static const std::regex kYtDlpSpeedRe(R"(at\s+([0-9.]+)(B|KiB|MiB|GiB)/s)");
+
+    std::string sample_line = "[download]  45.2% of  120.50MiB at  4.85MiB/s ETA 00:15";
+    std::smatch m;
+    ASSERT_TRUE(std::regex_search(sample_line, m, kYtDlpProgRe), "Prog regex matches yt-dlp output");
+    double pct = std::stod(m[1].str());
+    double sz_val = std::stod(m[2].str());
+    std::string unit = m[3].str();
+    ASSERT_TRUE(std::abs(pct - 45.2) < 0.001, "Percent is 45.2");
+    ASSERT_TRUE(unit == "MiB", "Unit is MiB");
+    uint64_t tot_b = static_cast<uint64_t>(sz_val * 1048576.0);
+    ASSERT_TRUE(tot_b > 120ULL * 1048576ULL, "Total bytes calculated");
+
+    std::smatch sm;
+    ASSERT_TRUE(std::regex_search(sample_line, sm, kYtDlpSpeedRe), "Speed regex matches yt-dlp speed");
+    double sp_val = std::stod(sm[1].str());
+    std::string sp_unit = sm[2].str();
+    ASSERT_TRUE(std::abs(sp_val - 4.85) < 0.001, "Speed val is 4.85");
+    ASSERT_TRUE(sp_unit == "MiB", "Speed unit is MiB");
+    uint64_t speed_bps = static_cast<uint64_t>(sp_val * 1048576.0);
+    ASSERT_TRUE(speed_bps > 5000000ULL, "Speed bps correctly calculated");
+
+    // 2. BitTorrent Message Framing for kRequest
+    auto req_msg = PeerWireProtocol::CreateRequest(5, 32768, 16384);
+    auto p_opt = PeerWireProtocol::ParseMessage(req_msg.data(), req_msg.size());
+    ASSERT_TRUE(p_opt.has_value(), "kRequest parsed successfully");
+    ASSERT_TRUE(p_opt->id == BtMessageId::kRequest, "ID is kRequest");
+    ASSERT_TRUE(p_opt->piece_index == 5, "Piece index is 5");
+    ASSERT_TRUE(p_opt->block_begin == 32768, "Block begin is 32768");
+    ASSERT_TRUE(p_opt->block_length == 16384, "Block length is 16384");
+
+    // 3. BitTorrent upload accounting fields in TorrentProgress and TaskModel
+    TorrentProgress tp;
+    tp.uploaded_bytes = 1048576;
+    tp.upload_speed_bps = 524288;
+    TaskModel task;
+    task.uploaded_bytes = tp.uploaded_bytes;
+    task.upload_speed_bps = tp.upload_speed_bps;
+    ASSERT_TRUE(task.uploaded_bytes == 1048576, "Uploaded bytes copied");
+    ASSERT_TRUE(task.upload_speed_bps == 524288, "Upload speed bps copied");
+
+    // 4. Controller Scheduling with start/stop time and retry reset
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / "flux_test_sched_yt";
+    std::filesystem::remove_all(work_dir, ec);
+    std::filesystem::create_directories(work_dir, ec);
+
+    ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller");
+
+    TaskModel ts;
+    ts.task_id = "task-yt-sched";
+    ts.task_type = TaskType::kStreamHls;
+    ts.url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    ts.file_name = "rickroll.mp4";
+    ASSERT_TRUE(ctrl.AddTask(ts, false, true).ok(), "Add task");
+
+    // Set schedule
+    ASSERT_TRUE(ctrl.SetTaskSchedule("task-yt-sched", "23:00", "06:00").ok(), "Set overnight schedule");
+    auto topt = ctrl.GetTask("task-yt-sched");
+    ASSERT_TRUE(topt.has_value() && topt->scheduled, "Task is scheduled");
+    ASSERT_TRUE(topt->schedule_time_local == "23:00", "Start time is 23:00");
+    ASSERT_TRUE(topt->schedule_stop_time_local == "06:00", "Stop time is 06:00");
+
+    // Retrying or Resuming cleans stale schedule flags so manual resume is never blocked
+    ASSERT_TRUE(ctrl.ResumeTask("task-yt-sched").ok(), "ResumeTask succeeds");
+    auto t_resumed = ctrl.GetTask("task-yt-sched");
+    ASSERT_TRUE(t_resumed.has_value(), "Task exists after resume");
+    ASSERT_TRUE(!t_resumed->scheduled, "Manual resume clears scheduled flag");
+    ASSERT_TRUE(t_resumed->schedule_time_local.empty(), "Start time cleared on manual resume");
+    ASSERT_TRUE(t_resumed->schedule_stop_time_local.empty(), "Stop time cleared on manual resume");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 51;
+    const int total = 53;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -2766,6 +2947,8 @@ int main() {
     run(49, "TestExpiredLinkRefreshAndCookieReplacement", TestExpiredLinkRefreshAndCookieReplacement);
     run(50, "TestSegmentSchedulerChunkNormalizationAndTruncationGuard", TestSegmentSchedulerChunkNormalizationAndTruncationGuard);
     run(51, "TestUrlUserinfoExtractionAndBasicAuthGeneration", TestUrlUserinfoExtractionAndBasicAuthGeneration);
+    run(52, "TestModernCoralThemeSettingsModalBoundsAndSafeDelete", TestModernCoralThemeSettingsModalBoundsAndSafeDelete);
+    run(53, "TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload", TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

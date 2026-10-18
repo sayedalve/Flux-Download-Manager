@@ -566,6 +566,14 @@ async function onDownloadCreatedHandler(
       url: targetUrl.slice(0, 64),
       reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
     });
+    logPipelineStage(generateCorrelationId("blob"), "DELEGATED_TO_BROWSER", {
+      mechanism,
+      stage: "STAGE_DELEGATION",
+      downloadId: downloadItem.id,
+      filename: downloadItem.filename,
+      url: targetUrl.slice(0, 64),
+      reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
+    });
     return { intercepted: false, reason: "EXTENSION_OR_BLOB_URL", mechanism };
   }
 
@@ -1455,6 +1463,126 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
     return true;
   }
 
+  if (msg.action === "startChunkedDownload") {
+    const correlationId = msg.correlationId || generateCorrelationId("chunk");
+    const mechanism = (msg.mimeType && msg.mimeType.includes("data")) ? "BROWSER_DATA_DOWNLOAD" : "BROWSER_BLOB_OR_DATA";
+
+    if (!G.enableCapture || isSiteDisabled(msg.pageUrl || "")) {
+      logPipelineStage(correlationId, "UNSUPPORTED", {
+        mechanism,
+        stage: "STAGE_ELIGIBILITY",
+        reason: "CAPTURE_DISABLED_OR_SITE_DISABLED"
+      });
+      sendResponse({ accepted: false, reason: "CAPTURE_DISABLED" });
+      return true;
+    }
+
+    logPipelineStage(correlationId, "BACKGROUND_MESSAGE_RECEIVED", {
+      action: msg.action,
+      filename: msg.filename,
+      totalBytes: msg.totalBytes,
+      mechanism,
+      stage: "STAGE_HEADER_COLLECTION"
+    });
+
+    sendNativeRpc("download.startChunkedTransfer", {
+      taskId: msg.transferId,
+      filename: msg.filename,
+      totalBytes: msg.totalBytes,
+      mimeType: msg.mimeType,
+      pageUrl: msg.pageUrl,
+      correlationId
+    }).then(res => {
+      logPipelineStage(correlationId, "CHUNKED_TRANSFER_STARTED", {
+        taskId: res ? res.taskId : "",
+        mechanism,
+        stage: "STAGE_NATIVE_RPC"
+      });
+      sendResponse(Object.assign({ accepted: true }, res));
+    }).catch(err => {
+      const errCategory = err && err.category ? err.category : categorizeNativeError(err ? err.message : "");
+      logPipelineStage(correlationId, "CAPTURE_FAILED", {
+        error: err ? err.message : String(err),
+        errorCategory: errCategory,
+        mechanism,
+        stage: "STAGE_FAILURE_RECOVERY"
+      });
+      sendResponse({ accepted: false, error: err ? err.message : "RPC_FAILED" });
+    });
+    return true;
+  }
+
+  if (msg.action === "transferDownloadChunk") {
+    sendNativeRpc("download.transferChunk", {
+      taskId: msg.transferId,
+      chunkIndex: msg.chunkIndex,
+      dataBase64: msg.dataBase64
+    }).then(res => {
+      sendResponse(Object.assign({ received: true }, res));
+    }).catch(err => {
+      sendResponse({ received: false, error: err ? err.message : "CHUNK_FAILED" });
+    });
+    return true;
+  }
+
+  if (msg.action === "completeChunkedDownload") {
+    const correlationId = msg.correlationId || generateCorrelationId("chunk");
+    const mechanism = "BROWSER_BLOB_OR_DATA";
+
+    sendNativeRpc("download.completeChunkedTransfer", {
+      taskId: msg.transferId,
+      totalBytes: msg.totalBytes
+    }).then(res => {
+      if (res && res.success) {
+        logPipelineStage(correlationId, "CAPTURED_BY_FLUX", {
+          taskId: res.taskId,
+          fileName: res.fileName,
+          saveDir: res.saveDir,
+          totalBytes: res.totalBytes,
+          mechanism,
+          stage: "STAGE_COMPLETION"
+        });
+        sendResponse(Object.assign({ success: true }, res));
+      } else {
+        const reason = (res && res.error) || "INGEST_FAILED";
+        logPipelineStage(correlationId, "CAPTURE_FAILED", {
+          reason,
+          mechanism,
+          stage: "STAGE_FAILURE_RECOVERY"
+        });
+        sendResponse({ success: false, error: reason });
+      }
+    }).catch(err => {
+      const errCategory = err && err.category ? err.category : categorizeNativeError(err ? err.message : "");
+      logPipelineStage(correlationId, "CAPTURE_FAILED", {
+        error: err ? err.message : String(err),
+        errorCategory: errCategory,
+        mechanism,
+        stage: "STAGE_FAILURE_RECOVERY"
+      });
+      sendResponse({ success: false, error: err ? err.message : "RPC_FAILED" });
+    });
+    return true;
+  }
+
+  if (msg.action === "abortChunkedDownload") {
+    const correlationId = msg.correlationId || generateCorrelationId("chunk");
+    sendNativeRpc("download.abortChunkedTransfer", {
+      taskId: msg.transferId,
+      reason: msg.reason || ""
+    }).then(res => {
+      logPipelineStage(correlationId, "CAPTURE_FAILED", {
+        reason: msg.reason || "ABORTED_BY_CLIENT",
+        mechanism: "BROWSER_BLOB_OR_DATA",
+        stage: "STAGE_FAILURE_RECOVERY"
+      });
+      sendResponse({ aborted: true });
+    }).catch(() => {
+      sendResponse({ aborted: false });
+    });
+    return true;
+  }
+
   if (msg.action === "interceptDownloadClick") {
     const rec = recordClickedLink(tabId, msg);
     const correlationId = msg.correlationId || (rec && rec.correlationId) || generateCorrelationId("dl");
@@ -1572,6 +1700,13 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
             mechanism,
             stage: "STAGE_DESKTOP_ACCEPTANCE"
           });
+          logPipelineStage(correlationId, "CAPTURED_BY_FLUX", {
+            url: targetUrl,
+            taskId: result.taskId,
+            fileName: result.fileName,
+            mechanism,
+            stage: "STAGE_COMPLETION"
+          });
 
           sendResponse({ accepted: true, taskId: result.taskId, fileName: result.fileName, mechanism, correlationId });
         } else {
@@ -1588,6 +1723,12 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
             mechanism,
             stage: "STAGE_DESKTOP_ACCEPTANCE"
           });
+          logPipelineStage(correlationId, "CAPTURE_FAILED", {
+            url: targetUrl,
+            reason,
+            mechanism,
+            stage: "STAGE_FAILURE_RECOVERY"
+          });
           sendResponse({ accepted: false, reason, mechanism, correlationId });
         }
       } catch (err) {
@@ -1599,7 +1740,7 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
           mechanism,
           stage: "STAGE_FAILURE_RECOVERY"
         });
-        logPipelineStage(correlationId, "DOWNLOAD_CLICK_OFFER_FAILED", {
+        logPipelineStage(correlationId, "CAPTURE_FAILED", {
           url: msg.url,
           error: err ? err.message : String(err),
           errorCategory: errCategory,

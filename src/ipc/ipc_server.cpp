@@ -87,6 +87,43 @@ void ExtractHeadersMap(
     }
 }
 
+std::vector<uint8_t> Base64Decode(std::string_view input) {
+    static const int8_t kLookup[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    std::vector<uint8_t> out;
+    out.reserve((input.size() * 3) / 4);
+    uint32_t val = 0;
+    int valb = -8;
+    for (char c : input) {
+        if (c == '=' || c == '\r' || c == '\n' || c == ' ') continue;
+        int8_t d = kLookup[static_cast<uint8_t>(c)];
+        if (d == -1) continue;
+        val = (val << 6) | static_cast<uint32_t>(d);
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(static_cast<uint8_t>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 std::string IpcServer::DefaultSocketPath() {
@@ -238,6 +275,18 @@ void IpcServer::Stop() {
     m_client_threads.clear();
     m_active_client_fds.clear();
 #endif
+
+    {
+        std::lock_guard<std::mutex> lk(m_staging_mutex);
+        for (auto& [tid, sess] : m_staging_sessions) {
+            if (sess.file_stream && sess.file_stream->is_open()) {
+                sess.file_stream->close();
+            }
+            std::error_code ec;
+            std::filesystem::remove(sess.staging_path, ec);
+        }
+        m_staging_sessions.clear();
+    }
 }
 
 void IpcServer::AcceptLoop() {
@@ -537,6 +586,203 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         res["accepted"] = true;
         res["taskId"] = add_res.value->task_id;
         res["fileName"] = add_res.value->file_name;
+        return MakeRpcResult(id, std::move(res)).dump();
+    }
+
+    // 2b. download.startChunkedTransfer
+    if (method == "download.startChunkedTransfer") {
+        if (!m_capture_enabled.load()) {
+            json::Value res = json::Object{};
+            res["accepted"] = false;
+            res["reason"] = "ERR_IPC_CAPTURE_DISABLED";
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+        std::string task_id = params["taskId"].as_string();
+        if (task_id.empty()) {
+            task_id = GenerateUuidV4();
+        }
+        task_id = PathSanitizer::SanitizeFileName(task_id);
+        if (task_id.empty() || task_id.find("..") != std::string::npos) {
+            task_id = GenerateUuidV4();
+        }
+        std::string filename = PathSanitizer::SanitizeFileName(params["filename"].as_string());
+        if (filename.empty()) {
+            filename = "browser_file_" + task_id.substr(0, 8);
+        }
+        int64_t total_bytes = params["totalBytes"].as_int64(0);
+        std::string page_url = params["pageUrl"].as_string();
+        std::string correlation_id = params["correlationId"].as_string();
+
+        std::filesystem::path staging_dir = m_controller.GetConfig().temp_root_dir;
+        std::error_code ec;
+        std::filesystem::create_directories(staging_dir, ec);
+        std::filesystem::path staging_file = staging_dir / ("staged_" + task_id + ".tmp");
+
+        auto stream = std::make_shared<std::ofstream>(staging_file, std::ios::binary | std::ios::trunc);
+        if (!stream->is_open()) {
+            json::Value res = json::Object{};
+            res["accepted"] = false;
+            res["reason"] = "ERR_CANNOT_CREATE_STAGING_FILE";
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(m_staging_mutex);
+            // Periodic purge of stale staging sessions older than 5 minutes
+            int64_t now_ms = NowEpochMs();
+            for (auto sit = m_staging_sessions.begin(); sit != m_staging_sessions.end();) {
+                if (now_ms - sit->second.created_at_ms > 300000) {
+                    if (sit->second.file_stream && sit->second.file_stream->is_open()) {
+                        sit->second.file_stream->close();
+                    }
+                    std::error_code ignore_ec;
+                    std::filesystem::remove(sit->second.staging_path, ignore_ec);
+                    sit = m_staging_sessions.erase(sit);
+                } else {
+                    ++sit;
+                }
+            }
+
+            auto it = m_staging_sessions.find(task_id);
+            if (it != m_staging_sessions.end()) {
+                if (it->second.file_stream && it->second.file_stream->is_open()) {
+                    it->second.file_stream->close();
+                }
+                std::filesystem::remove(it->second.staging_path, ec);
+            }
+
+            StagingSession sess;
+            sess.task_id = task_id;
+            sess.filename = filename;
+            sess.page_url = page_url;
+            sess.correlation_id = correlation_id.empty() ? task_id : correlation_id;
+            sess.expected_total_bytes = static_cast<uint64_t>(std::max<int64_t>(0, total_bytes));
+            sess.bytes_written = 0;
+            sess.next_chunk_index = 0;
+            sess.staging_path = staging_file;
+            sess.file_stream = stream;
+            sess.created_at_ms = now_ms;
+            m_staging_sessions[task_id] = std::move(sess);
+        }
+
+        json::Value res = json::Object{};
+        res["accepted"] = true;
+        res["taskId"] = task_id;
+        res["chunkSize"] = 262144;
+        return MakeRpcResult(id, std::move(res)).dump();
+    }
+
+    // 2c. download.transferChunk
+    if (method == "download.transferChunk") {
+        std::string task_id = params["taskId"].as_string();
+        int64_t chunk_index = params["chunkIndex"].as_int64(-1);
+        std::string data_b64 = params["dataBase64"].as_string();
+
+        std::shared_ptr<std::ofstream> stream;
+        uint64_t bytes_written_total = 0;
+        {
+            std::lock_guard<std::mutex> lk(m_staging_mutex);
+            auto it = m_staging_sessions.find(task_id);
+            if (it == m_staging_sessions.end()) {
+                json::Value res = json::Object{};
+                res["received"] = false;
+                res["error"] = "ERR_STAGING_SESSION_NOT_FOUND";
+                return MakeRpcResult(id, std::move(res)).dump();
+            }
+            stream = it->second.file_stream;
+            if (!stream || !stream->is_open()) {
+                json::Value res = json::Object{};
+                res["received"] = false;
+                res["error"] = "ERR_STAGING_FILE_NOT_OPEN";
+                return MakeRpcResult(id, std::move(res)).dump();
+            }
+
+            std::vector<uint8_t> decoded = Base64Decode(data_b64);
+            if (!decoded.empty()) {
+                stream->write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                stream->flush();
+                it->second.bytes_written += decoded.size();
+            }
+            it->second.next_chunk_index = static_cast<uint32_t>(chunk_index + 1);
+            bytes_written_total = it->second.bytes_written;
+        }
+
+        json::Value res = json::Object{};
+        res["received"] = true;
+        res["chunkIndex"] = chunk_index;
+        res["bytesWritten"] = static_cast<int64_t>(bytes_written_total);
+        return MakeRpcResult(id, std::move(res)).dump();
+    }
+
+    // 2d. download.completeChunkedTransfer
+    if (method == "download.completeChunkedTransfer") {
+        std::string task_id = params["taskId"].as_string();
+        int64_t reported_bytes = params["totalBytes"].as_int64(0);
+
+        StagingSession sess;
+        {
+            std::lock_guard<std::mutex> lk(m_staging_mutex);
+            auto it = m_staging_sessions.find(task_id);
+            if (it == m_staging_sessions.end()) {
+                json::Value res = json::Object{};
+                res["success"] = false;
+                res["error"] = "ERR_STAGING_SESSION_NOT_FOUND";
+                return MakeRpcResult(id, std::move(res)).dump();
+            }
+            sess = std::move(it->second);
+            m_staging_sessions.erase(it);
+        }
+
+        if (sess.file_stream && sess.file_stream->is_open()) {
+            sess.file_stream->close();
+        }
+
+        TaskModel t;
+        t.task_id = sess.task_id;
+        t.file_name = sess.filename;
+        t.page_url = sess.page_url;
+        t.url = "blob:" + (sess.page_url.empty() ? "browser" : sess.page_url) + "#" + sess.task_id;
+        t.correlation_id = sess.correlation_id;
+        t.total_bytes = sess.bytes_written > 0 ? sess.bytes_written : static_cast<uint64_t>(std::max<int64_t>(0, reported_bytes));
+
+        auto ingest_res = m_controller.IngestCompletedTask(std::move(t), sess.staging_path);
+        if (!ingest_res.ok()) {
+            json::Value res = json::Object{};
+            res["success"] = false;
+            res["error"] = ingest_res.error->code + ": " + ingest_res.error->message;
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+
+        if (m_offer_cb) {
+            m_offer_cb(*ingest_res.value);
+        }
+
+        json::Value res = json::Object{};
+        res["success"] = true;
+        res["taskId"] = ingest_res.value->task_id;
+        res["fileName"] = ingest_res.value->file_name;
+        res["saveDir"] = ingest_res.value->save_dir;
+        res["totalBytes"] = static_cast<int64_t>(ingest_res.value->total_bytes);
+        return MakeRpcResult(id, std::move(res)).dump();
+    }
+
+    // 2e. download.abortChunkedTransfer
+    if (method == "download.abortChunkedTransfer") {
+        std::string task_id = params["taskId"].as_string();
+        std::error_code ec;
+        {
+            std::lock_guard<std::mutex> lk(m_staging_mutex);
+            auto it = m_staging_sessions.find(task_id);
+            if (it != m_staging_sessions.end()) {
+                if (it->second.file_stream && it->second.file_stream->is_open()) {
+                    it->second.file_stream->close();
+                }
+                std::filesystem::remove(it->second.staging_path, ec);
+                m_staging_sessions.erase(it);
+            }
+        }
+        json::Value res = json::Object{};
+        res["aborted"] = true;
         return MakeRpcResult(id, std::move(res)).dump();
     }
 

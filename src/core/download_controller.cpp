@@ -239,6 +239,104 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     return Result<TaskModel>::Ok(task);
 }
 
+Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const std::filesystem::path& staged_file_path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(staged_file_path, ec)) {
+        return Result<TaskModel>::Err("ERR_STAGED_FILE_NOT_FOUND", "Staged file not found: " + staged_file_path.string());
+    }
+    uint64_t file_size = std::filesystem::file_size(staged_file_path, ec);
+
+    if (task.file_name.empty()) {
+        task.file_name = "browser_file_" + GenerateUuidV4().substr(0, 8);
+    } else {
+        task.file_name = PathSanitizer::SanitizeFileName(task.file_name);
+    }
+    if (task.task_id.empty()) {
+        task.task_id = GenerateUuidV4();
+    }
+    task.task_type = TaskType::kHttpFile;
+    task.category = InferCategoryFromFilename(task.file_name);
+    if (task.save_dir.empty()) {
+        task.save_dir = ResolveCategorySaveDir(task.category).string();
+    }
+    std::filesystem::create_directories(task.save_dir, ec);
+
+    std::filesystem::path dest_path = std::filesystem::path(task.save_dir) / task.file_name;
+
+    // Conflict resolution
+    if (std::filesystem::exists(dest_path, ec)) {
+        if (m_settings.conflict_policy == ConflictPolicy::kAutoRename) {
+            std::string stem = dest_path.stem().string();
+            std::string ext = dest_path.extension().string();
+            int counter = 1;
+            while (std::filesystem::exists(dest_path, ec) && counter < 1000) {
+                dest_path = std::filesystem::path(task.save_dir) / (stem + " (" + std::to_string(counter) + ")" + ext);
+                counter++;
+            }
+            task.file_name = dest_path.filename().string();
+        } else if (m_settings.conflict_policy == ConflictPolicy::kFailIfExists) {
+            return Result<TaskModel>::Err("ERR_FILE_EXISTS", "Target file already exists: " + dest_path.string());
+        }
+    }
+
+    std::filesystem::rename(staged_file_path, dest_path, ec);
+    if (ec) {
+        ec.clear();
+        std::filesystem::copy_file(staged_file_path, dest_path, std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec) {
+            std::filesystem::remove(staged_file_path, ec);
+        } else {
+            return Result<TaskModel>::Err("ERR_FILE_MOVE_FAILED", "Failed to move staged file: " + ec.message());
+        }
+    }
+
+    if (task.created_at_ms <= 0) {
+        task.created_at_ms = NowEpochMs();
+    }
+    task.updated_at_ms = NowEpochMs();
+    task.completed_at_ms = task.updated_at_ms;
+    task.state = TaskState::kCompleted;
+    task.total_bytes = file_size;
+    task.downloaded_bytes = file_size;
+    task.speed_bps = 0;
+    task.stream_percent = 100.0;
+    task.completed_segments = 1;
+    task.total_segments = 1;
+    task.range_supported = false;
+    task.status_detail = "Completed";
+
+    // Antivirus scan
+    if (security::AntivirusScanner::IsWindowsDefenderAvailable()) {
+        if (std::filesystem::exists(dest_path, ec)) {
+            auto scan_res = security::AntivirusScanner::ScanWithDefender(dest_path);
+            if (scan_res.ok()) {
+                if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
+                    task.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
+                    OPENIDM_LOG_WARN("Controller", "Antivirus threat detected in ingested file: " + dest_path.string());
+                } else if (scan_res.value->status == security::ScanStatus::kClean) {
+                    task.status_detail = "Completed (Antivirus Clean)";
+                }
+            }
+        }
+    }
+
+#ifdef _WIN32
+    if (m_settings.show_completion_notification) {
+        MessageBeep(MB_ICONASTERISK);
+    }
+#endif
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_deleted_tasks.erase(task.task_id);
+    auto db_res = m_store.UpsertTask(task);
+    if (!db_res.ok()) {
+        return Result<TaskModel>::Err(db_res.error->code, db_res.error->message);
+    }
+    m_tasks[task.task_id] = task;
+    m_cv.notify_all();
+    return Result<TaskModel>::Ok(task);
+}
+
 Result<std::vector<TaskModel>> DownloadController::AddBatchTasks(
     const std::vector<std::string>& urls,
     const std::string& page_url,

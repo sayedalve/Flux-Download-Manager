@@ -315,27 +315,41 @@ function handleLinkClick(ev) {
       isFrame
     });
 
-    // 1. Browser-generated in-memory Blob and Data URLs:
-    // Ephemeral in-memory Blobs and Data URLs cannot be accessed by external OS processes (WinHTTP).
-    // The browser's native download engine must handle the click synchronously while the
-    // in-memory object URL remains valid in the renderer. Do NOT cancel the event!
-    if (isBlobOrData) {
-      console.log(`[Flux Trace] [CLICK_DELEGATED_TO_BROWSER] [${correlationId}]`, {
-        mechanism: href.startsWith("blob:") ? "BROWSER_BLOB_OR_DATA" : "BROWSER_DATA_DOWNLOAD",
-        stage: "STAGE_DELEGATION",
-        url: href.slice(0, 48) + "...",
-        filename: anchor.download || "",
-        reason: "BLOB_AND_DATA_URLS_REQUIRE_BROWSER_IN_MEMORY_TRANSFER"
-      });
-      return;
-    }
-
     if (ev.altKey) {
       // IDM Alt-key bypass behavior: user explicitly requested browser-native download
-      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "ALT_KEY_BYPASS", mechanism });
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: isBlobOrData ? (href.slice(0, 48) + "...") : href, reason: "ALT_KEY_BYPASS", mechanism });
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
         chrome.runtime.sendMessage({ action: "bypassNextDownload", correlationId });
       }
+      return;
+    }
+
+    // 1. Browser-generated in-memory Blob and Data URLs:
+    // Intercept client-side files and stream bytes directly into Flux via chunked native transfer.
+    if (isBlobOrData) {
+      if (anchor.dataset && anchor.dataset.fluxBypass === "true") {
+        delete anchor.dataset.fluxBypass;
+        console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href.slice(0, 48) + "...", reason: "EXPLICIT_BYPASS_FLAG", mechanism });
+        return;
+      }
+
+      if (typeof ev.preventDefault === "function") ev.preventDefault();
+      if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+
+      console.log(`[Flux Trace] [INTERCEPTION_STARTED] [${correlationId}]`, {
+        url: href.slice(0, 48) + "...",
+        filename: anchor.download || "",
+        mechanism
+      });
+
+      // Request main-world catch.js to stream the in-memory Blob/Data content
+      window.postMessage({
+        action: "fluxRequestBlobTransfer",
+        href,
+        filename: anchor.download || "",
+        correlationId
+      }, "*");
       return;
     }
 
@@ -494,12 +508,15 @@ function triggerBrowserFallback(anchor, href, reason = "", correlationId = "", m
     if (!href) return;
 
     if (href.startsWith("blob:") || href.startsWith("data:")) {
-      // Ephemeral browser-generated URLs cannot be recovered via top-level assign or delayed synthetic click
-      console.warn(`[Flux Trace] [BROWSER_FALLBACK_SKIPPED] [${correlationId || "fallback"}]`, {
+      console.log(`[Flux Trace] [BROWSER_FALLBACK_STARTED] [${correlationId || "fallback"}]`, {
         url: href.slice(0, 48) + "...",
-        reason: "CANNOT_RETRY_EPHEMERAL_URL",
+        reason,
         mechanism
       });
+      if (anchor) {
+        anchor.dataset.fluxBypass = "true";
+        try { anchor.click(); } catch (_) {}
+      }
       return;
     }
 
@@ -703,6 +720,72 @@ function initContentScript() {
           }
         });
       }
+    } else if (ev.data.action === "catCatchJsLinkClick") {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          action: "interceptDownloadClick",
+          url: ev.data.url,
+          filename: ev.data.filename || "",
+          hasDownloadAttr: Boolean(ev.data.hasDownloadAttr),
+          referrer: ev.data.referrer || location.href,
+          pageTitle: ev.data.pageTitle || document.title,
+          mechanism: "JS_TRIGGERED_PROGRAMMATIC_CLICK",
+          isFrame: (window !== window.top),
+          correlationId: ev.data.correlationId
+        });
+      }
+    } else if (ev.data.action === "fluxStartBlobTransfer") {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          action: "startChunkedDownload",
+          transferId: ev.data.transferId,
+          correlationId: ev.data.correlationId,
+          filename: ev.data.filename,
+          totalBytes: ev.data.totalBytes,
+          mimeType: ev.data.mimeType,
+          pageUrl: ev.data.pageUrl || location.href
+        }, (resp) => {
+          const lastErr = (chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError.message : null;
+          if (lastErr || (resp && !resp.accepted)) {
+            window.postMessage({ action: "fluxFallbackBlob", transferId: ev.data.transferId }, "*");
+          }
+        });
+      }
+    } else if (ev.data.action === "fluxBlobChunk") {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          action: "transferDownloadChunk",
+          transferId: ev.data.transferId,
+          correlationId: ev.data.correlationId,
+          chunkIndex: ev.data.chunkIndex,
+          totalChunks: ev.data.totalChunks,
+          dataBase64: ev.data.dataBase64
+        });
+      }
+    } else if (ev.data.action === "fluxCompleteBlobTransfer") {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          action: "completeChunkedDownload",
+          transferId: ev.data.transferId,
+          correlationId: ev.data.correlationId,
+          totalBytes: ev.data.totalBytes
+        }, (resp) => {
+          const lastErr = (chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError.message : null;
+          if (lastErr || (resp && !resp.success)) {
+            window.postMessage({ action: "fluxFallbackBlob", transferId: ev.data.transferId }, "*");
+          }
+        });
+      }
+    } else if (ev.data.action === "fluxAbortBlobTransfer") {
+      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({
+          action: "abortChunkedDownload",
+          transferId: ev.data.transferId,
+          correlationId: ev.data.correlationId,
+          reason: ev.data.reason
+        });
+      }
+      window.postMessage({ action: "fluxFallbackBlob", transferId: ev.data.transferId }, "*");
     }
   }, { capture: true });
 

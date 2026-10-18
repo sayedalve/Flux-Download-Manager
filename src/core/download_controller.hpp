@@ -57,6 +57,10 @@ public:
     // Automatically deduplicates active/queued tasks for the same URL unless force_duplicate=true.
     Result<TaskModel> AddTask(TaskModel task, bool start_immediately = true, bool force_duplicate = false);
 
+    // Ingest an already completed/transferred file (e.g. from browser-generated Blob/Data transfer)
+    // Moves staged file to final destination, runs AV scan, stores task in DB, and notifies UI.
+    Result<TaskModel> IngestCompletedTask(TaskModel task, const std::filesystem::path& staged_file_path);
+
     // Batch add links (from browser text selection FR-010)
     Result<std::vector<TaskModel>> AddBatchTasks(
         const std::vector<std::string>& urls,

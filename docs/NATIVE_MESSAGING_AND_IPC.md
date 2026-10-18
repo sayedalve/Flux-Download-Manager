@@ -112,6 +112,10 @@ Registered at `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\org.openidm.native
 | `system.handshake` | Extension -> Desktop | Negotiate protocol version and fetch current desktop capture settings (enabled state, file extensions, min size). |
 | `system.ConfigUpdated` | Desktop -> Extension (Notification) | Pushed when the user modifies capture settings or exclusion domains in the desktop UI. |
 | `download.offer` | Extension -> Desktop | Offer an intercepted ordinary file download (`URL`, `filename`, `fileSize`, `headers`, `tabUrl`). Returns `{ accepted: bool, taskId: string }`. |
+| `download.startChunkedTransfer` | Extension -> Desktop | Initiates a bounded chunked staging session for client-generated files (`Blob`, `data:` URLs, ChatGPT artifacts). Returns `{ accepted: bool, taskId: string, chunkSize: int }`. |
+| `download.transferChunk` | Extension -> Desktop | Transfers a single base64-encoded chunk into the staging file in `%LOCALAPPDATA%\Flux\tmp\`. Returns `{ received: bool, chunkIndex: int, bytesWritten: int }`. |
+| `download.completeChunkedTransfer` | Extension -> Desktop | Finalizes the staged file, verifies size, moves it to the destination directory, runs Defender scan, and records the task as `COMPLETED`. |
+| `download.abortChunkedTransfer` | Extension -> Desktop | Aborts a chunked transfer session and cleans up temporary staging files. |
 | `download.batchAdd` | Extension -> Desktop | Send a list of links extracted from a webpage text selection (`FR-010`) to open the Desktop Batch Download Dialog. |
 | `stream.add` | Extension -> Desktop | Triggered when user clicks the in-page "Download Video" button or a stream item in the popup. Passes the `MediaCandidateDescriptor` to launch the Desktop Stream Probe & Track Selection Dialog (`FR-019`). |
 | `task.cancel` | Extension -> Desktop | Optional cancellation of a pending probe initiated from the extension popup. |

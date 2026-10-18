@@ -103,3 +103,15 @@ To minimize security risk and pass Chrome Web Store / Firefox AMO review without
 
 1. When intercepting a download in `DownloadInterceptor.ts`, the extension checks `downloadItem.byExtensionId`: if the download was initiated by another browser extension (such as a PDF generator or Cat Catch), OpenIDM ignores it so it does not break in-browser blob saves.
 2. Before calling `chrome.downloads.cancel(downloadItem.id)`, the extension awaits a synchronous RPC acknowledgement (`download.offer -> { accepted: true, taskId: "..." }`, timeout `800 ms`) from `openidm.exe`. If `openidm.exe` is not installed, disabled, or times out, the browser download proceeds uninterrupted.
+
+---
+
+## 7. Client-Side and Browser-Generated File Capture (Blob / Data URLs)
+
+1. **Architecture:** When web applications generate files in-memory (`Blob`, `data:` URLs, ChatGPT code/artifact exports) and trigger downloads programmatically via `HTMLAnchorElement.prototype.click()` or `dispatchEvent()`, external download processes (WinHTTP) cannot access the ephemeral in-memory URLs due to browser sandboxing and cross-origin isolation.
+2. **Delayed Revocation & Chunked Streaming:**
+   - The Layer 3 MAIN-world hook (`catch.js`) intercepts `URL.createObjectURL` to retain in-memory `Blob` handles and delays `URL.revokeObjectURL` by 30 seconds to prevent premature garbage collection.
+   - On anchor click or synthetic dispatch, `catch.js` reads the `Blob` in bounded 256 KB slices and converts them to base64.
+   - Chunks are streamed via JSON-RPC (`download.startChunkedTransfer`, `download.transferChunk`, `download.completeChunkedTransfer`) directly into a staging file in `%LOCALAPPDATA%\Flux\tmp\`.
+   - Upon completion, `openidm.exe` moves the file to the user's download directory, executes a Windows Defender antivirus scan, and notifies the desktop UI.
+3. **Fail-Safe Browser Fallback:** If the desktop application is offline or the native messaging RPC rejects the transfer, the extension triggers a fallback with an explicit bypass flag (`fluxBypass`), ensuring the browser handles the download normally without data loss.

@@ -16,6 +16,10 @@
 #endif
 
 #include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -70,6 +74,22 @@ private:
 #else
     std::vector<int> m_active_client_fds;
 #endif
+
+    struct StagingSession {
+        std::string task_id;
+        std::string filename;
+        std::string page_url;
+        std::string correlation_id;
+        uint64_t expected_total_bytes{0};
+        uint64_t bytes_written{0};
+        uint32_t next_chunk_index{0};
+        std::filesystem::path staging_path;
+        std::shared_ptr<std::ofstream> file_stream;
+        int64_t created_at_ms{0};
+    };
+
+    std::mutex m_staging_mutex;
+    std::map<std::string, StagingSession> m_staging_sessions;
 };
 
 } // namespace openidm::ipc

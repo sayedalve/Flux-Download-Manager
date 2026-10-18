@@ -92,7 +92,11 @@ Result<std::pair<int, std::string>> RunProcessCaptureOutput(
 } // namespace
 
 bool AntivirusScanner::IsWindowsDefenderAvailable() {
+#ifdef _WIN32
     return std::filesystem::exists(GetDefenderPath());
+#else
+    return false;
+#endif
 }
 
 std::filesystem::path AntivirusScanner::GetDefenderPath() {
@@ -164,8 +168,9 @@ Result<ScanReport> AntivirusScanner::ScanWithDefender(
     return Result<ScanReport>::Ok(std::move(rep));
 #else
     ScanReport rep;
-    rep.status = ScanStatus::kClean;
+    rep.status = ScanStatus::kUnavailable;
     rep.scanner_name = "Mock Defender (POSIX)";
+    rep.output_message = "Windows Defender is not available on non-Windows platforms";
     return Result<ScanReport>::Ok(rep);
 #endif
 }
@@ -210,13 +215,20 @@ Result<ScanReport> AntivirusScanner::ScanWithCustomExecutable(
     rep.exit_code = proc_res.value->first;
     rep.output_message = proc_res.value->second;
     rep.scan_duration_ms = elapsed;
-    rep.status = (rep.exit_code == 0) ? ScanStatus::kClean : ScanStatus::kThreatDetected;
+    if (rep.exit_code == 0) {
+        rep.status = ScanStatus::kClean;
+    } else if (rep.exit_code == 1 || rep.exit_code == 2) {
+        rep.status = ScanStatus::kThreatDetected;
+    } else {
+        rep.status = ScanStatus::kScannerError;
+    }
 
     return Result<ScanReport>::Ok(std::move(rep));
 #else
     ScanReport rep;
-    rep.status = ScanStatus::kClean;
+    rep.status = ScanStatus::kUnavailable;
     rep.scanner_name = custom_exe.filename().string();
+    rep.output_message = "Custom scanner execution is not available on non-Windows platforms";
     return Result<ScanReport>::Ok(rep);
 #endif
 }

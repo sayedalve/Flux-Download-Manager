@@ -224,6 +224,9 @@ struct TaskDetailsViewModel {
     std::string redacted_headers_summary;
     std::string error_code;
     std::string error_explanation;
+    std::string speed_limit_summary;
+    std::string alternate_urls_summary;
+    std::string schedule_summary;
 };
 
 struct StatusBarViewModel {
@@ -477,6 +480,14 @@ public:
     void ActionSetBrowserCapture(bool enabled);
     Result<void> ActionSaveSettings(const AppSettings& settings);
     Result<AppSettings> ActionRestoreDefaultSettings();
+
+    Result<void> ActionSetTaskSpeedLimit(const std::string& task_id, uint64_t bps);
+    Result<void> ActionAddAlternateUrl(const std::string& task_id, const std::string& alt_url);
+    Result<void> ActionSetTaskSchedule(const std::string& task_id, const std::string& start_time_local, const std::string& stop_time_local);
+    Result<std::vector<crawler::GrabbedItem>> ActionLaunchSiteGrabber(
+        const crawler::SiteGrabberConfig& cfg,
+        std::atomic<bool>& cancel_requested,
+        crawler::GrabbedItemCallback on_item_found = nullptr);
 
     bool HandleKeyShortcut(const std::string& key_chord);
 

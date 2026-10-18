@@ -108,6 +108,21 @@ public:
     void SetGlobalSpeedLimit(uint64_t bps);
     uint64_t GetGlobalSpeedLimit() const;
 
+    // Task-Specific Bandwidth Limiting (Phase 2 Feature A)
+    Result<void> SetTaskSpeedLimit(const std::string& task_id, uint64_t bps);
+    uint64_t GetTaskSpeedLimit(const std::string& task_id) const;
+
+    // Alternate URLs / Mirrors (Phase 2 Feature B)
+    Result<void> AddAlternateUrl(const std::string& task_id, const std::string& alt_url);
+    std::vector<std::string> GetAlternateUrls(const std::string& task_id) const;
+
+    // Task & Queue Scheduling (Phase 2 Feature D)
+    Result<void> SetTaskSchedule(const std::string& task_id, const std::string& start_time_local, const std::string& stop_time_local);
+
+    // Dynamic Categorization & Save Destinations (Phase 2 Feature E)
+    std::string DetermineCategory(const std::string& filename, const std::string& url = "") const;
+    std::filesystem::path ResolveCategorySaveDir(const std::string& category, const std::string& url = "") const;
+
     // Persistent Application Settings (Phase 3 & Phase 10)
     AppSettings GetSettings() const;
     Result<void> UpdateSettings(const AppSettings& settings);

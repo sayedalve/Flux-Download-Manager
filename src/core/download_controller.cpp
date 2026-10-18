@@ -2,19 +2,88 @@
 #include "core/download_controller.hpp"
 #include "brisk_engine/http_client.hpp"
 
+#include "common/crypto_utils.hpp"
 #include "common/json_mini.hpp"
 #include "common/logger.hpp"
 #include "common/path_sanitizer.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+
+namespace {
+void TriggerSystemShutdown() {
+    HANDLE hToken = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+        TOKEN_PRIVILEGES tp;
+        if (LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME, &tp.Privileges[0].Luid)) {
+            tp.PrivilegeCount = 1;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            AdjustTokenPrivileges(hToken, FALSE, &tp, 0, nullptr, nullptr);
+        }
+        CloseHandle(hToken);
+    }
+    InitiateSystemShutdownExW(nullptr, nullptr, 0, TRUE, FALSE, SHTDN_REASON_MAJOR_APPLICATION | SHTDN_REASON_MINOR_OTHER);
+}
+
+void TriggerSystemSleep() {
+    SetSystemPowerState(TRUE, FALSE);
+}
+} // namespace
 #endif
+
+namespace {
+std::string BytesToHexStr(const std::vector<uint8_t>& bytes) {
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (uint8_t b : bytes) {
+        oss << std::setw(2) << static_cast<unsigned int>(b);
+    }
+    return oss.str();
+}
+
+std::vector<uint8_t> HexStrToBytes(std::string_view hex) {
+    std::vector<uint8_t> bytes;
+    if (hex.size() % 2 != 0) return bytes;
+    bytes.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        unsigned int byte_val = 0;
+        std::stringstream ss;
+        ss << std::hex << hex.substr(i, 2);
+        if (ss >> byte_val) {
+            bytes.push_back(static_cast<uint8_t>(byte_val));
+        } else {
+            return {};
+        }
+    }
+    return bytes;
+}
+
+std::string ExtractHostFromUrl(const std::string& url) {
+    if (url.empty()) return "";
+    auto parsed = openidm::brisk::HttpClient::ParseUrl(url);
+    if (parsed.ok()) return parsed.value->host;
+    return "";
+}
+
+std::string ExtractExtensionLower(const std::string& filename) {
+    if (filename.empty()) return "";
+    auto dot = filename.find_last_of('.');
+    if (dot == std::string::npos || dot + 1 >= filename.size()) return "";
+    std::string ext = filename.substr(dot + 1);
+    for (char& c : ext) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    }
+    return ext;
+}
+} // namespace
 
 namespace openidm {
 
@@ -96,6 +165,39 @@ void DownloadController::LoadPersistedSettingsLocked() {
         m_settings.reduced_motion = val["reducedMotion"].as_bool(false);
         m_settings.show_completion_notification = val["showCompletionNotification"].as_bool(true);
 
+        m_settings.proxy_mode = val["proxyMode"].as_string("direct");
+        m_settings.proxy_server = val["proxyServer"].as_string("");
+        m_settings.proxy_bypass = val["proxyBypass"].as_string("");
+        m_settings.proxy_username = val["proxyUsername"].as_string("");
+        m_settings.proxy_password_encrypted = val["proxyPasswordEncrypted"].as_string("");
+        m_settings.server_auth_username = val["serverAuthUsername"].as_string("");
+        m_settings.server_auth_password_encrypted = val["serverAuthPasswordEncrypted"].as_string("");
+
+        if (val.contains("categoryFolders") && val["categoryFolders"].is_object()) {
+            m_settings.category_folders.clear();
+            for (const auto& [k, v] : val["categoryFolders"].as_object()) {
+                m_settings.category_folders[k] = v.as_string();
+            }
+        }
+        if (val.contains("customExtensionCategories") && val["customExtensionCategories"].is_object()) {
+            m_settings.custom_extension_categories.clear();
+            for (const auto& [k, v] : val["customExtensionCategories"].as_object()) {
+                m_settings.custom_extension_categories[k] = v.as_string();
+            }
+        }
+        if (val.contains("siteRules") && val["siteRules"].is_object()) {
+            m_settings.site_rules.clear();
+            for (const auto& [k, v] : val["siteRules"].as_object()) {
+                m_settings.site_rules[k] = v.as_string();
+            }
+        }
+
+        m_settings.max_auto_retries = std::clamp<uint32_t>(
+            static_cast<uint32_t>(val["maxAutoRetries"].as_int64(5)), 0u, 50u);
+        m_settings.retry_interval_sec = std::clamp<uint32_t>(
+            static_cast<uint32_t>(val["retryIntervalSec"].as_int64(15)), 1u, 3600u);
+        m_settings.queue_completion_action = val["queueCompletionAction"].as_string("NONE");
+
         m_cfg.stall_timeout_ms = m_settings.stall_timeout_ms;
         m_cfg.min_split_bytes = m_settings.min_split_bytes;
         m_max_concurrent.store(m_settings.max_concurrent_tasks);
@@ -121,6 +223,31 @@ Result<void> DownloadController::SaveSettingsLocked() {
     obj["startMinimized"] = m_settings.start_minimized;
     obj["reducedMotion"] = m_settings.reduced_motion;
     obj["showCompletionNotification"] = m_settings.show_completion_notification;
+
+    obj["proxyMode"] = m_settings.proxy_mode;
+    obj["proxyServer"] = m_settings.proxy_server;
+    obj["proxyBypass"] = m_settings.proxy_bypass;
+    obj["proxyUsername"] = m_settings.proxy_username;
+    obj["proxyPasswordEncrypted"] = m_settings.proxy_password_encrypted;
+    obj["serverAuthUsername"] = m_settings.server_auth_username;
+    obj["serverAuthPasswordEncrypted"] = m_settings.server_auth_password_encrypted;
+
+    json::Value cat_folders_obj = json::Object{};
+    for (const auto& [k, v] : m_settings.category_folders) cat_folders_obj[k] = v;
+    obj["categoryFolders"] = cat_folders_obj;
+
+    json::Value ext_cat_obj = json::Object{};
+    for (const auto& [k, v] : m_settings.custom_extension_categories) ext_cat_obj[k] = v;
+    obj["customExtensionCategories"] = ext_cat_obj;
+
+    json::Value site_rules_obj = json::Object{};
+    for (const auto& [k, v] : m_settings.site_rules) site_rules_obj[k] = v;
+    obj["siteRules"] = site_rules_obj;
+
+    obj["maxAutoRetries"] = static_cast<int64_t>(m_settings.max_auto_retries);
+    obj["retryIntervalSec"] = static_cast<int64_t>(m_settings.retry_interval_sec);
+    obj["queueCompletionAction"] = m_settings.queue_completion_action;
+
     return m_store.SetSetting("app_settings", obj.dump());
 }
 
@@ -147,11 +274,67 @@ void DownloadController::Shutdown() {
     m_store.Close();
 }
 
-std::filesystem::path DownloadController::ResolveCategorySaveDir(const std::string& category) const {
-    if (!m_settings.category_subfolders_enabled || category.empty() || category == "General") {
-        return m_cfg.default_download_dir;
+std::string DownloadController::DetermineCategory(const std::string& filename, const std::string& url) const {
+    // 1. Site rules: Domain -> Category check
+    if (!url.empty()) {
+        std::string host = ExtractHostFromUrl(url);
+        if (!host.empty()) {
+            auto it = m_settings.site_rules.find(host);
+            if (it != m_settings.site_rules.end()) {
+                const std::string& val = it->second;
+                if (val == "Video" || val == "Audio" || val == "Compressed" ||
+                    val == "Documents" || val == "Programs" || val == "General") {
+                    return val;
+                }
+            }
+        }
     }
-    return m_cfg.default_download_dir / category;
+
+    // 2. Custom extension mapping
+    std::string ext = ExtractExtensionLower(filename);
+    if (!ext.empty()) {
+        auto it = m_settings.custom_extension_categories.find(ext);
+        if (it != m_settings.custom_extension_categories.end() && !it->second.empty()) {
+            return it->second;
+        }
+    }
+
+    // 3. Fallback to standard extension inference
+    return InferCategoryFromFilename(filename);
+}
+
+std::filesystem::path DownloadController::ResolveCategorySaveDir(const std::string& category, const std::string& url) const {
+    // Priority: Site rule (directory) > Category folder > Subfolder > Default dir
+
+    // 1. Site rules (domain -> custom directory)
+    if (!url.empty()) {
+        std::string host = ExtractHostFromUrl(url);
+        if (!host.empty()) {
+            auto it = m_settings.site_rules.find(host);
+            if (it != m_settings.site_rules.end()) {
+                const std::string& val = it->second;
+                if (val.find('/') != std::string::npos || val.find('\\') != std::string::npos) {
+                    return std::filesystem::path(val);
+                }
+            }
+        }
+    }
+
+    // 2. Configurable category folders
+    if (!category.empty()) {
+        auto it = m_settings.category_folders.find(category);
+        if (it != m_settings.category_folders.end() && !it->second.empty()) {
+            return std::filesystem::path(it->second);
+        }
+    }
+
+    // 3. Subfolder
+    if (m_settings.category_subfolders_enabled && !category.empty() && category != "General") {
+        return m_cfg.default_download_dir / category;
+    }
+
+    // 4. Default download directory
+    return m_cfg.default_download_dir;
 }
 
 Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immediately, bool force_duplicate) {
@@ -188,7 +371,11 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!force_duplicate) {
         for (const auto& [id, existing] : m_tasks) {
-            if (existing.url == task.url &&
+            bool matches = (existing.url == task.url);
+            if (!matches && !task.correlation_id.empty() && existing.correlation_id == task.correlation_id) {
+                matches = true;
+            }
+            if (matches &&
                 (existing.state == TaskState::kQueued ||
                  existing.state == TaskState::kProbing ||
                  existing.state == TaskState::kDownloading ||
@@ -209,9 +396,11 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
     } else {
         task.file_name = PathSanitizer::SanitizeFileName(task.file_name);
     }
-    task.category = InferCategoryFromFilename(task.file_name);
+    if (task.category.empty() || task.category == "General") {
+        task.category = DetermineCategory(task.file_name, task.url);
+    }
     if (task.save_dir.empty()) {
-        task.save_dir = ResolveCategorySaveDir(task.category).string();
+        task.save_dir = ResolveCategorySaveDir(task.category, task.url).string();
     }
     if (task.max_connections == 0) {
         task.max_connections = m_settings.default_connections_per_task;
@@ -221,13 +410,15 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
         task.created_at_ms = NowEpochMs();
     }
     task.updated_at_ms = task.created_at_ms;
-    task.state = (start_immediately && !task.scheduled) ? TaskState::kQueued : TaskState::kPaused;
-    if (task.state == TaskState::kPaused) {
-        task.pause_reason = PauseReason::kUser;
+    if (task.state != TaskState::kCompleted) {
+        task.state = (start_immediately && !task.scheduled) ? TaskState::kQueued : TaskState::kPaused;
+        if (task.state == TaskState::kPaused) {
+            task.pause_reason = PauseReason::kUser;
+        }
+        task.status_detail = (task.state == TaskState::kQueued)
+                                 ? "Queued"
+                                 : (task.scheduled ? ("Scheduled (" + task.schedule_time_local + ")") : "Paused");
     }
-    task.status_detail = (task.state == TaskState::kQueued)
-                             ? "Queued"
-                             : (task.scheduled ? ("Scheduled (" + task.schedule_time_local + ")") : "Paused");
 
     auto db_res = m_store.UpsertTask(task);
     if (!db_res.ok()) {
@@ -255,9 +446,11 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
         task.task_id = GenerateUuidV4();
     }
     task.task_type = TaskType::kHttpFile;
-    task.category = InferCategoryFromFilename(task.file_name);
+    if (task.category.empty() || task.category == "General") {
+        task.category = DetermineCategory(task.file_name, task.url);
+    }
     if (task.save_dir.empty()) {
-        task.save_dir = ResolveCategorySaveDir(task.category).string();
+        task.save_dir = ResolveCategorySaveDir(task.category, task.url).string();
     }
     std::filesystem::create_directories(task.save_dir, ec);
 
@@ -312,12 +505,22 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
             if (scan_res.ok()) {
                 if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
                     task.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
+                    task.error_code = "ERR_THREAT_DETECTED";
+                    task.error_message = "A security threat was detected in the downloaded file.";
                     OPENIDM_LOG_WARN("Controller", "Antivirus threat detected in ingested file: " + dest_path.string());
                 } else if (scan_res.value->status == security::ScanStatus::kClean) {
                     task.status_detail = "Completed (Antivirus Clean)";
+                } else if (scan_res.value->status == security::ScanStatus::kScannerError) {
+                    task.status_detail = "Completed (Antivirus Scan Failed)";
+                } else {
+                    task.status_detail = "Completed (Antivirus Skipped)";
                 }
+            } else {
+                task.status_detail = "Completed (Antivirus Scan Error: " + scan_res.error->message + ")";
             }
         }
+    } else {
+        task.status_detail = "Completed (Not Scanned - Scanner Unavailable)";
     }
 
 #ifdef _WIN32
@@ -382,6 +585,9 @@ Result<stream::StreamProbeResult> DownloadController::ProbeStream(
 }
 
 void DownloadController::ScheduleLoop() {
+    std::map<std::string, std::chrono::steady_clock::time_point> retry_schedule;
+    bool had_active = false;
+
     while (true) {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_cv.wait_for(lock, std::chrono::milliseconds(50), [&]() { return m_stopping; });
@@ -398,6 +604,10 @@ void DownloadController::ScheduleLoop() {
             }
         }
 
+        if (!m_active.empty()) {
+            had_active = true;
+        }
+
         // 1. Check for scheduled tasks that reached their local schedule time
         auto now_time_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
         std::tm local_tm{};
@@ -411,12 +621,123 @@ void DownloadController::ScheduleLoop() {
         std::string cur_hh_mm(time_str);
 
         for (auto& [id, t] : m_tasks) {
+            // Check scheduled start time
             if (t.scheduled && t.state == TaskState::kPaused && !t.schedule_time_local.empty()) {
-                if (cur_hh_mm >= t.schedule_time_local) {
+                if (cur_hh_mm >= t.schedule_time_local &&
+                    (t.schedule_stop_time_local.empty() || cur_hh_mm < t.schedule_stop_time_local)) {
                     t.scheduled = false;
                     t.state = TaskState::kQueued;
                     t.status_detail = "Queued (Schedule Started)";
                     m_store.UpsertTask(t);
+                }
+            }
+            // Check scheduled stop time on active/queued tasks
+            if (!t.schedule_stop_time_local.empty() && cur_hh_mm >= t.schedule_stop_time_local) {
+                if (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kQueued) {
+                    auto ait = m_active.find(id);
+                    if (ait != m_active.end()) {
+                        ait->second->pause_requested.store(true);
+                    }
+                    t.state = TaskState::kPaused;
+                    t.pause_reason = PauseReason::kUser;
+                    t.status_detail = "Paused (Scheduled Stop " + t.schedule_stop_time_local + ")";
+                    m_store.UpsertTask(t);
+                }
+            }
+        }
+
+        // 2. Check multi-queue schedules
+        auto queues_res = m_store.ListQueues();
+        if (queues_res.ok()) {
+            for (const auto& q : *queues_res.value) {
+                if (q.schedule_enabled) {
+                    if (!q.start_time_local.empty() && cur_hh_mm >= q.start_time_local &&
+                        (q.stop_time_local.empty() || cur_hh_mm < q.stop_time_local)) {
+                        for (auto& [id, t] : m_tasks) {
+                            if (t.queue_id == q.queue_id && t.state == TaskState::kPaused &&
+                                t.pause_reason != PauseReason::kUser) {
+                                t.state = TaskState::kQueued;
+                                t.status_detail = "Queued (Queue Schedule Started)";
+                                m_store.UpsertTask(t);
+                            }
+                        }
+                    } else if (!q.stop_time_local.empty() && cur_hh_mm >= q.stop_time_local) {
+                        for (auto& [id, t] : m_tasks) {
+                            if (t.queue_id == q.queue_id &&
+                                (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kQueued)) {
+                                auto ait = m_active.find(id);
+                                if (ait != m_active.end()) {
+                                    ait->second->pause_requested.store(true);
+                                }
+                                t.state = TaskState::kPaused;
+                                t.status_detail = "Paused (Queue Scheduled Stop)";
+                                m_store.UpsertTask(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Exponential backoff auto-retry for transient network errors
+        auto now_steady = std::chrono::steady_clock::now();
+        for (auto& [id, t] : m_tasks) {
+            if (t.state == TaskState::kFailed && t.retry_count < m_settings.max_auto_retries) {
+                bool is_transient = (t.error_code == "ERR_NETWORK_TIMEOUT" ||
+                                     t.error_code == "ERR_CONNECTION_RESET" ||
+                                     t.error_code == "ERR_HTTP_TIMEOUT" ||
+                                     t.error_code == "ERR_HTTP_503" ||
+                                     t.error_code == "ERR_HTTP_502" ||
+                                     t.error_code == "ERR_HTTP_504" ||
+                                     t.error_code == "ERR_HTTP_429" ||
+                                     t.error_code == "ERR_FTP_TIMEOUT" ||
+                                     t.error_code == "ERR_STREAM_WORKER_CRASH");
+                if (is_transient) {
+                    auto rit = retry_schedule.find(id);
+                    if (rit == retry_schedule.end()) {
+                        uint32_t delay_sec = m_settings.retry_interval_sec * (1u << std::min<uint32_t>(t.retry_count, 6u));
+                        retry_schedule[id] = now_steady + std::chrono::seconds(delay_sec);
+                        t.status_detail = "Retrying in " + std::to_string(delay_sec) + "s (Attempt " +
+                                          std::to_string(t.retry_count + 1) + "/" + std::to_string(m_settings.max_auto_retries) + ")";
+                        m_store.UpsertTask(t);
+                    } else if (now_steady >= rit->second) {
+                        retry_schedule.erase(rit);
+                        ++t.retry_count;
+                        t.state = TaskState::kQueued;
+                        t.status_detail = "Queued (Auto-Retry #" + std::to_string(t.retry_count) + ")";
+                        t.error_code.clear();
+                        t.error_message.clear();
+                        m_store.UpsertTask(t);
+                    }
+                }
+            } else if (t.state != TaskState::kFailed) {
+                retry_schedule.erase(id);
+            }
+        }
+
+        // 4. Queue / Global Post-Completion Action
+        if (m_active.empty() && had_active) {
+            bool has_pending = false;
+            for (const auto& [id, t] : m_tasks) {
+                if (t.state == TaskState::kQueued || t.state == TaskState::kProbing || t.state == TaskState::kDownloading) {
+                    has_pending = true;
+                    break;
+                }
+            }
+            if (!has_pending) {
+                had_active = false;
+                std::string action = m_settings.queue_completion_action;
+                if (action == "SLEEP" || action == "SHUTDOWN") {
+                    m_settings.queue_completion_action = "NONE";
+                    SaveSettingsLocked();
+                    OPENIDM_LOG_INFO("Controller", "All downloads completed. Executing post-completion action: " + action);
+#ifdef _WIN32
+                    if (action == "SLEEP") {
+                        TriggerSystemSleep();
+                    } else if (action == "SHUTDOWN") {
+                        TriggerSystemShutdown();
+                    }
+#endif
                 }
             }
         }
@@ -440,7 +761,8 @@ void DownloadController::ScheduleLoop() {
             m_tasks[next_id].state = TaskState::kProbing;
             m_tasks[next_id].status_detail = "Starting transfer...";
             auto ctrl = std::make_shared<ActiveTaskControl>();
-            ctrl->task_speed_limit_bps.store(m_global_speed_limit_bps.load());
+            ctrl->task_speed_limit_bps.store(
+                m_tasks[next_id].speed_limit_bps > 0 ? m_tasks[next_id].speed_limit_bps : m_global_speed_limit_bps.load());
             m_active[next_id] = ctrl;
             ctrl->worker_thread = std::thread(&DownloadController::RunTaskWorker, this, next_id, ctrl);
         }
@@ -492,10 +814,12 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 ctrl->cancel_requested,
                 ctrl->task_speed_limit_bps,
                 [&](const ftp::FtpProgress& fp) {
+                    if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) return;
                     {
                         std::lock_guard<std::mutex> lock(m_mutex);
                         auto it = m_tasks.find(task_id);
                         if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                            if (it->second.state == TaskState::kCanceled || it->second.state == TaskState::kPaused) return;
                             it->second.state = fp.state;
                             it->second.downloaded_bytes = fp.downloaded_bytes;
                             it->second.total_bytes = fp.total_bytes;
@@ -505,6 +829,7 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                     }
                 },
                 m_global_limiter,
+                &m_global_speed_limit_bps,
                 10000,
                 m_cfg.allow_loopback);
 
@@ -519,14 +844,22 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             } else {
                 if (ctrl->cancel_requested.load()) {
                     local_task.state = TaskState::kCanceled;
+                    local_task.status_detail = "Canceled";
                 } else if (ctrl->pause_requested.load()) {
                     local_task.state = TaskState::kPaused;
+                    local_task.status_detail = "Paused";
                 } else {
                     local_task.state = TaskState::kFailed;
                     local_task.error_code = dl_res.error->code;
                     local_task.error_message = dl_res.error->message;
+                    local_task.status_detail = "Failed: " + dl_res.error->message;
                 }
             }
+        } else {
+            local_task.state = TaskState::kFailed;
+            local_task.error_code = ftp_url_res.error->code;
+            local_task.error_message = ftp_url_res.error->message;
+            local_task.status_detail = "Failed: " + ftp_url_res.error->message;
         }
     } else if (local_task.task_type == TaskType::kTorrent) {
         torrent::TorrentInfo tinfo;
@@ -544,9 +877,11 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             ctrl->cancel_requested,
             ctrl->task_speed_limit_bps,
             [&](const torrent::TorrentProgress& tp) {
+                if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) return;
                 std::lock_guard<std::mutex> lock(m_mutex);
                 auto it = m_tasks.find(task_id);
                 if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                    if (it->second.state == TaskState::kCanceled || it->second.state == TaskState::kPaused) return;
                     it->second.state = tp.state;
                     it->second.downloaded_bytes = tp.downloaded_bytes;
                     it->second.total_bytes = tp.total_bytes;
@@ -557,7 +892,12 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 }
             },
             m_global_limiter);
-        (void)tor_dl;
+        if (!tor_dl.ok()) {
+            local_task.state = TaskState::kFailed;
+            local_task.error_code = tor_dl.error->code;
+            local_task.error_message = tor_dl.error->message;
+            local_task.status_detail = "Failed: " + tor_dl.error->message;
+        }
     } else if (local_task.task_type == TaskType::kRtsp) {
         stream::RtspMmsAdapter rtsp_ad(m_cfg.ffmpeg_binary_path, m_cfg.allow_loopback);
         auto rtsp_res = rtsp_ad.ExecuteStreamCapture(
@@ -565,55 +905,156 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             ctrl->pause_requested,
             ctrl->cancel_requested,
             [&](const stream::RtspProgress& rp) {
+                if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) return;
                 std::lock_guard<std::mutex> lock(m_mutex);
                 auto it = m_tasks.find(task_id);
                 if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                    if (it->second.state == TaskState::kCanceled || it->second.state == TaskState::kPaused) return;
                     it->second.state = rp.state;
                     it->second.downloaded_bytes = rp.downloaded_bytes;
                     it->second.speed_bps = rp.speed_bps;
                     it->second.status_detail = rp.status_detail;
                 }
             });
-        (void)rtsp_res;
+        if (!rtsp_res.ok()) {
+            if (ctrl->cancel_requested.load()) {
+                local_task.state = TaskState::kCanceled;
+                local_task.status_detail = "Canceled";
+            } else if (ctrl->pause_requested.load()) {
+                local_task.state = TaskState::kPaused;
+                local_task.status_detail = "Paused";
+            } else {
+                local_task.state = TaskState::kFailed;
+                local_task.error_code = rtsp_res.error->code;
+                local_task.error_message = rtsp_res.error->message;
+                local_task.status_detail = "Failed: " + rtsp_res.error->message;
+            }
+        }
     } else if (local_task.task_type == TaskType::kHttpFile) {
         brisk::EngineConfig ecfg;
         ecfg.stall_timeout_ms = stall_timeout_ms;
         ecfg.min_split_bytes = min_split_bytes;
         ecfg.allow_loopback_redirect = m_cfg.allow_loopback;
 
-        brisk::HttpDownloadEngine engine(ecfg);
-        auto res = engine.ExecuteDownload(
-            local_task,
-            ctrl->pause_requested,
-            ctrl->cancel_requested,
-            ctrl->task_speed_limit_bps,
-            [&](const brisk::EngineProgress& ep) {
+        // Apply proxy & network options
+        ecfg.net_opts.proxy_mode = m_settings.proxy_mode;
+        ecfg.net_opts.proxy_server = m_settings.proxy_server;
+        ecfg.net_opts.proxy_bypass = m_settings.proxy_bypass;
+        ecfg.net_opts.proxy_username = m_settings.proxy_username;
+        if (!m_settings.proxy_password_encrypted.empty()) {
+            auto raw = HexStrToBytes(m_settings.proxy_password_encrypted);
+            auto unp = CryptoUtils::UnprotectSecret(raw);
+            if (unp.ok()) ecfg.net_opts.proxy_password = *unp.value;
+        }
+        ecfg.net_opts.server_auth_username = m_settings.server_auth_username;
+        if (!m_settings.server_auth_password_encrypted.empty()) {
+            auto raw = HexStrToBytes(m_settings.server_auth_password_encrypted);
+            auto unp = CryptoUtils::UnprotectSecret(raw);
+            if (unp.ok()) ecfg.net_opts.server_auth_password = *unp.value;
+        }
+        ecfg.net_opts.enable_integrated_auth = true;
+
+        std::vector<std::string> urls_to_try;
+        urls_to_try.push_back(local_task.url);
+        for (const auto& alt : local_task.alternate_urls) {
+            if (!alt.empty() && alt != local_task.url) {
+                urls_to_try.push_back(alt);
+            }
+        }
+
+        Result<std::filesystem::path> res = Result<std::filesystem::path>::Err("ERR_NOT_ATTEMPTED", "Transfer not attempted");
+        size_t start_idx = (local_task.current_url_index < urls_to_try.size()) ? local_task.current_url_index : 0;
+
+        for (size_t uidx = start_idx; uidx < urls_to_try.size(); ++uidx) {
+            if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) break;
+
+            const std::string& candidate_url = urls_to_try[uidx];
+            if (uidx != start_idx) {
+                OPENIDM_LOG_INFO("Controller", "Attempting alternate mirror (" + std::to_string(uidx) + "): " + candidate_url);
+                auto probe_res = brisk::HttpClient::ProbeResource(
+                    candidate_url, local_task.headers, local_task.auth_headers, ecfg.net_opts, m_cfg.allow_loopback);
+                if (probe_res.ok()) {
+                    if (local_task.total_bytes > 0 && probe_res.value->has_content_length && probe_res.value->content_length > 0) {
+                        if (probe_res.value->content_length != local_task.total_bytes) {
+                            OPENIDM_LOG_WARN("Controller", "Mirror Content-Length mismatch (" +
+                                             std::to_string(probe_res.value->content_length) + " vs " +
+                                             std::to_string(local_task.total_bytes) + "). Skipping mirror: " + candidate_url);
+                            continue;
+                        }
+                    }
+                } else {
+                    OPENIDM_LOG_WARN("Controller", "Mirror probe failed: " + candidate_url + " (" + probe_res.error->message + ")");
+                    continue;
+                }
+                local_task.url = candidate_url;
+                local_task.current_url_index = static_cast<uint32_t>(uidx);
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     auto it = m_tasks.find(task_id);
-                    if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
-                        auto& t = it->second;
-                        t.state = ep.state;
-                        t.downloaded_bytes = ep.downloaded_bytes;
-                        t.total_bytes = ep.total_bytes;
-                        t.speed_bps = ep.speed_bps;
-                        t.range_supported = ep.range_supported;
-                        t.status_detail = local_task.status_detail;
-                        if (!ep.resolved_filename.empty()) t.file_name = ep.resolved_filename;
-                        if (!ep.etag.empty()) t.etag = ep.etag;
-                        if (!ep.last_modified.empty()) t.last_modified = ep.last_modified;
-                        t.segments = ep.segments;
+                    if (it != m_tasks.end()) {
+                        it->second.url = candidate_url;
+                        it->second.current_url_index = static_cast<uint32_t>(uidx);
+                        m_store.UpsertTask(it->second);
                     }
                 }
-                auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_db_sync).count() >= 500) {
-                    last_db_sync = now;
-                    m_store.UpdateTaskProgressAndSegments(
-                        task_id, ep.state, ep.downloaded_bytes, ep.total_bytes, ep.range_supported, ep.segments);
-                }
-            },
-            m_global_limiter);
-        (void)res;
+            }
+
+            brisk::HttpDownloadEngine engine(ecfg);
+            res = engine.ExecuteDownload(
+                local_task,
+                ctrl->pause_requested,
+                ctrl->cancel_requested,
+                ctrl->task_speed_limit_bps,
+                [&](const brisk::EngineProgress& ep) {
+                    if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) return;
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        auto it = m_tasks.find(task_id);
+                        if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                            auto& t = it->second;
+                            if (t.state == TaskState::kCanceled || t.state == TaskState::kPaused) return;
+                            t.state = ep.state;
+                            t.downloaded_bytes = ep.downloaded_bytes;
+                            t.total_bytes = ep.total_bytes;
+                            t.speed_bps = ep.speed_bps;
+                            t.range_supported = ep.range_supported;
+                            t.status_detail = local_task.status_detail;
+                            if (!ep.resolved_filename.empty()) t.file_name = ep.resolved_filename;
+                            if (!ep.etag.empty()) t.etag = ep.etag;
+                            if (!ep.last_modified.empty()) t.last_modified = ep.last_modified;
+                            t.segments = ep.segments;
+                        }
+                    }
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_db_sync).count() >= 500) {
+                        last_db_sync = now;
+                        if (!ctrl->cancel_requested.load() && !ctrl->pause_requested.load()) {
+                            m_store.UpdateTaskProgressAndSegments(
+                                task_id, ep.state, ep.downloaded_bytes, ep.total_bytes, ep.range_supported, ep.segments);
+                        }
+                    }
+                },
+                m_global_limiter,
+                &m_global_speed_limit_bps);
+
+            if (res.ok() || ctrl->cancel_requested.load() || ctrl->pause_requested.load()) {
+                break;
+            }
+        }
+        if (!res.ok()) {
+            if (ctrl->cancel_requested.load()) {
+                local_task.state = TaskState::kCanceled;
+                local_task.status_detail = "Canceled";
+            } else if (ctrl->pause_requested.load()) {
+                local_task.state = TaskState::kPaused;
+                local_task.status_detail = "Paused";
+            } else {
+                local_task.state = TaskState::kFailed;
+                local_task.error_code = res.error->code;
+                local_task.error_message = res.error->message;
+                local_task.status_detail = "Failed: " + res.error->message;
+            }
+        }
     } else {
         stream::StreamAdapterConfig scfg{
             m_cfg.nm3u8dl_binary_path,
@@ -631,9 +1072,11 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                       local_task.stream_options.cached_manifest_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos ||
                       local_task.stream_options.cached_manifest_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos);
         auto progress_cb = [&](const stream::StreamProgress& sp) {
+            if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) return;
             std::lock_guard<std::mutex> lock(m_mutex);
             auto it = m_tasks.find(task_id);
             if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                if (it->second.state == TaskState::kCanceled || it->second.state == TaskState::kPaused) return;
                 auto& t = it->second;
                 t.state = sp.phase;
                 t.downloaded_bytes = sp.downloaded_bytes;
@@ -661,11 +1104,32 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 ctrl->task_speed_limit_bps.load(),
                 progress_cb);
         }
-        (void)res;
+        if (!res.ok()) {
+            if (ctrl->cancel_requested.load()) {
+                local_task.state = TaskState::kCanceled;
+                local_task.status_detail = "Canceled";
+            } else if (ctrl->pause_requested.load()) {
+                local_task.state = TaskState::kPaused;
+                local_task.status_detail = "Paused";
+            } else {
+                local_task.state = TaskState::kFailed;
+                local_task.error_code = res.error->code;
+                local_task.error_message = res.error->message;
+                local_task.status_detail = "Failed: " + res.error->message;
+            }
+        }
     }
 
     local_task.speed_bps = 0;
     local_task.updated_at_ms = NowEpochMs();
+
+    if (ctrl->cancel_requested.load()) {
+        local_task.state = TaskState::kCanceled;
+        local_task.status_detail = "Canceled";
+    } else if (ctrl->pause_requested.load() && local_task.state != TaskState::kCompleted) {
+        local_task.state = TaskState::kPaused;
+        local_task.status_detail = "Paused";
+    }
 
     // BUG-007 Fix: Granular merge under m_mutex without resurrecting deleted tasks
     bool should_persist = false;
@@ -676,6 +1140,11 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             auto it = m_tasks.find(task_id);
             if (it != m_tasks.end()) {
                 auto& t = it->second;
+                // Terminal state protection: Never overwrite a user-canceled task with completed
+                if (t.state == TaskState::kCanceled && local_task.state == TaskState::kCompleted) {
+                    local_task.state = TaskState::kCanceled;
+                    local_task.status_detail = "Canceled";
+                }
                 t.state = local_task.state;
                 t.file_name = local_task.file_name;
                 t.category = local_task.category;
@@ -708,12 +1177,22 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                             if (scan_res.ok()) {
                                 if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
                                     t.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
+                                    t.error_code = "ERR_THREAT_DETECTED";
+                                    t.error_message = "A security threat was detected in the downloaded file.";
                                     OPENIDM_LOG_WARN("Controller", "Antivirus threat detected: " + final_p.string());
                                 } else if (scan_res.value->status == security::ScanStatus::kClean) {
                                     t.status_detail = "Completed (Antivirus Clean)";
+                                } else if (scan_res.value->status == security::ScanStatus::kScannerError) {
+                                    t.status_detail = "Completed (Antivirus Scan Failed)";
+                                } else {
+                                    t.status_detail = "Completed (Antivirus Skipped)";
                                 }
+                            } else {
+                                t.status_detail = "Completed (Antivirus Scan Error: " + scan_res.error->message + ")";
                             }
                         }
+                    } else {
+                        t.status_detail = "Completed (Not Scanned - Scanner Unavailable)";
                     }
 #ifdef _WIN32
                     if (m_settings.show_completion_notification) {
@@ -776,8 +1255,11 @@ Result<void> DownloadController::PauseTask(const std::string& task_id) {
         }
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_tasks.find(task_id);
-        if (it != m_tasks.end() && it->second.state == TaskState::kPaused) {
+        if (it != m_tasks.end() && it->second.state != TaskState::kCompleted) {
+            it->second.state = TaskState::kPaused;
+            it->second.status_detail = "Paused";
             it->second.pause_reason = PauseReason::kUser;
+            it->second.speed_bps = 0;
             m_store.UpsertTask(it->second);
         }
     }
@@ -833,6 +1315,22 @@ Result<void> DownloadController::CancelTask(const std::string& task_id) {
     if (ctrl) {
         while (!ctrl->finished.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_tasks.find(task_id);
+        if (it != m_tasks.end()) {
+            std::error_code ec;
+            if (!it->second.part_path.empty()) {
+                std::filesystem::remove_all(it->second.part_path, ec);
+            }
+            it->second.part_path.clear();
+            it->second.segments.clear();
+            it->second.downloaded_bytes = 0;
+            it->second.speed_bps = 0;
+            it->second.state = TaskState::kCanceled;
+            it->second.status_detail = "Canceled";
+            it->second.auth_headers.clear();
+            m_store.UpsertTask(it->second);
         }
     }
     return Result<void>::Ok();
@@ -1031,6 +1529,73 @@ uint64_t DownloadController::GetGlobalSpeedLimit() const {
     return m_global_speed_limit_bps.load();
 }
 
+Result<void> DownloadController::SetTaskSpeedLimit(const std::string& task_id, uint64_t bps) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task_id);
+    if (it == m_tasks.end() || m_deleted_tasks.count(task_id)) {
+        return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
+    }
+    it->second.speed_limit_bps = bps;
+    auto ait = m_active.find(task_id);
+    if (ait != m_active.end()) {
+        ait->second->task_speed_limit_bps.store(bps > 0 ? bps : m_global_speed_limit_bps.load());
+    }
+    m_store.UpsertTask(it->second);
+    return Result<void>::Ok();
+}
+
+uint64_t DownloadController::GetTaskSpeedLimit(const std::string& task_id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task_id);
+    if (it != m_tasks.end()) return it->second.speed_limit_bps;
+    return 0;
+}
+
+Result<void> DownloadController::AddAlternateUrl(const std::string& task_id, const std::string& alt_url) {
+    if (alt_url.empty()) {
+        return Result<void>::Err("ERR_INVALID_URL", "Alternate URL cannot be empty");
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task_id);
+    if (it == m_tasks.end() || m_deleted_tasks.count(task_id)) {
+        return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
+    }
+    for (const auto& existing : it->second.alternate_urls) {
+        if (existing == alt_url) return Result<void>::Ok();
+    }
+    it->second.alternate_urls.push_back(alt_url);
+    m_store.UpsertTask(it->second);
+    return Result<void>::Ok();
+}
+
+std::vector<std::string> DownloadController::GetAlternateUrls(const std::string& task_id) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task_id);
+    if (it != m_tasks.end()) return it->second.alternate_urls;
+    return {};
+}
+
+Result<void> DownloadController::SetTaskSchedule(
+    const std::string& task_id,
+    const std::string& start_time_local,
+    const std::string& stop_time_local) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task_id);
+    if (it == m_tasks.end() || m_deleted_tasks.count(task_id)) {
+        return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
+    }
+    it->second.scheduled = !start_time_local.empty();
+    it->second.schedule_time_local = start_time_local;
+    it->second.schedule_stop_time_local = stop_time_local;
+    if (it->second.scheduled && it->second.state == TaskState::kQueued) {
+        it->second.state = TaskState::kPaused;
+        it->second.status_detail = "Scheduled (" + start_time_local + ")";
+    }
+    m_store.UpsertTask(it->second);
+    m_cv.notify_all();
+    return Result<void>::Ok();
+}
+
 AppSettings DownloadController::GetSettings() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_settings;
@@ -1045,6 +1610,8 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
         m_settings.stall_timeout_ms = std::clamp(m_settings.stall_timeout_ms, 500, 60000);
         m_settings.min_split_bytes = std::clamp<uint64_t>(m_settings.min_split_bytes, 65536ULL, 10485760ULL);
         m_settings.min_capture_size_bytes = std::clamp<uint64_t>(m_settings.min_capture_size_bytes, 0ULL, 10737418240ULL);
+        m_settings.max_auto_retries = std::clamp<uint32_t>(m_settings.max_auto_retries, 0u, 50u);
+        m_settings.retry_interval_sec = std::clamp<uint32_t>(m_settings.retry_interval_sec, 1u, 3600u);
         if (m_settings.theme != "dark" && m_settings.theme != "light" && m_settings.theme != "system") {
             m_settings.theme = "dark";
         }
@@ -1058,7 +1625,10 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
         m_max_concurrent.store(m_settings.max_concurrent_tasks);
         m_global_speed_limit_bps.store(m_settings.speed_limit_bps);
         for (auto& [id, ctrl] : m_active) {
-            ctrl->task_speed_limit_bps.store(m_settings.speed_limit_bps);
+            uint64_t task_limit = 0;
+            auto tit = m_tasks.find(id);
+            if (tit != m_tasks.end()) task_limit = tit->second.speed_limit_bps;
+            ctrl->task_speed_limit_bps.store(task_limit > 0 ? task_limit : m_settings.speed_limit_bps);
         }
         auto sres = SaveSettingsLocked();
         if (!sres.ok()) return sres;
@@ -1085,6 +1655,21 @@ Result<AppSettings> DownloadController::RestoreDefaultSettings() {
     defaults.start_minimized = false;
     defaults.reduced_motion = false;
     defaults.show_completion_notification = true;
+
+    defaults.proxy_mode = "system";
+    defaults.proxy_server = "";
+    defaults.proxy_bypass = "";
+    defaults.proxy_username = "";
+    defaults.proxy_password_encrypted = "";
+    defaults.server_auth_username = "";
+    defaults.server_auth_password_encrypted = "";
+    defaults.category_folders = {};
+    defaults.custom_extension_categories = {};
+    defaults.site_rules = {};
+    defaults.max_auto_retries = 5;
+    defaults.retry_interval_sec = 15;
+    defaults.queue_completion_action = "NONE";
+
     auto ures = UpdateSettings(defaults);
     if (!ures.ok()) return Result<AppSettings>::Err(ures.error->code, ures.error->message);
     return Result<AppSettings>::Ok(defaults);

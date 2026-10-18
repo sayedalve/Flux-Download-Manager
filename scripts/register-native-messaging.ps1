@@ -1,26 +1,65 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Native Messaging Host Per-User Registration Script
+# Flux Download Manager -- Native Messaging Host Per-User Registration Script (v0.3.0)
 # Configures HKCU registry keys for Chrome, Edge, Brave, and Firefox without requiring admin rights.
 # Supports portable mode by pointing directly to the local flux-nmh.exe executable.
 
+[CmdletBinding()]
 param(
     [string]$ExtensionId = "",
     [string]$HostExePath = "",
-    [switch]$Unregister = $false
+    [switch]$Unregister = $false,
+    [switch]$Uninstall = $false,
+    [switch]$Clean = $false
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
+$doUnregister = $Unregister -or $Uninstall -or $Clean
 
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "   Flux Download Manager -- Native Messaging Host Setup (HKCU)   " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
-# 1. Locate flux-nmh.exe
+# 1. Handle Unregistration / Clean
+if ($doUnregister) {
+    Write-Host "`n==> Removing Native Messaging Host Registrations from HKCU..." -ForegroundColor Yellow
+    $regPaths = @(
+        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.flux.downloadmanager",
+        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.flux.downloadmanager",
+        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.flux.downloadmanager",
+        "HKCU:\Software\Mozilla\NativeMessagingHosts\com.flux.downloadmanager",
+        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.flux.native",
+        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.flux.native",
+        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\org.flux.native",
+        "HKCU:\Software\Mozilla\NativeMessagingHosts\org.flux.native",
+        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.openidm.native",
+        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.openidm.native",
+        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\org.openidm.native",
+        "HKCU:\Software\Mozilla\NativeMessagingHosts\org.openidm.native"
+    )
+    foreach ($rp in $regPaths) {
+        if (Test-Path $rp) {
+            Remove-Item -Path $rp -Recurse -Force
+            Write-Host "  [-] Removed: $rp" -ForegroundColor Gray
+        }
+    }
+
+    $manifestDir = Join-Path $env:LOCALAPPDATA "Flux Download Manager\manifests"
+    if (Test-Path $manifestDir) {
+        Remove-Item -Recurse -Force $manifestDir -ErrorAction SilentlyContinue
+        Write-Host "  [-] Cleaned manifest cache: $manifestDir" -ForegroundColor Gray
+    }
+
+    Write-Host "`nNative Messaging Host unregistration completed successfully." -ForegroundColor Green
+    exit 0
+}
+
+# 2. Locate flux-nmh.exe
 if (-not $HostExePath) {
     $candidates = @(
         (Join-Path $RepoRoot "build\win-x64\Release\flux-nmh.exe"),
+        (Join-Path $RepoRoot "build\Release\flux-nmh.exe"),
         (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe"),
         (Join-Path $RepoRoot "dist\flux-nmh.exe"),
         (Join-Path $RepoRoot "flux-nmh.exe")
@@ -33,15 +72,13 @@ if (-not $HostExePath) {
     }
 }
 
-if (-not $Unregister) {
-    if (-not $HostExePath -or -not (Test-Path $HostExePath)) {
-        Write-Error "flux-nmh.exe could not be found! Please build the solution first or specify -HostExePath."
-        exit 1
-    }
-    Write-Host "[+] Found Native Host executable: $HostExePath" -ForegroundColor Green
+if (-not $HostExePath -or -not (Test-Path $HostExePath)) {
+    Write-Error "flux-nmh.exe could not be found! Please build the solution first or specify -HostExePath.`nSearched candidates:`n - $($candidates -join "`n - ")"
+    exit 1
 }
+Write-Host "[+] Found Native Host executable: $HostExePath" -ForegroundColor Green
 
-# 2. Determine allowed origins
+# 3. Determine Allowed Origins
 $authoritativeFluxId = "mdgmlcnpodoehidlplplfegngnjnilap"
 $authoritativeOrigin = "chrome-extension://$authoritativeFluxId/"
 
@@ -141,7 +178,7 @@ if ($ExtensionId) {
     Write-Host "[+] Total authorized Chromium origins: $($allowedOrigins -join ', ')" -ForegroundColor Cyan
 }
 
-# 3. Create Manifest Directory in %LOCALAPPDATA%\Flux Download Manager\manifests
+# 4. Create Manifest Directory in %LOCALAPPDATA%\Flux Download Manager\manifests
 $manifestDir = Join-Path $env:LOCALAPPDATA "Flux Download Manager\manifests"
 if (-not (Test-Path $manifestDir)) {
     New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
@@ -150,52 +187,29 @@ if (-not (Test-Path $manifestDir)) {
 $chromiumManifestPath = Join-Path $manifestDir "com.flux.downloadmanager.chromium.json"
 $firefoxManifestPath = Join-Path $manifestDir "com.flux.downloadmanager.firefox.json"
 
-if ($Unregister) {
-    Write-Host "`n==> Removing Native Messaging Registrations from HKCU..." -ForegroundColor Yellow
-    $regPaths = @(
-        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.flux.downloadmanager",
-        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\com.flux.downloadmanager",
-        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.flux.downloadmanager",
-        "HKCU:\Software\Mozilla\NativeMessagingHosts\com.flux.downloadmanager",
-        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.flux.native",
-        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.flux.native",
-        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\org.flux.native",
-        "HKCU:\Software\Google\Chrome\NativeMessagingHosts\org.openidm.native",
-        "HKCU:\Software\Microsoft\Edge\NativeMessagingHosts\org.openidm.native",
-        "HKCU:\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\org.openidm.native"
-    )
-    foreach ($rp in $regPaths) {
-        if (Test-Path $rp) {
-            Remove-Item -Path $rp -Recurse -Force
-            Write-Host "  [-] Removed: $rp" -ForegroundColor Gray
-        }
-    }
-    Write-Host "`nUnregistration complete." -ForegroundColor Green
-    exit 0
+function Write-Utf8NoBom([string]$FilePath, [string]$Content) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($FilePath, $Content, $utf8NoBom)
 }
 
-# 4. Generate Chromium Manifest
-$chromiumManifest = @{
+# 5. Generate Chromium Manifest
+$chromiumManifest = [ordered]@{
     name = "com.flux.downloadmanager"
     description = "Flux Download Manager Native Messaging Host"
     path = $HostExePath
     type = "stdio"
     allowed_origins = $allowedOrigins
 }
-function Write-Utf8NoBom([string]$FilePath, [string]$Content) {
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($FilePath, $Content, $utf8NoBom)
-}
 
 $chromiumJson = $chromiumManifest | ConvertTo-Json -Depth 5
 Write-Utf8NoBom -FilePath $chromiumManifestPath -Content $chromiumJson
 Write-Host "[+] Wrote Chromium manifest (UTF-8 no BOM): $chromiumManifestPath" -ForegroundColor Green
 
-# 4.1 Generate Backwards-Compatible Alias Manifests (Name must match registry key for Chromium)
+# 5.1 Generate Backwards-Compatible Alias Manifests
 $aliasManifests = @{}
 foreach ($alias in @("org.flux.native", "org.openidm.native")) {
     $aliasPath = Join-Path $manifestDir "$alias.chromium.json"
-    $aliasManifest = @{
+    $aliasManifest = [ordered]@{
         name = $alias
         description = "Flux Download Manager Native Messaging Host ($alias)"
         path = $HostExePath
@@ -207,19 +221,24 @@ foreach ($alias in @("org.flux.native", "org.openidm.native")) {
     Write-Host "[+] Wrote Alias manifest ($alias, UTF-8 no BOM): $aliasPath" -ForegroundColor Green
 }
 
-# 5. Generate Firefox Manifest
-$firefoxManifest = @{
+# 6. Generate Firefox Manifest
+$firefoxManifest = [ordered]@{
     name = "com.flux.downloadmanager"
     description = "Flux Download Manager Native Messaging Host"
     path = $HostExePath
     type = "stdio"
-    allowed_extensions = @("flux-extension@fluxdownloadmanager.org", "flux@openidm.org", "flux@downloadmanager.org", "extension@openidm.org")
+    allowed_extensions = @(
+        "flux-extension@fluxdownloadmanager.org",
+        "flux@downloadmanager.org",
+        "flux@openidm.org",
+        "extension@openidm.org"
+    )
 }
 $firefoxJson = $firefoxManifest | ConvertTo-Json -Depth 5
 Write-Utf8NoBom -FilePath $firefoxManifestPath -Content $firefoxJson
 Write-Host "[+] Wrote Firefox manifest (UTF-8 no BOM): $firefoxManifestPath" -ForegroundColor Green
 
-# 6. Register HKCU Keys for Browsers
+# 7. Register HKCU Keys for Browsers
 Write-Host "`n==> Registering Browser Native Messaging Keys in HKCU..." -ForegroundColor Cyan
 
 $targets = @(

@@ -30,6 +30,15 @@
 namespace {
 
 void WriteStdoutFrame(const std::string& json_str) {
+    if (json_str.size() > 1024 * 1024) {
+        // Native messaging frame limit is 1 MiB (1,048,576 bytes). Send an RPC error frame instead of triggering browser host termination.
+        std::string err_frame = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Response exceeds 1MB limit\"}}";
+        uint32_t err_len = static_cast<uint32_t>(err_frame.size());
+        std::fwrite(&err_len, sizeof(err_len), 1, stdout);
+        std::fwrite(err_frame.data(), 1, err_frame.size(), stdout);
+        std::fflush(stdout);
+        return;
+    }
     uint32_t len = static_cast<uint32_t>(json_str.size());
     std::fwrite(&len, sizeof(len), 1, stdout);
     std::fwrite(json_str.data(), 1, json_str.size(), stdout);
@@ -40,8 +49,17 @@ void WriteStdoutFrame(const std::string& json_str) {
 HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem::path& daemon_bin_path) {
     std::wstring wpipe(pipe_path.begin(), pipe_path.end());
     auto try_connect = [&]() -> HANDLE {
-        HANDLE h = CreateFileW(wpipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) return h;
+        for (int retry = 0; retry < 5; ++retry) {
+            HANDLE h = CreateFileW(wpipe.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h != INVALID_HANDLE_VALUE) return h;
+            DWORD err = GetLastError();
+            if (err == ERROR_PIPE_BUSY) {
+                if (WaitNamedPipeW(wpipe.c_str(), 3000)) {
+                    continue;
+                }
+            }
+            break;
+        }
         return INVALID_HANDLE_VALUE;
     };
 

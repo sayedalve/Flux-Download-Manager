@@ -121,12 +121,22 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
     TaskModel& task,
     std::atomic<bool>& pause_requested,
     std::atomic<bool>& cancel_requested,
-    std::atomic<uint64_t>& speed_limit_bps,
+    std::atomic<uint64_t>& task_speed_limit_bps,
     ProgressCallback on_progress,
-    std::shared_ptr<TokenBucketLimiter> shared_limiter) {
+    std::shared_ptr<TokenBucketLimiter> global_limiter,
+    std::atomic<uint64_t>* global_speed_limit_bps) {
 
-    auto local_limiter = std::make_shared<TokenBucketLimiter>();
-    TokenBucketLimiter& limiter = shared_limiter ? *shared_limiter : *local_limiter;
+    auto task_limiter = std::make_shared<TokenBucketLimiter>();
+
+    auto consume_both_limiters = [&](size_t bytes, std::atomic<bool>& cancel_flag) {
+        if (bytes == 0) return;
+        if (task_speed_limit_bps.load(std::memory_order_relaxed) > 0) {
+            task_limiter->Consume(bytes, task_speed_limit_bps, cancel_flag);
+        }
+        if (global_limiter && global_speed_limit_bps && global_speed_limit_bps->load(std::memory_order_relaxed) > 0) {
+            global_limiter->Consume(bytes, *global_speed_limit_bps, cancel_flag);
+        }
+    };
 
     std::map<std::string, std::string> req_headers = task.headers;
     for (const auto& [k, v] : task.auth_headers) {
@@ -160,7 +170,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         },
         [&](const uint8_t*, size_t) -> bool {
             return true;
-        });
+        },
+        m_cfg.net_opts);
 
     if (!probe_res.ok() && !probe_aborted_after_headers) {
         task.state = probe_res.error->user_action_resumable ? TaskState::kPaused : TaskState::kFailed;
@@ -206,12 +217,19 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         }
 
         if (validator_mismatch) {
+            OPENIDM_LOG_WARN("HttpEngine", "Validator mismatch detected (" + mismatch_reason + "); discarding stale partial segments and resetting file");
+            task.segments.clear();
+            task.downloaded_bytes = 0;
+            if (!task.part_path.empty()) {
+                std::error_code ec_remove;
+                std::filesystem::remove(task.part_path, ec_remove);
+            }
             task.state = TaskState::kFailed;
             task.error_code = "ERR_HTTP_VALIDATOR_MISMATCH";
             task.error_message = mismatch_reason;
             task.status_detail = task.error_message;
             return Result<std::filesystem::path>::Err(
-                "ERR_HTTP_VALIDATOR_MISMATCH", task.error_message, false, true);
+                "ERR_HTTP_VALIDATOR_MISMATCH", task.error_message, false, false);
         }
 
         // Apply If-Range validator if available
@@ -355,7 +373,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                     stop_flag.store(true);
                     return false;
                 }
-                limiter.Consume(len, speed_limit_bps, stop_flag);
+                consume_both_limiters(len, stop_flag);
                 if (!part_file.PWrite(data, len, written_offset)) {
                     stop_flag.store(true);
                     return false;
@@ -376,7 +394,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                     on_progress(ep);
                 }
                 return true;
-            });
+            },
+            m_cfg.net_opts);
 
         part_file.SyncAndClose();
 
@@ -476,7 +495,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                             }
                             size_t to_write = static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(len), max_writable));
 
-                            limiter.Consume(to_write, speed_limit_bps, req_cancel);
+                            consume_both_limiters(to_write, req_cancel);
 
                             if (!part_file.PWrite(data, to_write, write_pos)) {
                                 std::lock_guard<std::mutex> lk(err_mu);
@@ -493,7 +512,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 return false;
                             }
                             return true;
-                        });
+                        },
+                        m_cfg.net_opts);
 
                     if (seg->current_offset.load() > seg->end_offset.load()) {
                         seg->completed.store(true);

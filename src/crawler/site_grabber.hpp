@@ -21,6 +21,7 @@ struct SiteGrabberConfig {
     std::vector<std::string> allowed_domains;
     std::vector<std::string> filter_categories; // "Images", "Documents", "Video", "Audio", "Compressed", "All"
     std::vector<std::string> custom_extensions;
+    std::string destination_folder;
     bool allow_loopback{false};     // Strict SSRF guard
     int timeout_ms{5000};
 };

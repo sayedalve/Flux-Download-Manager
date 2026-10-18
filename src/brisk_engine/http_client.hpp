@@ -82,6 +82,17 @@ public:
     // belongs to a private, loopback, or internal address space.
     static bool CheckHostResolvesToPrivate(const std::string& host);
 
+    struct HttpNetworkOptions {
+        std::string proxy_mode{"system"};                 // "direct", "system", "manual"
+        std::string proxy_server;                         // e.g. "http://127.0.0.1:8080"
+        std::string proxy_bypass;                         // e.g. "<local>;*.internal"
+        std::string proxy_username;
+        std::string proxy_password;                       // Decrypted plaintext for WinHTTP API
+        std::string server_auth_username;
+        std::string server_auth_password;                 // Decrypted plaintext for WinHTTP API
+        bool enable_integrated_auth{true};                // Windows Negotiate / NTLM autologon
+    };
+
     // Executes an HTTP/HTTPS GET request with optional byte range [range_start, range_end].
     // Calls on_headers once response headers arrive; if on_headers returns false, aborts before reading body.
     // Calls on_chunk for each body chunk; if on_chunk returns false or cancel_flag becomes true, aborts immediately.
@@ -94,7 +105,17 @@ public:
         bool allow_loopback_redirect,
         std::atomic<bool>& cancel_flag,
         std::function<bool(const HttpResponseMeta&)> on_headers,
-        std::function<bool(const uint8_t* data, size_t len)> on_chunk);
+        std::function<bool(const uint8_t* data, size_t len)> on_chunk,
+        const HttpNetworkOptions& net_opts = {});
+
+    // Probes target resource headers (HEAD/GET with early termination on headers)
+    static Result<HttpResponseMeta> ProbeResource(
+        const std::string& url,
+        const std::map<std::string, std::string>& headers = {},
+        const std::map<std::string, std::string>& auth_headers = {},
+        const HttpNetworkOptions& net_opts = {},
+        bool allow_loopback = false,
+        int timeout_ms = 10000);
 };
 
 } // namespace openidm::brisk

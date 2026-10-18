@@ -328,20 +328,30 @@ function initPopupUI() {
     });
   }
 
-  function updateConnectionBadge(connected) {
+  function updateConnectionBadge(connected, errCategory = "") {
     isDesktopConnected = Boolean(connected);
     if (!connectionBadge) return;
     if (isDesktopConnected) {
       connectionBadge.textContent = "Desktop Connected";
       connectionBadge.className = "conn-badge conn-connected";
+      connectionBadge.title = "Flux desktop application is running and communicating via Native Messaging.";
+    } else if (errCategory === "UNAUTHORIZED_EXTENSION_ORIGIN") {
+      connectionBadge.textContent = "Origin Unauthorized";
+      connectionBadge.className = "conn-badge conn-warning";
+      connectionBadge.title = "This extension ID is not authorized in the Native Messaging Host manifest. Check registry or manifest allowed_origins.";
+    } else if (errCategory === "MISSING_HOST_REGISTRATION") {
+      connectionBadge.textContent = "Host Misconfigured";
+      connectionBadge.className = "conn-badge conn-warning";
+      connectionBadge.title = "Native Messaging Host is not registered in the Windows registry (HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts).";
     } else {
       connectionBadge.textContent = "Desktop Offline";
       connectionBadge.className = "conn-badge conn-disconnected";
+      connectionBadge.title = "Flux desktop application is not running or named pipe IPC is unreachable.";
     }
   }
 
   function fetchTabData(explicitTabId = null) {
-    if (typeof chrome === "undefined" || !chrome.tabs || !chrome.runtime) return;
+    if (typeof chrome !== "undefined" || !chrome.tabs || !chrome.runtime) return;
 
     const queryAndLoad = (tabId, tabUrl) => {
       currentTabId = tabId;
@@ -358,7 +368,7 @@ function initPopupUI() {
           refreshListDisplay();
           return;
         }
-        updateConnectionBadge(res.desktopConnected);
+        updateConnectionBadge(res.desktopConnected, res.nativeErrorCategory);
         if (siteToggle) {
           siteToggle.checked = Boolean(res.captureEnabled && !res.siteDisabled);
         }

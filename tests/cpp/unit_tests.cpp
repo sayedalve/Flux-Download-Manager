@@ -892,6 +892,57 @@ bool TestResourceAwareResumeAndValidatorMismatch() {
     auto retrieved = ctrl.GetTask(t.task_id);
     ASSERT_TRUE(retrieved.has_value(), "Retrieved task");
 
+    // Test validator mismatch reset behavior: task with ERR_HTTP_VALIDATOR_MISMATCH must reset on retry
+    openidm::TaskModel t_mismatch;
+    t_mismatch.task_id = "test-mismatch-task";
+    t_mismatch.url = "https://example.com/changed.bin";
+    t_mismatch.file_name = "changed.bin";
+    t_mismatch.save_dir = (work_dir / "downloads").string();
+    t_mismatch.state = openidm::TaskState::kFailed;
+    t_mismatch.error_code = "ERR_HTTP_VALIDATOR_MISMATCH";
+    t_mismatch.error_message = "Remote ETag changed";
+    t_mismatch.downloaded_bytes = 262144;
+    t_mismatch.segments.push_back(openidm::Segment{0, 0, 262144, 524287, false});
+    std::filesystem::path mm_part = (work_dir / "downloads") / ("changed.bin." + t_mismatch.task_id + ".part");
+    {
+        std::ofstream ofs(mm_part, std::ios::binary);
+        ofs << "stale segment content";
+    }
+    t_mismatch.part_path = mm_part.string();
+    ASSERT_TRUE(ctrl.AddTask(t_mismatch, false, true).ok(), "Added mismatch task");
+    ASSERT_TRUE(ctrl.RetryTask(t_mismatch.task_id).ok(), "RetryTask on validator mismatch");
+    auto mm_retrieved = ctrl.GetTask(t_mismatch.task_id);
+    ASSERT_TRUE(mm_retrieved.has_value(), "Retrieved mismatch task");
+    ASSERT_TRUE(mm_retrieved->segments.empty(), "Segments cleared after validator mismatch retry");
+    ASSERT_TRUE(mm_retrieved->downloaded_bytes == 0, "Downloaded bytes reset to 0 after validator mismatch");
+    ASSERT_TRUE(!std::filesystem::exists(mm_part), "Stale partial file removed after validator mismatch");
+
+    // Test CancelTask state consistency and cleanup
+    openidm::TaskModel t_cancel;
+    t_cancel.task_id = "test-cancel-task";
+    t_cancel.url = "https://example.com/cancel_me.bin";
+    t_cancel.file_name = "cancel_me.bin";
+    t_cancel.save_dir = (work_dir / "downloads").string();
+    t_cancel.state = openidm::TaskState::kPaused;
+    std::filesystem::path c_part = (work_dir / "downloads") / ("cancel_me.bin." + t_cancel.task_id + ".part");
+    {
+        std::ofstream ofs(c_part, std::ios::binary);
+        ofs << "cancel content";
+    }
+    t_cancel.part_path = c_part.string();
+    t_cancel.downloaded_bytes = 100;
+    t_cancel.segments.push_back(openidm::Segment{0, 0, 100, 1000, false});
+    t_cancel.auth_headers["Authorization"] = "Bearer SecretToken";
+    ASSERT_TRUE(ctrl.AddTask(t_cancel, false, true).ok(), "Added cancel task");
+    ASSERT_TRUE(ctrl.CancelTask(t_cancel.task_id).ok(), "CancelTask succeeds");
+    auto c_retrieved = ctrl.GetTask(t_cancel.task_id);
+    ASSERT_TRUE(c_retrieved.has_value(), "Retrieved canceled task");
+    ASSERT_TRUE(c_retrieved->state == openidm::TaskState::kCanceled, "State is kCanceled");
+    ASSERT_TRUE(c_retrieved->segments.empty(), "Segments cleared on cancel");
+    ASSERT_TRUE(c_retrieved->downloaded_bytes == 0, "Downloaded bytes reset to 0 on cancel");
+    ASSERT_TRUE(c_retrieved->auth_headers.empty(), "Auth headers scrubbed on cancel");
+    ASSERT_TRUE(!std::filesystem::exists(c_part), "Part file deleted on cancel");
+
     ctrl.Shutdown();
     std::filesystem::remove_all(work_dir, ec);
     return true;
@@ -1575,14 +1626,22 @@ bool TestFtpClientParsingAndCommands() {
     ASSERT_TRUE(res1.value->file_name == "archive.tar.gz", "Filename");
     ASSERT_TRUE(res1.value->user == "anonymous", "Default user anonymous");
 
+    // FTPS URL must be rejected fast to prevent plain unencrypted socket connections
     auto res2 = FtpUrl::Parse("ftps://alice:secret123@secure.ftp.org:990/data/report.pdf");
-    ASSERT_TRUE(res2.ok(), "Parse FTPS URL with user/pass and port");
-    ASSERT_TRUE(res2.value->scheme == "ftps", "FTPS scheme");
-    ASSERT_TRUE(res2.value->host == "secure.ftp.org", "FTPS host");
-    ASSERT_TRUE(res2.value->port == 990, "FTPS port 990");
-    ASSERT_TRUE(res2.value->user == "alice", "Custom user");
-    ASSERT_TRUE(res2.value->password == "secret123", "Custom password");
-    ASSERT_TRUE(res2.value->file_name == "report.pdf", "Filename");
+    ASSERT_TRUE(!res2.ok(), "Reject FTPS URL without verified TLS negotiation");
+    ASSERT_TRUE(res2.error->code == "ERR_FTPS_UNSUPPORTED", "Rejection error code is ERR_FTPS_UNSUPPORTED");
+
+    // Verify ProbeFileSize and DownloadFile defense-in-depth FTPS guards
+    FtpUrl ftps_url;
+    ftps_url.scheme = "ftps";
+    ftps_url.host = "secure.ftp.org";
+    auto probe_ftps = FtpClient::ProbeFileSize(ftps_url);
+    ASSERT_TRUE(!probe_ftps.ok() && probe_ftps.error->code == "ERR_FTPS_UNSUPPORTED", "ProbeFileSize rejects ftps");
+
+    std::atomic<bool> p_req{false}, c_req{false};
+    std::atomic<uint64_t> spd{0};
+    auto dl_ftps = FtpClient::DownloadFile(ftps_url, "/tmp/dummy.part", 0, p_req, c_req, spd, nullptr);
+    ASSERT_TRUE(!dl_ftps.ok() && dl_ftps.error->code == "ERR_FTPS_UNSUPPORTED", "DownloadFile rejects ftps");
 
     auto res_invalid = FtpUrl::Parse("http://not-ftp.com/test.bin");
     ASSERT_TRUE(!res_invalid.ok(), "Reject non-FTP URL");
@@ -1630,6 +1689,26 @@ bool TestBencodeAndTorrentParser() {
     std::string expected_sha1 = openidm::CryptoUtils::ComputeBufferSha1Hex(std::string_view(test_data, sizeof(test_data) - 1));
     ASSERT_TRUE(TorrentParser::VerifyPieceHex(reinterpret_cast<const uint8_t*>(test_data), sizeof(test_data) - 1, expected_sha1), "VerifyPieceHex matches");
     ASSERT_TRUE(!TorrentParser::VerifyPieceHex(reinterpret_cast<const uint8_t*>("corrupt data"), 12, expected_sha1), "Corrupt piece rejected");
+
+    // 4. BitTorrent Execution Elimination Guard (honesty check)
+    openidm::TaskModel tor_task;
+    tor_task.task_id = "test-torrent-task";
+    tor_task.url = magnet;
+    tor_task.file_name = "test.iso";
+    tor_task.save_dir = "/tmp/test_torrent_dir";
+    TorrentInfo tinfo;
+    tinfo.name = "test.iso";
+    tinfo.total_length = 1048576;
+    std::atomic<bool> t_pause{false}, t_cancel{false};
+    std::atomic<uint64_t> t_speed{0};
+
+    auto tor_exec = TorrentEngine::ExecuteTorrentDownload(tor_task, tinfo, t_pause, t_cancel, t_speed, nullptr);
+    ASSERT_TRUE(!tor_exec.ok(), "BitTorrent execution must fail cleanly without protocol engine");
+    ASSERT_TRUE(tor_exec.error->code == "ERR_TORRENT_UNSUPPORTED", "Returns ERR_TORRENT_UNSUPPORTED");
+    ASSERT_TRUE(tor_task.state == openidm::TaskState::kFailed, "Task state marked as kFailed");
+    ASSERT_TRUE(tor_task.downloaded_bytes == 0, "Downloaded bytes must remain 0");
+    ASSERT_TRUE(tor_task.completed_segments == 0, "Completed pieces must remain 0");
+    ASSERT_TRUE(!std::filesystem::exists("/tmp/test_torrent_dir/test.iso"), "No dummy or placeholder files created on disk");
     return true;
 }
 
@@ -1795,11 +1874,282 @@ bool TestTaskImportExportAndMultiQueue() {
     return true;
 }
 
+bool TestAntivirusScannerSafetyAndHandling() {
+    using namespace openidm::security;
+
+    // 1. ScanReport default status must be kUnavailable (never kClean)
+    ScanReport def_rep;
+    ASSERT_TRUE(def_rep.status == ScanStatus::kUnavailable, "ScanReport default is kUnavailable");
+
+    // 2. Scan missing file returns error
+    auto missing_res = AntivirusScanner::ScanWithDefender("/nonexistent/file/for/antivirus.dat");
+    ASSERT_TRUE(!missing_res.ok(), "Scan missing file returns error");
+    ASSERT_TRUE(missing_res.error->code == "ERR_FILE_NOT_FOUND", "Error code is ERR_FILE_NOT_FOUND");
+
+    // 3. Create dummy file and verify scan does NOT report fake kClean on non-Windows
+    std::filesystem::path tmp_p = std::filesystem::temp_directory_path() / ("test_av_" + openidm::GenerateUuidV4() + ".bin");
+    {
+        std::ofstream ofs(tmp_p, std::ios::binary);
+        ofs << "Antivirus Test Content";
+    }
+
+#ifndef _WIN32
+    auto scan_res = AntivirusScanner::ScanWithDefender(tmp_p);
+    ASSERT_TRUE(scan_res.ok(), "ScanWithDefender succeeds with report");
+    ASSERT_TRUE(scan_res.value->status == ScanStatus::kUnavailable, "Non-Windows mock scan reports kUnavailable (never kClean)");
+    ASSERT_TRUE(!AntivirusScanner::IsWindowsDefenderAvailable(), "IsWindowsDefenderAvailable is false on non-Windows");
+#endif
+
+    // 4. Verify DesktopView blocks ActionOpenFile if a threat was detected
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_av_ui_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller");
+
+    openidm::TaskModel t_threat;
+    t_threat.task_id = "task-threat-1";
+    t_threat.url = "https://example.com/malware.exe";
+    t_threat.file_name = "malware.exe";
+    t_threat.save_dir = cfg.default_download_dir.string();
+    t_threat.state = openidm::TaskState::kCompleted;
+    t_threat.error_code = "ERR_THREAT_DETECTED";
+    t_threat.status_detail = "Threat detected by Antivirus (Defender)";
+
+    // Write file so it exists
+    {
+        std::ofstream ofs(cfg.default_download_dir / "malware.exe", std::ios::binary);
+        ofs << "Threat Dummy";
+    }
+
+    auto add_threat = ctrl.AddTask(t_threat, false, true);
+    ASSERT_TRUE(add_threat.ok(), "Added threat task");
+
+    openidm::ui::DesktopView view(ctrl);
+    view.SelectTask("task-threat-1");
+    auto open_res = view.ActionOpenCompletedFile(true); // dry_run
+    ASSERT_TRUE(!open_res.ok(), "ActionOpenCompletedFile must block execution on threat detection");
+    ASSERT_TRUE(open_res.error->code == "ERR_THREAT_DETECTED", "Returns ERR_THREAT_DETECTED");
+
+    ctrl.Shutdown();
+    std::filesystem::remove(tmp_p, ec);
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestDualRateLimiterAndPerTaskSpeedLimit() {
+    using openidm::brisk::TokenBucketLimiter;
+
+    // Test dual limiter logic
+    auto global_limiter = std::make_shared<TokenBucketLimiter>();
+    TokenBucketLimiter task_limiter;
+    std::atomic<uint64_t> global_limit{100000}; // 100 KB/s
+    std::atomic<uint64_t> task_limit{50000};    // 50 KB/s
+    std::atomic<bool> stop_flag{false};
+
+    global_limiter->Consume(1000, global_limit, stop_flag);
+    task_limiter.Consume(1000, task_limit, stop_flag);
+
+    // Test controller per-task speed limit API
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_speed_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller");
+
+    openidm::TaskModel t;
+    t.task_id = "task-speed-1";
+    t.url = "https://example.com/file.bin";
+    t.file_name = "file.bin";
+    t.speed_limit_bps = 500000;
+    auto add_res = ctrl.AddTask(t, false, true);
+    ASSERT_TRUE(add_res.ok(), "Added task with speed limit");
+
+    ASSERT_TRUE(ctrl.GetTaskSpeedLimit("task-speed-1") == 500000, "GetTaskSpeedLimit returns 500000");
+    auto set_res = ctrl.SetTaskSpeedLimit("task-speed-1", 1000000);
+    ASSERT_TRUE(set_res.ok(), "SetTaskSpeedLimit to 1000000 ok");
+    ASSERT_TRUE(ctrl.GetTaskSpeedLimit("task-speed-1") == 1000000, "GetTaskSpeedLimit returns 1000000");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestDynamicCategorizationAndSiteRulesPriority() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_cat_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller");
+
+    auto settings = ctrl.GetSettings();
+    settings.category_subfolders_enabled = true;
+    settings.custom_extension_categories["custompkg"] = "Programs";
+    settings.custom_extension_categories["myvideo"] = "Video";
+    settings.category_folders["Audio"] = (work_dir / "CustomAudio").string();
+    settings.site_rules["special-music.org"] = "Audio";
+    settings.site_rules["direct-dump.net"] = (work_dir / "DumpFolder").string();
+    ASSERT_TRUE(ctrl.UpdateSettings(settings).ok(), "Updated settings");
+
+    // 1. Standard extension inference
+    ASSERT_TRUE(ctrl.DetermineCategory("song.mp3", "https://example.com/song.mp3") == "Audio", "song.mp3 -> Audio");
+    ASSERT_TRUE(ctrl.DetermineCategory("archive.7z", "https://example.com/archive.7z") == "Compressed", "archive.7z -> Compressed");
+
+    // 2. Custom extension mapping
+    ASSERT_TRUE(ctrl.DetermineCategory("tool.custompkg", "https://example.com/tool.custompkg") == "Programs", "custompkg -> Programs");
+
+    // 3. Site rule (Domain -> Category)
+    ASSERT_TRUE(ctrl.DetermineCategory("track.unknown", "https://special-music.org/track.unknown") == "Audio", "special-music.org -> Audio");
+
+    // 4. Resolve category save dir priority
+    // 4a. Site rule directory override
+    auto dump_dir = ctrl.ResolveCategorySaveDir("General", "https://direct-dump.net/file.bin");
+    ASSERT_TRUE(dump_dir == (work_dir / "DumpFolder"), "Site rule directory override matches DumpFolder");
+
+    // 4b. Category custom folder
+    auto audio_dir = ctrl.ResolveCategorySaveDir("Audio", "https://example.com/song.mp3");
+    ASSERT_TRUE(audio_dir == (work_dir / "CustomAudio"), "Custom Category Folder matches CustomAudio");
+
+    // 4c. Category subfolder
+    auto video_dir = ctrl.ResolveCategorySaveDir("Video", "https://example.com/clip.mp4");
+    ASSERT_TRUE(video_dir == (cfg.default_download_dir / "Video"), "Video subfolder under default dir");
+
+    // 4d. Default dir
+    auto gen_dir = ctrl.ResolveCategorySaveDir("General", "https://example.com/data.bin");
+    ASSERT_TRUE(gen_dir == cfg.default_download_dir, "General category maps to default dir");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestAlternateUrlsAndMirrorValidation() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_mirrors_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller");
+
+    openidm::TaskModel t;
+    t.task_id = "task-mirrors-1";
+    t.url = "https://primary.example.com/large.iso";
+    t.file_name = "large.iso";
+    auto add_res = ctrl.AddTask(t, false, true);
+    ASSERT_TRUE(add_res.ok(), "Added task");
+
+    auto add_alt1 = ctrl.AddAlternateUrl("task-mirrors-1", "https://mirror1.example.com/large.iso");
+    ASSERT_TRUE(add_alt1.ok(), "Added mirror 1");
+    auto add_alt2 = ctrl.AddAlternateUrl("task-mirrors-1", "https://mirror2.example.com/large.iso");
+    ASSERT_TRUE(add_alt2.ok(), "Added mirror 2");
+
+    auto alts = ctrl.GetAlternateUrls("task-mirrors-1");
+    ASSERT_TRUE(alts.size() == 2, "Task has 2 alternate URLs");
+    ASSERT_TRUE(alts[0] == "https://mirror1.example.com/large.iso", "Mirror 1 match");
+    ASSERT_TRUE(alts[1] == "https://mirror2.example.com/large.iso", "Mirror 2 match");
+
+    // Adding duplicate mirror URL is idempotent
+    auto add_dup = ctrl.AddAlternateUrl("task-mirrors-1", "https://mirror1.example.com/large.iso");
+    ASSERT_TRUE(add_dup.ok(), "Adding duplicate mirror succeeds");
+    ASSERT_TRUE(ctrl.GetAlternateUrls("task-mirrors-1").size() == 2, "Size remains 2");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
+bool TestFtpReliabilityEpsvAndResumeTruncation() {
+    using openidm::ftp::FtpUrl;
+
+    auto parsed = FtpUrl::Parse("ftp://user:pass@ftp.example.com:2121/files/document.pdf");
+    ASSERT_TRUE(parsed.ok(), "Parsed FTP URL with custom port");
+    ASSERT_TRUE(parsed.value->port == 2121, "Port is 2121");
+    ASSERT_TRUE(parsed.value->username == "user", "Username is user");
+    ASSERT_TRUE(parsed.value->password == "pass", "Password is pass");
+    ASSERT_TRUE(parsed.value->file_name == "document.pdf", "File name is document.pdf");
+
+    return true;
+}
+
+bool TestSchedulerStopTimesAndPostCompletionActions() {
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / ("flux_test_sched_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(work_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Initialize controller");
+
+    openidm::TaskModel t;
+    t.task_id = "task-sched-1";
+    t.url = "https://example.com/nightly.iso";
+    t.file_name = "nightly.iso";
+    auto add_res = ctrl.AddTask(t, false, true);
+    ASSERT_TRUE(add_res.ok(), "Added task");
+
+    auto set_sched = ctrl.SetTaskSchedule("task-sched-1", "02:00", "06:00");
+    ASSERT_TRUE(set_sched.ok(), "SetTaskSchedule succeeded");
+
+    auto task_opt = ctrl.GetTask("task-sched-1");
+    ASSERT_TRUE(task_opt.has_value(), "Task exists");
+    ASSERT_TRUE(task_opt->scheduled, "Task scheduled is true");
+    ASSERT_TRUE(task_opt->schedule_time_local == "02:00", "Start time is 02:00");
+    ASSERT_TRUE(task_opt->schedule_stop_time_local == "06:00", "Stop time is 06:00");
+
+    // Verify Settings Center Queue completion action
+    auto settings = ctrl.GetSettings();
+    settings.queue_completion_action = "SLEEP";
+    settings.max_auto_retries = 8;
+    settings.retry_interval_sec = 20;
+    ASSERT_TRUE(ctrl.UpdateSettings(settings).ok(), "Updated settings");
+
+    auto updated = ctrl.GetSettings();
+    ASSERT_TRUE(updated.queue_completion_action == "SLEEP", "Queue completion action is SLEEP");
+    ASSERT_TRUE(updated.max_auto_retries == 8, "Max auto retries is 8");
+    ASSERT_TRUE(updated.retry_interval_sec == 20, "Retry interval is 20s");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 36;
+    const int total = 42;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -1845,6 +2195,12 @@ int main() {
     run(34, "TestSiteGrabberCrawlerAndSsrf", TestSiteGrabberCrawlerAndSsrf);
     run(35, "TestZipArchivePreviewAndSecurity", TestZipArchivePreviewAndSecurity);
     run(36, "TestTaskImportExportAndMultiQueue", TestTaskImportExportAndMultiQueue);
+    run(37, "TestAntivirusScannerSafetyAndHandling", TestAntivirusScannerSafetyAndHandling);
+    run(38, "TestDualRateLimiterAndPerTaskSpeedLimit", TestDualRateLimiterAndPerTaskSpeedLimit);
+    run(39, "TestDynamicCategorizationAndSiteRulesPriority", TestDynamicCategorizationAndSiteRulesPriority);
+    run(40, "TestAlternateUrlsAndMirrorValidation", TestAlternateUrlsAndMirrorValidation);
+    run(41, "TestFtpReliabilityEpsvAndResumeTruncation", TestFtpReliabilityEpsvAndResumeTruncation);
+    run(42, "TestSchedulerStopTimesAndPostCompletionActions", TestSchedulerStopTimesAndPostCompletionActions);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

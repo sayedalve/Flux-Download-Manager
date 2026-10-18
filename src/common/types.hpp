@@ -146,6 +146,7 @@ struct TaskModel {
     uint64_t total_bytes{0};
     uint64_t downloaded_bytes{0};
     uint64_t speed_bps{0};
+    uint64_t speed_limit_bps{0};                      // Per-task bandwidth limit in bps (0 = no task-specific limit)
     double stream_percent{0.0};
     uint32_t completed_segments{0};
     uint32_t total_segments{0};
@@ -155,11 +156,14 @@ struct TaskModel {
     uint32_t retry_count{0};
     bool scheduled{false};
     std::string schedule_time_local;
+    std::string schedule_stop_time_local;             // Optional scheduled stop time ("HH:MM")
     std::string status_detail;                        // Granular stage (e.g., "Downloading video segments (5/10)")
     std::string etag;
     std::string last_modified;
     std::map<std::string, std::string> headers;       // Non-sensitive: Referer, Origin, User-Agent
     std::map<std::string, std::string> auth_headers;  // Sensitive: Cookie, Authorization (DPAPI/AES encrypted at rest)
+    std::vector<std::string> alternate_urls;          // User-configured or discovered alternate mirror URLs
+    size_t current_url_index{0};                      // Current mirror index attempted
     StreamSelectionOptions stream_options;
     std::string expected_sha256;
     std::string error_code;
@@ -199,6 +203,25 @@ struct AppSettings {
     bool reduced_motion{false};
     bool show_completion_notification{true};
 
+    // Proxy & Authentication (Phase 2 Feature B)
+    std::string proxy_mode{"system"};                 // "direct", "system", "manual"
+    std::string proxy_server;                         // e.g. "http://127.0.0.1:8080"
+    std::string proxy_bypass;                         // e.g. "<local>;*.internal"
+    std::string proxy_username;
+    std::string proxy_password_encrypted;             // DPAPI-encrypted blob/base64
+    std::string server_auth_username;
+    std::string server_auth_password_encrypted;       // DPAPI-encrypted blob/base64
+
+    // Configurable Categories & Destination Folders (Phase 2 Feature E)
+    std::map<std::string, std::string> category_folders;           // Category -> Custom Directory Path
+    std::map<std::string, std::string> custom_extension_categories;// Extension (lowercase) -> Category Name
+    std::map<std::string, std::string> site_rules;                 // Domain -> Category or Directory Path
+
+    // Queue & Retry Automation (Phase 2 Feature D)
+    uint32_t max_auto_retries{5};
+    uint32_t retry_interval_sec{15};
+    std::string queue_completion_action{"NONE"};      // "NONE", "SLEEP", "SHUTDOWN"
+
     bool operator==(const AppSettings& other) const {
         return theme == other.theme &&
                max_concurrent_tasks == other.max_concurrent_tasks &&
@@ -215,7 +238,20 @@ struct AppSettings {
                close_to_tray == other.close_to_tray &&
                start_minimized == other.start_minimized &&
                reduced_motion == other.reduced_motion &&
-               show_completion_notification == other.show_completion_notification;
+               show_completion_notification == other.show_completion_notification &&
+               proxy_mode == other.proxy_mode &&
+               proxy_server == other.proxy_server &&
+               proxy_bypass == other.proxy_bypass &&
+               proxy_username == other.proxy_username &&
+               proxy_password_encrypted == other.proxy_password_encrypted &&
+               server_auth_username == other.server_auth_username &&
+               server_auth_password_encrypted == other.server_auth_password_encrypted &&
+               category_folders == other.category_folders &&
+               custom_extension_categories == other.custom_extension_categories &&
+               site_rules == other.site_rules &&
+               max_auto_retries == other.max_auto_retries &&
+               retry_interval_sec == other.retry_interval_sec &&
+               queue_completion_action == other.queue_completion_action;
     }
     bool operator!=(const AppSettings& other) const { return !(*this == other); }
 };

@@ -1,39 +1,345 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Package portable release archive for Flux Download Manager
+# Flux Download Manager -- Windows x64 Release Packaging Script (v0.3.0)
+# Assembles standalone portable zip packages (Full and Core editions),
+# performs strict pre-flight binary validation, stages clean extension assets,
+# writes PACKAGE_INFO.json metadata, and updates SHA256SUMS.txt.
+
+[CmdletBinding()]
+param(
+    [string]$Version = "0.3.0",
+    [ValidateSet("Full", "Core", "Both")]
+    [string]$PackageType = "Both",
+    [string]$BuildDir = "",
+    [string]$OutputDir = "",
+    [switch]$SkipHash = $false
+)
+
 $ErrorActionPreference = "Stop"
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$stage = Join-Path ([System.IO.Path]::GetTempPath()) ("Flux-v0.3.0-Windows-x64_" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Force -Path $stage | Out-Null
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 
-Copy-Item (Join-Path $RepoRoot "build\win-x64\flux.exe") $stage\
-Copy-Item (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe") $stage\
-Copy-Item (Join-Path $RepoRoot "README.md") $stage\
-Copy-Item (Join-Path $RepoRoot "LICENSE_REVIEW.md") $stage\
-
-New-Item -ItemType Directory -Force -Path (Join-Path $stage "tools\win-x64") | Out-Null
-Copy-Item (Join-Path $RepoRoot "tools\win-x64\N_m3u8DL-RE.exe") (Join-Path $stage "tools\win-x64\")
-Copy-Item (Join-Path $RepoRoot "tools\win-x64\ffmpeg.exe") (Join-Path $stage "tools\win-x64\")
-
-Copy-Item -Recurse (Join-Path $RepoRoot "extension") (Join-Path $stage "extension")
-Copy-Item -Recurse (Join-Path $RepoRoot "installer\manifests") (Join-Path $stage "manifests")
-
-$distDir = Join-Path $RepoRoot "dist"
-New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-$zipPath = Join-Path $distDir "Flux-v0.3.0-Windows-x64.zip"
-if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-
-Write-Host "Compressing Flux-v0.3.0-Windows-x64.zip..."
-Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zipPath -CompressionLevel Optimal
-Remove-Item -Recurse -Force $stage
-
-$h = Get-FileHash $zipPath -Algorithm SHA256
-$line = "$($h.Hash)  dist\Flux-v0.3.0-Windows-x64.zip"
-Write-Host $line
-
-# Append to SHA256SUMS.txt if not present
-$sumsPath = Join-Path $distDir "SHA256SUMS.txt"
-$existing = Get-Content $sumsPath -Raw
-if ($existing -notmatch "Flux-v0.3.0-Windows-x64.zip") {
-    Add-Content -Path $sumsPath -Value $line -Encoding utf8
+# 1. Resolve Output Directory
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $RepoRoot "dist"
 }
-Write-Host "Packaging completed successfully!"
+New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host "   Flux Download Manager -- Windows x64 Release Packager         " -ForegroundColor Cyan
+Write-Host "=================================================================" -ForegroundColor Cyan
+Write-Host "  Version      : $Version" -ForegroundColor White
+Write-Host "  Package Type : $PackageType" -ForegroundColor White
+Write-Host "  Output Dir   : $OutputDir" -ForegroundColor White
+
+# 2. Locate Flux Core Executables
+$FluxExe = $null
+$FluxNmhExe = $null
+
+$fluxCandidates = @()
+if ($BuildDir) {
+    $fluxCandidates += (Join-Path $BuildDir "flux.exe")
+    $fluxCandidates += (Join-Path $BuildDir "Release\flux.exe")
+    $fluxCandidates += (Join-Path $BuildDir "Flux.exe")
+}
+$fluxCandidates += @(
+    (Join-Path $RepoRoot "build\win-x64\Release\flux.exe"),
+    (Join-Path $RepoRoot "build\Release\flux.exe"),
+    (Join-Path $RepoRoot "build\win-x64\flux.exe"),
+    (Join-Path $RepoRoot "dist\Flux.exe"),
+    (Join-Path $RepoRoot "dist\flux.exe"),
+    (Join-Path $RepoRoot "flux.exe")
+)
+
+foreach ($c in $fluxCandidates) {
+    if (Test-Path $c) {
+        $FluxExe = (Resolve-Path $c).Path
+        break
+    }
+}
+
+$nmhCandidates = @()
+if ($BuildDir) {
+    $nmhCandidates += (Join-Path $BuildDir "flux-nmh.exe")
+    $nmhCandidates += (Join-Path $BuildDir "Release\flux-nmh.exe")
+}
+$nmhCandidates += @(
+    (Join-Path $RepoRoot "build\win-x64\Release\flux-nmh.exe"),
+    (Join-Path $RepoRoot "build\Release\flux-nmh.exe"),
+    (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe"),
+    (Join-Path $RepoRoot "dist\flux-nmh.exe"),
+    (Join-Path $RepoRoot "flux-nmh.exe")
+)
+
+foreach ($c in $nmhCandidates) {
+    if (Test-Path $c) {
+        $FluxNmhExe = (Resolve-Path $c).Path
+        break
+    }
+}
+
+# Pre-flight binary existence validation
+$missing = @()
+if (-not $FluxExe) { $missing += "flux.exe (searched: $($fluxCandidates -join ', '))" }
+if (-not $FluxNmhExe) { $missing += "flux-nmh.exe (searched: $($nmhCandidates -join ', '))" }
+
+if ($missing.Count -gt 0) {
+    Write-Error "Pre-flight validation failed! The following required core binaries were not found:`n - $($missing -join "`n - ")`nPlease build Flux before running packaging:`n  cmake --build build --config Release`nor`n  .\scripts\build-windows-msvc.ps1"
+    exit 1
+}
+
+Write-Host "[+] Found Desktop binary : $FluxExe" -ForegroundColor Green
+Write-Host "[+] Found NMH binary     : $FluxNmhExe" -ForegroundColor Green
+
+# 3. Locate Stream Workers (for Full package)
+$Nm3u8dlExe = $null
+$FfmpegExe = $null
+$YtDlpExe = $null
+
+$toolsCandidates = @(
+    (Join-Path $RepoRoot "tools\win-x64"),
+    (Join-Path $RepoRoot "tools"),
+    (Join-Path $RepoRoot "dist\tools\win-x64"),
+    (Join-Path $RepoRoot "dist\tools")
+)
+
+foreach ($tc in $toolsCandidates) {
+    $nm = Join-Path $tc "N_m3u8DL-RE.exe"
+    if ((-not $Nm3u8dlExe) -and (Test-Path $nm)) { $Nm3u8dlExe = (Resolve-Path $nm).Path }
+
+    $ff = Join-Path $tc "ffmpeg.exe"
+    if ((-not $FfmpegExe) -and (Test-Path $ff)) { $FfmpegExe = (Resolve-Path $ff).Path }
+
+    $yt = Join-Path $tc "yt-dlp.exe"
+    if ((-not $YtDlpExe) -and (Test-Path $yt)) { $YtDlpExe = (Resolve-Path $yt).Path }
+}
+
+if ($PackageType -in @("Full", "Both")) {
+    $missingWorkers = @()
+    if (-not $Nm3u8dlExe) { $missingWorkers += "N_m3u8DL-RE.exe" }
+    if (-not $FfmpegExe) { $missingWorkers += "ffmpeg.exe" }
+
+    if ($missingWorkers.Count -gt 0) {
+        Write-Warning "Full package requested, but the following stream workers are missing:`n - $($missingWorkers -join "`n - ")`nRun '.\scripts\fetch-workers.ps1' to provision them, or specify -PackageType Core."
+        if ($PackageType -eq "Full") {
+            Write-Error "Cannot assemble Full package without required stream workers."
+            exit 1
+        }
+    } else {
+        Write-Host "[+] Found N_m3u8DL-RE    : $Nm3u8dlExe" -ForegroundColor Green
+        Write-Host "[+] Found FFmpeg         : $FfmpegExe" -ForegroundColor Green
+        if ($YtDlpExe) {
+            Write-Host "[+] Found yt-dlp (opt)   : $YtDlpExe" -ForegroundColor Green
+        }
+    }
+}
+
+# 4. Helper Function: Assemble and Zip a Distribution Package
+function Build-PackageArchive([string]$Type, [string]$ZipFileName) {
+    Write-Host "`n==> Assembling $Type package..." -ForegroundColor Cyan
+
+    $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Flux_pkg_" + $Type + "_" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+    try {
+        # Core binaries
+        Copy-Item -Path $FluxExe -Destination (Join-Path $stageDir "flux.exe") -Force
+        Copy-Item -Path $FluxNmhExe -Destination (Join-Path $stageDir "flux-nmh.exe") -Force
+
+        # License and Documentation
+        $docFiles = @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
+        foreach ($doc in $docFiles) {
+            $src = Join-Path $RepoRoot $doc
+            if (Test-Path $src) {
+                Copy-Item -Path $src -Destination (Join-Path $stageDir $doc) -Force
+            }
+        }
+
+        # Portable Registration Script
+        $regScript = Join-Path $RepoRoot "scripts\register-native-messaging.ps1"
+        if (Test-Path $regScript) {
+            $scriptsDir = Join-Path $stageDir "scripts"
+            New-Item -ItemType Directory -Force -Path $scriptsDir | Out-Null
+            Copy-Item -Path $regScript -Destination (Join-Path $scriptsDir "register-native-messaging.ps1") -Force
+        }
+
+        # Manifests
+        $manifestsSrc = Join-Path $RepoRoot "installer\manifests"
+        if (Test-Path $manifestsSrc) {
+            $manifestsDest = Join-Path $stageDir "manifests"
+            Copy-Item -Path $manifestsSrc -Destination $manifestsDest -Recurse -Force
+        }
+
+        # Clean Browser Extension Staging
+        $extSrc = Join-Path $RepoRoot "extension"
+        if (Test-Path $extSrc) {
+            $extDest = Join-Path $stageDir "extension"
+            New-Item -ItemType Directory -Force -Path $extDest | Out-Null
+
+            # Copy extension files excluding dev/test/scratch files
+            $excludeItems = @(".git", ".github", "node_modules", "package.json", "package-lock.json", "tsconfig.json", "tests", "scratch", "*.ts")
+            Get-ChildItem -Path $extSrc -Recurse | Where-Object {
+                $item = $_
+                $relPath = $item.FullName.Substring($extSrc.Length)
+                $skip = $false
+                foreach ($ex in $excludeItems) {
+                    if ($relPath -like "*\$ex*" -or $relPath -like "*$ex") {
+                        $skip = $true
+                        break
+                    }
+                }
+                -not $skip
+            } | ForEach-Object {
+                $targetPath = Join-Path $extDest $_.FullName.Substring($extSrc.Length)
+                if ($_.PSIsContainer) {
+                    if (-not (Test-Path $targetPath)) { New-Item -ItemType Directory -Force -Path $targetPath | Out-Null }
+                } else {
+                    $parent = Split-Path -Parent $targetPath
+                    if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+                    Copy-Item -Path $_.FullName -Destination $targetPath -Force
+                }
+            }
+        }
+
+        # Stream Workers Handling
+        $toolsDest = Join-Path $stageDir "tools\win-x64"
+        New-Item -ItemType Directory -Force -Path $toolsDest | Out-Null
+
+        $components = @("flux.exe", "flux-nmh.exe", "extension", "manifests")
+
+        if ($Type -eq "Full") {
+            if ($Nm3u8dlExe -and (Test-Path $Nm3u8dlExe)) {
+                Copy-Item -Path $Nm3u8dlExe -Destination (Join-Path $toolsDest "N_m3u8DL-RE.exe") -Force
+                $components += "tools/win-x64/N_m3u8DL-RE.exe"
+            }
+            if ($FfmpegExe -and (Test-Path $FfmpegExe)) {
+                Copy-Item -Path $FfmpegExe -Destination (Join-Path $toolsDest "ffmpeg.exe") -Force
+                $components += "tools/win-x64/ffmpeg.exe"
+            }
+            if ($YtDlpExe -and (Test-Path $YtDlpExe)) {
+                Copy-Item -Path $YtDlpExe -Destination (Join-Path $toolsDest "yt-dlp.exe") -Force
+                $components += "tools/win-x64/yt-dlp.exe"
+            }
+        } else {
+            # Core Package: Write helpful instructions for stream workers
+            $coreReadme = @"
+Flux Download Manager -- Core Edition
+======================================
+This lightweight package contains the core HTTP/HTTPS download engine, desktop UI,
+and browser Native Messaging Host.
+
+Stream Extraction Notice:
+To enable HLS, DASH, and video stream downloading:
+1. Place 'N_m3u8DL-RE.exe' and 'ffmpeg.exe' inside this 'tools\win-x64\' folder, OR
+2. Ensure FFmpeg is accessible in your system PATH environment variable, OR
+3. Download the full offline release (Flux-v$Version-Windows-x64-Full.zip).
+
+Official Upstream Projects:
+- N_m3u8DL-RE : https://github.com/nilaoda/N_m3u8DL-RE
+- FFmpeg      : https://ffmpeg.org/
+"@
+            [System.IO.File]::WriteAllText((Join-Path $toolsDest "README.txt"), $coreReadme, [System.Text.Encoding]::UTF8)
+            $components += "tools/win-x64/README.txt"
+        }
+
+        # Package Metadata: PACKAGE_INFO.json
+        $gitCommit = "unknown"
+        try {
+            $gitCommit = (git rev-parse --short HEAD 2>$null)
+            if (-not $gitCommit) { $gitCommit = "release" }
+        } catch { $gitCommit = "release" }
+
+        $pkgInfo = [ordered]@{
+            name = "Flux Download Manager"
+            version = $Version
+            edition = $Type
+            platform = "Windows 11 / Windows 10 x64"
+            architecture = "x64"
+            buildDate = [DateTime]::UtcNow.ToString("o")
+            gitCommit = $gitCommit
+            repository = "https://github.com/sayedalve/Flux-Download-Manager"
+            license = "GPL-3.0-or-later"
+            components = $components
+        }
+
+        $pkgInfoJson = $pkgInfo | ConvertTo-Json -Depth 4
+        [System.IO.File]::WriteAllText((Join-Path $stageDir "PACKAGE_INFO.json"), $pkgInfoJson, [System.Text.Encoding]::UTF8)
+
+        # Create Zip Archive
+        $destZip = Join-Path $OutputDir $ZipFileName
+        if (Test-Path $destZip) { Remove-Item -Force $destZip }
+
+        Write-Host "[*] Compressing $ZipFileName..." -ForegroundColor Gray
+        Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $destZip -CompressionLevel Optimal
+
+        $zipSize = (Get-Item $destZip).Length
+        $sizeMb = [Math]::Round($zipSize / 1MB, 2)
+        Write-Host "[+] Created: $destZip ($sizeMb MB)" -ForegroundColor Green
+
+        return $destZip
+    } finally {
+        Remove-Item -Recurse -Force $stageDir -ErrorAction SilentlyContinue
+    }
+}
+
+# 5. Execute Requested Packaging Runs
+$createdZips = @()
+
+if ($PackageType -in @("Full", "Both") -and $Nm3u8dlExe -and $FfmpegExe) {
+    $fullZip = Build-PackageArchive -Type "Full" -ZipFileName "Flux-v$Version-Windows-x64-Full.zip"
+    $createdZips += $fullZip
+
+    # Also stage legacy alias Flux-v$Version-Windows-x64.zip for backward compatibility
+    $compatZip = Join-Path $OutputDir "Flux-v$Version-Windows-x64.zip"
+    Copy-Item -Force $fullZip $compatZip
+    $createdZips += $compatZip
+}
+
+if ($PackageType -in @("Core", "Both")) {
+    $coreZip = Build-PackageArchive -Type "Core" -ZipFileName "Flux-v$Version-Windows-x64-Core.zip"
+    $createdZips += $coreZip
+}
+
+# 6. Checksums and SHA256SUMS.txt Generation
+if (-not $SkipHash -and $createdZips.Count -gt 0) {
+    Write-Host "`n==> Generating SHA-256 Checksums..." -ForegroundColor Cyan
+    $sumsPath = Join-Path $OutputDir "SHA256SUMS.txt"
+    $existingLines = @()
+    if (Test-Path $sumsPath) {
+        $existingLines = Get-Content $sumsPath
+    }
+
+    $newEntries = @()
+    foreach ($z in ($createdZips | Select-Object -Unique)) {
+        $h = Get-FileHash -Path $z -Algorithm SHA256
+        $fileName = Split-Path -Leaf $z
+        $entry = "$($h.Hash)  dist\$fileName"
+        Write-Host "  $entry" -ForegroundColor White
+        $newEntries += $entry
+    }
+
+    # Merge entries cleanly without duplicates
+    $allLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $existingLines) {
+        $isReplaced = $false
+        foreach ($ne in $newEntries) {
+            $namePart = ($ne -split "\s+")[1]
+            if ($line -like "*$namePart*") {
+                $isReplaced = $true
+                break
+            }
+        }
+        if (-not $isReplaced -and $line.Trim()) {
+            $allLines.Add($line)
+        }
+    }
+    foreach ($ne in $newEntries) {
+        $allLines.Add($ne)
+    }
+
+    [System.IO.File]::WriteAllLines($sumsPath, $allLines, [System.Text.Encoding]::UTF8)
+    Write-Host "[+] Updated: $sumsPath" -ForegroundColor Green
+}
+
+Write-Host "`n=================================================================" -ForegroundColor Cyan
+Write-Host "   Release Packaging Completed Successfully!                     " -ForegroundColor Green
+Write-Host "=================================================================" -ForegroundColor Cyan

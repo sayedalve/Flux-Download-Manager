@@ -26,25 +26,59 @@ var SourceType = globalThis.SourceType || (G && G.SourceType) || {
 let rpcRequestCounter = 1;
 let sessionRestorePromise = null;
 
+function getStorageStore(customStore = null) {
+  if (customStore) return customStore;
+  if (typeof chrome !== "undefined" && chrome.storage) {
+    if (chrome.storage.session) return chrome.storage.session;
+    if (chrome.storage.local) return chrome.storage.local;
+  }
+  return null;
+}
+
 // Persist & restore tab media candidates across Manifest V3 Service Worker suspension
 async function persistSessionState(storageArea = null) {
-  const store = storageArea || ((typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) ? chrome.storage.session : null);
+  const store = getStorageStore(storageArea);
   if (!store || typeof store.set !== "function") return false;
   const serializedTabs = {};
   for (const [tabId, list] of G.cacheData.entries()) {
     serializedTabs[String(tabId)] = list;
   }
+
+  // Persist tabUrlMap (active tab URLs)
+  const serializedTabUrls = {};
+  if (G.tabUrlMap) {
+    let count = 0;
+    for (const [tid, url] of G.tabUrlMap.entries()) {
+      if (count++ >= 50) break;
+      serializedTabUrls[String(tid)] = url;
+    }
+  }
+
+  // Persist recent clicked links ring buffer (up to 30 most recent clicks for correlation)
+  const recentClicks = [];
+  if (G.clickedLinksByUrl) {
+    const now = Date.now();
+    for (const item of G.clickedLinksByUrl.values()) {
+      if (item && item.timestamp && (now - item.timestamp) < 1800000) {
+        recentClicks.push(item);
+        if (recentClicks.length >= 30) break;
+      }
+    }
+  }
+
   await store.set({
     flux_cacheData: serializedTabs,
-    flux_disabledHosts: Array.from(G.disabledHosts)
+    flux_disabledHosts: Array.from(G.disabledHosts),
+    flux_tabUrls: serializedTabUrls,
+    flux_recentClicks: recentClicks
   });
   return true;
 }
 
 async function restoreSessionState(storageArea = null) {
-  const store = storageArea || ((typeof chrome !== "undefined" && chrome.storage && chrome.storage.session) ? chrome.storage.session : null);
+  const store = getStorageStore(storageArea);
   if (!store || typeof store.get !== "function") return false;
-  const data = await store.get(["flux_cacheData", "flux_disabledHosts"]);
+  const data = await store.get(["flux_cacheData", "flux_disabledHosts", "flux_tabUrls", "flux_recentClicks"]);
   const cacheSource = data ? data.flux_cacheData : null;
   if (cacheSource) {
     for (const [k, v] of Object.entries(cacheSource)) {
@@ -65,6 +99,29 @@ async function restoreSessionState(storageArea = null) {
   if (Array.isArray(disabledSource)) {
     for (const h of disabledSource) {
       G.disabledHosts.add(h);
+    }
+  }
+  const tabUrlsSource = data ? data.flux_tabUrls : null;
+  if (tabUrlsSource && G.tabUrlMap) {
+    for (const [k, v] of Object.entries(tabUrlsSource)) {
+      const tid = Number(k);
+      if (!G.tabUrlMap.has(tid) && v) {
+        G.tabUrlMap.set(tid, v);
+      }
+    }
+  }
+  const clicksSource = data ? data.flux_recentClicks : null;
+  if (Array.isArray(clicksSource) && G.clickedLinksByUrl) {
+    const now = Date.now();
+    for (const item of clicksSource) {
+      if (item && item.timestamp && (now - item.timestamp) < 1800000) {
+        if (item.url && !G.clickedLinksByUrl.has(item.url)) {
+          G.clickedLinksByUrl.set(item.url, item);
+        }
+        if (item.tabId && G.clickedLinksByTab && !G.clickedLinksByTab.has(item.tabId)) {
+          G.clickedLinksByTab.set(item.tabId, item);
+        }
+      }
     }
   }
   return true;
@@ -557,6 +614,9 @@ async function onDownloadCreatedHandler(
   const isInternal = downloadItem.byExtensionId || targetUrl.startsWith("chrome-extension:") || targetUrl.startsWith("chrome:") || targetUrl.startsWith("brave:");
   if (isBlob || isData || isInternal) {
     invokeSuggestIfNeeded();
+    if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+      try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+    }
     const mechanism = isBlob ? "BROWSER_BLOB_OR_DATA" : (isData ? "BROWSER_DATA_DOWNLOAD" : "BROWSER_INTERNAL_OR_EXTENSION");
     logPipelineStage(generateCorrelationId("blob"), "DOWNLOAD_DELEGATED_TO_BROWSER", {
       mechanism,
@@ -594,12 +654,18 @@ async function onDownloadCreatedHandler(
 
   if (isSiteDisabled(pageReferrer || targetUrl)) {
     invokeSuggestIfNeeded();
+    if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+      try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+    }
     return { intercepted: false, reason: "SITE_EXCLUDED" };
   }
 
   // Never intercept HTML watch pages as ordinary binary downloads
   if (isWebpageWatchUrl(targetUrl)) {
     invokeSuggestIfNeeded();
+    if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+      try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+    }
     return { intercepted: false, reason: "WEBPAGE_URL" };
   }
 
@@ -662,20 +728,10 @@ async function onDownloadCreatedHandler(
     }
   }
 
-  // In Chromium, onDeterminingFilename always fires right after onCreated for every download.
-  if (phase === "created") {
-    // Immediately pause browser download so it cannot complete or download competing bytes
-    if (typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
-      try {
-        chrome.downloads.pause(downloadItem.id, () => {
-          if (chrome.runtime) void chrome.runtime.lastError;
-        });
-      } catch (_) {}
-    }
-
-    if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
-      return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
-    }
+  // In Chromium/Brave/Edge, onDeterminingFilename always fires to determine filename and hold progress.
+  // We defer the offer to onDeterminingFilename without prematurely calling pause(), preventing stuck paused downloads.
+  if (phase === "created" && typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
+    return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
   }
 
   if (!isEligibleExt && !isEligibleMime && !wasExplicitLinkClick && !isAttachment) {
@@ -1239,11 +1295,14 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
             candidates: G.cacheData.get(tabId) || []
           });
         })
-        .catch(() => {
+        .catch((err) => {
+          const errCategory = err && err.category ? err.category : categorizeNativeError(err ? err.message : "");
           sendResponse({
             success: true,
             desktopConnected: false,
             workersAvailable: false,
+            nativeErrorCategory: errCategory,
+            nativeErrorMessage: err ? err.message : "",
             captureEnabled: G.enableCapture,
             siteDisabled: isSiteDisabled(targetTabUrl),
             playerError: (G.playerErrors && G.playerErrors.get(tabId)) || "",
@@ -1766,8 +1825,11 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
 
   if (msg.action === "pingDesktop") {
     sendNativeRpc("system.handshake", { protocolVersion: "1.0" })
-      .then(() => sendResponse({ connected: true }))
-      .catch(() => sendResponse({ connected: false }));
+      .then((hs) => sendResponse({ connected: true, workersAvailable: Boolean(hs && hs.workersAvailable) }))
+      .catch((err) => {
+        const cat = err && err.category ? err.category : categorizeNativeError(err ? err.message : "");
+        sendResponse({ connected: false, error: err ? err.message : "Offline", nativeErrorCategory: cat });
+      });
     return true;
   }
 
@@ -1882,6 +1944,7 @@ if (typeof chrome !== "undefined") {
         if (G.clickedLinksByTab) G.clickedLinksByTab.delete(tabId);
         if (G.bypassTabs) G.bypassTabs.delete(tabId);
         if (G.blobMediaMap) G.blobMediaMap.delete(tabId);
+        persistSessionState().catch(() => {});
       });
     }
   }

@@ -98,12 +98,13 @@ Registered at `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\org.openidm.native
 ## 5. Message Catalog & JSON-RPC 2.0 Schemas
 
 ### 5.1 Limits, Timeouts, and Version Negotiation
-- **Max Message Size:** `1,048,576` bytes (`1 MiB`, matching Chromium's Native Messaging host-to-extension limit). `openidm-nmh.exe` and `openidm.exe` immediately drop connections if `frame_len == 0` or `frame_len > 1048576`.
+- **Max Message Size:** `1,048,576` bytes (`1 MiB`, matching Chromium's Native Messaging host-to-extension limit). `flux-nmh.exe` enforces this limit on stdout frames, returning a standard JSON-RPC 2.0 error frame (`-32603`) if an outgoing response exceeds 1 MiB instead of causing browser host termination. Both NMH and desktop drop incoming frames exceeding 1 MiB.
 - **Version Negotiation:** Major.Minor (`"1.0"`). If `major` versions differ, `system.handshake` returns error `-32001` (`ERR_IPC_VERSION_MISMATCH`) and the extension displays an `"Update OpenIDM Desktop / Extension"` banner.
-- **Timeouts:**
-  - `system.handshake`: `1,500 ms` (allows time for cold start of `openidm.exe --background`).
-  - `download.offer`: `800 ms` (if exceeded, extension leaves download in browser).
+- **Timeouts & Concurrency:**
+  - `system.handshake`: `1,500 ms` (allows time for cold start of `flux.exe --daemon`).
+  - `download.offer`: `5,000 ms` (if exceeded, extension safely resumes download in browser).
   - `stream.add`: `2,000 ms` (acknowledges receipt and opens desktop Track Selection dialog).
+  - **Named Pipe Concurrency:** Client connection attempts in `src/nmh/main.cpp` intercept `ERROR_PIPE_BUSY` from `CreateFileW` and call `WaitNamedPipeW(..., 3000)` to wait for an available pipe instance, preventing false offline detections and duplicate background daemon spawns under concurrent tab requests.
 
 ### 5.2 Method Specifications
 
@@ -111,8 +112,8 @@ Registered at `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\org.openidm.native
 | :--- | :--- | :--- |
 | `system.handshake` | Extension -> Desktop | Negotiate protocol version and fetch current desktop capture settings (enabled state, file extensions, min size). |
 | `system.ConfigUpdated` | Desktop -> Extension (Notification) | Pushed when the user modifies capture settings or exclusion domains in the desktop UI. |
-| `download.offer` | Extension -> Desktop | Offer an intercepted ordinary file download (`URL`, `filename`, `fileSize`, `headers`, `tabUrl`). Returns `{ accepted: bool, taskId: string }`. |
-| `download.startChunkedTransfer` | Extension -> Desktop | Initiates a bounded chunked staging session for client-generated files (`Blob`, `data:` URLs, ChatGPT artifacts). Returns `{ accepted: bool, taskId: string, chunkSize: int }`. |
+| `download.offer` | Extension -> Desktop | Offer an intercepted ordinary file download (`URL`, `filename`, `fileSize`, `headers`, `tabUrl`, `correlationId`). Returns `{ accepted: bool, taskId: string }`. Deduplicated idempotently by URL or `correlationId`. |
+| `download.startChunkedTransfer` | Extension -> Desktop | Initiates a bounded chunked staging session for client-generated files or IPC file transfers. Returns `{ accepted: bool, taskId: string, chunkSize: int }`. (Note: in-browser web app blob/data downloads are kept natively in browser). |
 | `download.transferChunk` | Extension -> Desktop | Transfers a single base64-encoded chunk into the staging file in `%LOCALAPPDATA%\Flux\tmp\`. Returns `{ received: bool, chunkIndex: int, bytesWritten: int }`. |
 | `download.completeChunkedTransfer` | Extension -> Desktop | Finalizes the staged file, verifies size, moves it to the destination directory, runs Defender scan, and records the task as `COMPLETED`. |
 | `download.abortChunkedTransfer` | Extension -> Desktop | Aborts a chunked transfer session and cleans up temporary staging files. |

@@ -555,7 +555,8 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
     bool allow_loopback_redirect,
     std::atomic<bool>& cancel_flag,
     std::function<bool(const HttpResponseMeta&)> on_headers,
-    std::function<bool(const uint8_t* data, size_t len)> on_chunk) {
+    std::function<bool(const uint8_t* data, size_t len)> on_chunk,
+    const HttpNetworkOptions& net_opts) {
 
     std::string current_url = initial_url;
     std::map<std::string, std::string> current_headers = headers;
@@ -602,11 +603,29 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         // ---------------------------------------------------------------------
         // Native Windows 11 WinHTTP Implementation (BUG-003 Fix)
         // ---------------------------------------------------------------------
+        DWORD access_type = WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
+        LPCWSTR proxy_name = WINHTTP_NO_PROXY_NAME;
+        LPCWSTR proxy_bypass = WINHTTP_NO_PROXY_BYPASS;
+        std::wstring wproxy;
+        std::wstring wbypass;
+
+        if (net_opts.proxy_mode == "direct") {
+            access_type = WINHTTP_ACCESS_TYPE_NO_PROXY;
+        } else if (net_opts.proxy_mode == "manual" && !net_opts.proxy_server.empty()) {
+            access_type = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+            wproxy = Utf8ToWide(net_opts.proxy_server);
+            proxy_name = wproxy.c_str();
+            if (!net_opts.proxy_bypass.empty()) {
+                wbypass = Utf8ToWide(net_opts.proxy_bypass);
+                proxy_bypass = wbypass.c_str();
+            }
+        }
+
         HINTERNET hSession = WinHttpOpen(
             L"Flux/0.3.0 (Windows NT 10.0; Win64; x64)",
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-            WINHTTP_NO_PROXY_NAME,
-            WINHTTP_NO_PROXY_BYPASS,
+            access_type,
+            proxy_name,
+            proxy_bypass,
             0);
         if (!hSession) {
             return Result<HttpResponseMeta>::Err("ERR_NET_INIT", "WinHttpOpen failed", true);
@@ -637,6 +656,26 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         // Disable automatic WinHTTP redirects so OpenIDM's SSRF redirect guard inspects every hop
         DWORD disable_redirects = WINHTTP_DISABLE_REDIRECTS;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_DISABLE_FEATURE, &disable_redirects, sizeof(disable_redirects));
+
+        // Windows Integrated Authentication (Negotiate / NTLM autologon for domain/intranet)
+        if (net_opts.enable_integrated_auth) {
+            DWORD autologon = WINHTTP_AUTOLOGON_SECURITY_LEVEL_MEDIUM;
+            WinHttpSetOption(hRequest, WINHTTP_OPTION_AUTOLOGON_POLICY, &autologon, sizeof(autologon));
+        }
+
+        // Explicit proxy credentials (RFC 7235 / WinHTTP)
+        if (!net_opts.proxy_username.empty()) {
+            std::wstring wp_user = Utf8ToWide(net_opts.proxy_username);
+            std::wstring wp_pass = Utf8ToWide(net_opts.proxy_password);
+            WinHttpSetCredentials(hRequest, WINHTTP_AUTH_TARGET_PROXY, WINHTTP_AUTH_SCHEME_BASIC, wp_user.c_str(), wp_pass.c_str(), nullptr);
+        }
+
+        // Explicit origin server credentials
+        if (!net_opts.server_auth_username.empty()) {
+            std::wstring ws_user = Utf8ToWide(net_opts.server_auth_username);
+            std::wstring ws_pass = Utf8ToWide(net_opts.server_auth_password);
+            WinHttpSetCredentials(hRequest, WINHTTP_AUTH_TARGET_SERVER, WINHTTP_AUTH_SCHEME_BASIC, ws_user.c_str(), ws_pass.c_str(), nullptr);
+        }
 
         auto cleanup_winhttp = [&]() {
             if (hRequest) { WinHttpCloseHandle(hRequest); hRequest = nullptr; }
@@ -717,6 +756,9 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
 
         if (meta.status_code >= 400) {
             cleanup_winhttp();
+            if (meta.status_code == 407) {
+                return Result<HttpResponseMeta>::Err("ERR_PROXY_AUTH_REQUIRED", "Proxy authentication required (HTTP 407)", false, true);
+            }
             if (meta.status_code == 401 || meta.status_code == 403 || meta.status_code == 410) {
                 return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH", "HTTP " + std::to_string(meta.status_code), false, true);
             }
@@ -1059,6 +1101,31 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
     }
 
     return Result<HttpResponseMeta>::Err("ERR_HTTP_TOO_MANY_REDIRECTS", "Exceeded 10 redirects");
+}
+
+Result<HttpResponseMeta> HttpClient::ProbeResource(
+    const std::string& url,
+    const std::map<std::string, std::string>& headers,
+    const std::map<std::string, std::string>& auth_headers,
+    const HttpNetworkOptions& net_opts,
+    bool allow_loopback,
+    int timeout_ms) {
+    std::map<std::string, std::string> combined = headers;
+    for (const auto& [k, v] : auth_headers) {
+        combined[k] = v;
+    }
+    std::atomic<bool> cancel{false};
+    return PerformGet(
+        url,
+        combined,
+        std::nullopt,
+        std::nullopt,
+        timeout_ms,
+        allow_loopback,
+        cancel,
+        [](const HttpResponseMeta&) { return false; }, // Terminate early as soon as headers are received
+        [](const uint8_t*, size_t) { return false; },
+        net_opts);
 }
 
 } // namespace openidm::brisk

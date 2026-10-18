@@ -1214,6 +1214,24 @@ TaskDetailsViewModel DesktopView::BuildSelectedTaskDetails() const {
     } else {
         vm.error_explanation = t.error_message;
     }
+
+    vm.speed_limit_summary = (t.speed_limit_bps > 0) ? FormatSpeed(t.speed_limit_bps) : "Unlimited (Global Cap)";
+    if (!t.alternate_urls.empty()) {
+        vm.alternate_urls_summary = std::to_string(t.alternate_urls.size()) + " mirror URL(s) configured";
+    } else {
+        vm.alternate_urls_summary = "None (Primary only)";
+    }
+    if (t.scheduled) {
+        vm.schedule_summary = "Starts at " + t.schedule_time_local;
+        if (!t.schedule_stop_time_local.empty()) {
+            vm.schedule_summary += " | Stops at " + t.schedule_stop_time_local;
+        }
+    } else if (!t.schedule_stop_time_local.empty()) {
+        vm.schedule_summary = "Scheduled stop at " + t.schedule_stop_time_local;
+    } else {
+        vm.schedule_summary = "Manual queue order";
+    }
+
     return vm;
 }
 
@@ -1540,6 +1558,35 @@ Result<void> DesktopView::CycleOrToggleDraftSetting(std::string_view key) {
         m_draft_settings.min_capture_size_bytes = next;
     } else if (key == "show_completion_notification") {
         m_draft_settings.show_completion_notification = !m_draft_settings.show_completion_notification;
+    } else if (key == "proxy_mode") {
+        if (m_draft_settings.proxy_mode == "direct") {
+            m_draft_settings.proxy_mode = "system";
+        } else if (m_draft_settings.proxy_mode == "system") {
+            m_draft_settings.proxy_mode = "manual";
+        } else {
+            m_draft_settings.proxy_mode = "direct";
+        }
+    } else if (key == "queue_completion_action") {
+        if (m_draft_settings.queue_completion_action == "NONE") {
+            m_draft_settings.queue_completion_action = "SLEEP";
+        } else if (m_draft_settings.queue_completion_action == "SLEEP") {
+            m_draft_settings.queue_completion_action = "SHUTDOWN";
+        } else {
+            m_draft_settings.queue_completion_action = "NONE";
+        }
+    } else if (key == "max_auto_retries") {
+        uint32_t next = (m_draft_settings.max_auto_retries >= 15) ? 0 : (m_draft_settings.max_auto_retries + 3);
+        m_draft_settings.max_auto_retries = next;
+    } else if (key == "retry_interval_sec") {
+        const uint32_t presets[] = {5, 10, 15, 30, 60};
+        uint32_t next = 15;
+        for (size_t i = 0; i < 5; ++i) {
+            if (m_draft_settings.retry_interval_sec == presets[i]) {
+                next = presets[(i + 1) % 5];
+                break;
+            }
+        }
+        m_draft_settings.retry_interval_sec = next;
     }
     m_settings_validation_key.clear();
     m_settings_validation_error.clear();
@@ -1646,6 +1693,27 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         SettingControlType::kDropdown,
         FormatConflictPolicyLabel(s.conflict_policy), FormatConflictPolicyLabel(ConflictPolicy::kAutoRename),
         false, s.conflict_policy != saved.conflict_policy);
+    add_item(
+        "max_auto_retries", SettingsCategory::kDownloads, "Automation & Recovery",
+        "Max Automatic Retries",
+        "Number of automatic retries on transient network errors before marking failed (0–50).",
+        SettingControlType::kNumericStepper,
+        std::to_string(s.max_auto_retries) + " retries", "5 retries",
+        false, s.max_auto_retries != saved.max_auto_retries);
+    add_item(
+        "retry_interval_sec", SettingsCategory::kDownloads, "Automation & Recovery",
+        "Base Retry Interval",
+        "Initial wait interval in seconds before retry attempt (with exponential backoff).",
+        SettingControlType::kNumericStepper,
+        std::to_string(s.retry_interval_sec) + " seconds", "15 seconds",
+        false, s.retry_interval_sec != saved.retry_interval_sec);
+    add_item(
+        "queue_completion_action", SettingsCategory::kDownloads, "Automation & Recovery",
+        "Queue Post-Completion Action",
+        "System action taken when all active transfers finish (NONE, SLEEP, or SHUTDOWN).",
+        SettingControlType::kDropdown,
+        s.queue_completion_action, "NONE",
+        false, s.queue_completion_action != saved.queue_completion_action);
 
     // 3. Save Locations
     add_item(
@@ -1662,6 +1730,26 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         SettingControlType::kToggleSwitch,
         s.category_subfolders_enabled ? "Enabled" : "Flat Directory", "Enabled",
         s.category_subfolders_enabled, s.category_subfolders_enabled != saved.category_subfolders_enabled);
+    for (const auto& [cat_name, custom_dir] : s.category_folders) {
+        if (!custom_dir.empty()) {
+            add_item(
+                "cat_folder_" + ToLower(cat_name), SettingsCategory::kSaveLocations, "Custom Category Folders",
+                cat_name + " Folder Path",
+                "Custom destination folder for " + cat_name + " files.",
+                SettingControlType::kDiagnosticReadOnly,
+                custom_dir, s.default_download_dir,
+                false, false);
+        }
+    }
+    if (!s.site_rules.empty()) {
+        add_item(
+            "site_rules_count", SettingsCategory::kSaveLocations, "Site-Specific Rules",
+            "Configured Domain Routing Rules",
+            std::to_string(s.site_rules.size()) + " site rules active in SQLite persistence store.",
+            SettingControlType::kDiagnosticReadOnly,
+            std::to_string(s.site_rules.size()) + " rules", "0 rules",
+            false, false);
+    }
 
     // 4. Connections & Speed Limits
     add_item(
@@ -1692,6 +1780,34 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         SettingControlType::kDropdown,
         FormatBytes(s.min_split_bytes), "128.0 KiB",
         false, s.min_split_bytes != saved.min_split_bytes, true);
+    add_item(
+        "proxy_mode", SettingsCategory::kConnectionsAndSpeed, "Proxy Configuration",
+        "Proxy Connection Mode",
+        "Network proxy mode for HTTP/HTTPS transfers (direct, system, manual).",
+        SettingControlType::kDropdown,
+        s.proxy_mode, "system",
+        false, s.proxy_mode != saved.proxy_mode);
+    add_item(
+        "proxy_server", SettingsCategory::kConnectionsAndSpeed, "Proxy Configuration",
+        "Manual Proxy Server",
+        "Proxy server address (e.g., http://127.0.0.1:8080 or socks5://...).",
+        SettingControlType::kDiagnosticReadOnly,
+        s.proxy_server.empty() ? "(None / Direct)" : s.proxy_server, "(None / Direct)",
+        false, s.proxy_server != saved.proxy_server);
+    add_item(
+        "proxy_bypass", SettingsCategory::kConnectionsAndSpeed, "Proxy Configuration",
+        "Proxy Bypass List",
+        "Hosts and domains that bypass proxy (e.g., <local>;*.internal).",
+        SettingControlType::kDiagnosticReadOnly,
+        s.proxy_bypass.empty() ? "<local>" : s.proxy_bypass, "<local>",
+        false, s.proxy_bypass != saved.proxy_bypass);
+    add_item(
+        "server_auth_username", SettingsCategory::kConnectionsAndSpeed, "Server & Proxy Authentication",
+        "Default HTTP Auth User",
+        "Default username for HTTP Basic/Digest or Proxy 407 authentication (passwords DPAPI-encrypted).",
+        SettingControlType::kDiagnosticReadOnly,
+        s.server_auth_username.empty() ? "(None)" : s.server_auth_username, "(None)",
+        false, s.server_auth_username != saved.server_auth_username);
 
     // 5. Browser Integration
     add_item(
@@ -2183,6 +2299,10 @@ Result<std::filesystem::path> DesktopView::ActionOpenCompletedFile(bool dry_run)
     if (!t.has_value()) {
         return Result<std::filesystem::path>::Err("ERR_NOT_FOUND", "Task not found");
     }
+    if (t->error_code == "ERR_THREAT_DETECTED" || t->status_detail.find("Threat detected") != std::string::npos) {
+        m_last_feedback_message = "Security Block: Cannot open file because an antivirus threat was detected!";
+        return Result<std::filesystem::path>::Err("ERR_THREAT_DETECTED", m_last_feedback_message);
+    }
     if (t->state != TaskState::kCompleted) {
         return Result<std::filesystem::path>::Err("ERR_NOT_COMPLETED", "File is not yet completed");
     }
@@ -2286,6 +2406,44 @@ Result<AppSettings> DesktopView::ActionRestoreDefaultSettings() {
             m_ipc_server->SetCaptureEnabled(r.value->browser_capture_enabled);
         }
         m_last_feedback_message = "Restored default settings";
+    }
+    return r;
+}
+
+Result<void> DesktopView::ActionSetTaskSpeedLimit(const std::string& task_id, uint64_t bps) {
+    auto r = m_controller.SetTaskSpeedLimit(task_id, bps);
+    if (r.ok()) {
+        m_last_feedback_message = (bps == 0) ? "Task speed limit set to Unlimited" : ("Task speed limit set to " + FormatSpeed(bps));
+    }
+    return r;
+}
+
+Result<void> DesktopView::ActionAddAlternateUrl(const std::string& task_id, const std::string& alt_url) {
+    auto r = m_controller.AddAlternateUrl(task_id, alt_url);
+    if (r.ok()) {
+        m_last_feedback_message = "Added alternate mirror URL";
+    }
+    return r;
+}
+
+Result<void> DesktopView::ActionSetTaskSchedule(const std::string& task_id, const std::string& start_time_local, const std::string& stop_time_local) {
+    auto r = m_controller.SetTaskSchedule(task_id, start_time_local, stop_time_local);
+    if (r.ok()) {
+        m_last_feedback_message = "Updated task schedule";
+    }
+    return r;
+}
+
+Result<std::vector<crawler::GrabbedItem>> DesktopView::ActionLaunchSiteGrabber(
+    const crawler::SiteGrabberConfig& cfg,
+    std::atomic<bool>& cancel_requested,
+    crawler::GrabbedItemCallback on_item_found) {
+    m_last_feedback_message = "Running Site Grabber on " + cfg.start_url + "...";
+    auto r = m_controller.CrawlSite(cfg, cancel_requested, on_item_found);
+    if (r.ok()) {
+        m_last_feedback_message = "Site Grabber completed. Found " + std::to_string(r.value->size()) + " media/file items.";
+    } else {
+        m_last_feedback_message = "Site Grabber failed: " + r.error->message;
     }
     return r;
 }
@@ -4350,11 +4508,31 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (!sel.empty()) {
                     auto rep = ctx->controller->ScanTaskFile(sel);
                     if (rep.ok()) {
-                        std::wstring alert_info = (rep.value->status == security::ScanStatus::kClean)
-                            ? L"Antivirus scan completed: No threats were found."
-                            : L"Warning: Potential security risk or threat detected by scanner!";
-                        MessageBoxW(hwnd, alert_info.c_str(), L"Antivirus Scan Result",
-                            (rep.value->status == security::ScanStatus::kClean) ? MB_OK | MB_ICONINFORMATION : MB_OK | MB_ICONWARNING);
+                        std::wstring alert_info;
+                        UINT icon = MB_ICONINFORMATION;
+                        if (rep.value->status == security::ScanStatus::kClean) {
+                            alert_info = L"Antivirus scan completed: Verified clean. No threats were found.";
+                            icon = MB_ICONINFORMATION;
+                        } else if (rep.value->status == security::ScanStatus::kThreatDetected) {
+                            alert_info = L"SECURITY WARNING: A threat was detected by " +
+                                std::wstring(rep.value->scanner_name.begin(), rep.value->scanner_name.end()) +
+                                L"!\nAutomatic execution of this file is blocked.";
+                            icon = MB_ICONSTOP;
+                        } else if (rep.value->status == security::ScanStatus::kScannerError) {
+                            alert_info = L"Antivirus scan failed: The scanner encountered an error during execution.";
+                            icon = MB_ICONWARNING;
+                        } else if (rep.value->status == security::ScanStatus::kUnavailable) {
+                            alert_info = L"Antivirus scanner is unavailable on this system.";
+                            icon = MB_ICONWARNING;
+                        } else {
+                            alert_info = L"Antivirus scan was skipped or not performed.";
+                            icon = MB_ICONWARNING;
+                        }
+                        MessageBoxW(hwnd, alert_info.c_str(), L"Antivirus Scan Result", MB_OK | icon);
+                    } else {
+                        std::wstring err_msg = L"Failed to initiate antivirus scan: " +
+                            std::wstring(rep.error->message.begin(), rep.error->message.end());
+                        MessageBoxW(hwnd, err_msg.c_str(), L"Antivirus Scan Error", MB_OK | MB_ICONERROR);
                     }
                 }
             } else if (cmd == IDM_CTX_ZIP_PREVIEW) {

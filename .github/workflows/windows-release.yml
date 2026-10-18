@@ -2,7 +2,7 @@ name: Windows 11 Release Build & Verification
 
 on:
   push:
-    branches: [ "main", "master", "v0.2.x" ]
+    branches: [ "main", "master", "v0.3.x" ]
     tags: [ "v*" ]
   pull_request:
     branches: [ "main", "master" ]
@@ -93,7 +93,6 @@ jobs:
               throw "CMake configuration failed for all candidate generators."
           }
 
-
       - name: Build Windows Targets
         run: |
           cmake --build build --config Release --target flux flux-nmh flux_unit_tests openidm openidm-nmh openidm_unit_tests
@@ -154,9 +153,8 @@ jobs:
       - name: Compile Inno Setup Installer
         shell: powershell
         run: |
-          if (Test-Path "installer/flux.iss") {
-            $issPath = "installer/flux.iss"
-          } else {
+          $issPath = "installer/flux.iss"
+          if (-not (Test-Path $issPath)) {
             $issPath = "installer/openidm.iss"
           }
           if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
@@ -168,24 +166,14 @@ jobs:
             & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
           }
 
-      - name: Package Standalone Portable Release
+      - name: Package Standalone Portable Releases (Full & Core)
         shell: powershell
         run: |
-          $distDir = "dist/portable/Flux-v0.3.0-win-x64"
-          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-          Copy-Item "build/Release/flux.exe" "$distDir/Flux.exe"
-          Copy-Item "build/Release/flux-nmh.exe" "$distDir/"
-          Copy-Item "tools/win-x64/N_m3u8DL-RE.exe" "$distDir/"
-          Copy-Item "tools/win-x64/ffmpeg.exe" "$distDir/"
-          Copy-Item -Recurse "extension" "$distDir/extension"
-          Copy-Item "README.md" "$distDir/"
-          Copy-Item "LICENSE" "$distDir/"
-          Copy-Item "THIRD_PARTY_NOTICES.md" "$distDir/"
-          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/Flux-v0.3.0-win-x64-portable.zip" -Force
-          $setupExe = if (Test-Path "dist/Flux-Setup-x64-0.3.0.exe") { "dist/Flux-Setup-x64-0.3.0.exe" } elseif (Test-Path "dist/OpenIDM-Setup-x64-0.2.0.exe") { "dist/OpenIDM-Setup-x64-0.2.0.exe" } else { $null }
-          $hashFiles = @("dist/Flux-v0.3.0-win-x64-portable.zip")
-          if ($setupExe) { $hashFiles += $setupExe }
-          Get-FileHash -Algorithm SHA256 $hashFiles | Out-File -Encoding utf8 "dist/SHA256SUMS.txt"
+          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "0.3.0" -PackageType Both -BuildDir "build/Release"
+          if (Test-Path "dist/Flux-Setup-x64-0.3.0.exe") {
+            $h = Get-FileHash "dist/Flux-Setup-x64-0.3.0.exe" -Algorithm SHA256
+            Add-Content -Path "dist/SHA256SUMS.txt" -Value "$($h.Hash)  dist\Flux-Setup-x64-0.3.0.exe" -Encoding utf8
+          }
           Get-Content "dist/SHA256SUMS.txt"
 
       - name: Upload Release Artifacts
@@ -194,7 +182,26 @@ jobs:
           name: flux-v0.3.0-windows-x64
           path: |
             dist/*-Setup-*.exe
-            dist/Flux-v0.3.0-win-x64-portable.zip
+            dist/Flux-v0.3.0-Windows-x64-Full.zip
+            dist/Flux-v0.3.0-Windows-x64-Core.zip
+            dist/Flux-v0.3.0-Windows-x64.zip
             dist/SHA256SUMS.txt
             benchmarks/latest_metrics.json
             docs/BENCHMARK_REPORT.md
+
+      - name: Create GitHub Release Draft
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: false
+          files: |
+            dist/*-Setup-*.exe
+            dist/Flux-v0.3.0-Windows-x64-Full.zip
+            dist/Flux-v0.3.0-Windows-x64-Core.zip
+            dist/Flux-v0.3.0-Windows-x64.zip
+            dist/SHA256SUMS.txt
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

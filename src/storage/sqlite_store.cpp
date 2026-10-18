@@ -77,6 +77,7 @@ Result<void> SqliteStore::Open(const std::filesystem::path& db_path) {
             downloaded_bytes        INTEGER NOT NULL DEFAULT 0,
             range_supported         INTEGER NOT NULL DEFAULT 0,
             max_connections         INTEGER NOT NULL DEFAULT 8,
+            speed_limit_bps         INTEGER NOT NULL DEFAULT 0,
             etag                    TEXT,
             last_modified           TEXT,
             headers_json            TEXT NOT NULL DEFAULT '{}',
@@ -85,6 +86,8 @@ Result<void> SqliteStore::Open(const std::filesystem::path& db_path) {
             expected_sha256         TEXT,
             error_code              TEXT,
             error_message           TEXT,
+            alternate_urls_json     TEXT NOT NULL DEFAULT '[]',
+            schedule_stop_time_local TEXT,
             created_at_ms           INTEGER NOT NULL,
             updated_at_ms           INTEGER NOT NULL,
             completed_at_ms         INTEGER
@@ -110,7 +113,20 @@ Result<void> SqliteStore::Open(const std::filesystem::path& db_path) {
     )SQL";
 
     if (!ExecSql("PRAGMA journal_mode = WAL;").ok()) { ExecSql("PRAGMA journal_mode = TRUNCATE;"); }
-    return ExecSql(kSchemaSql);
+    auto schema_res = ExecSql(kSchemaSql);
+    if (!schema_res.ok()) return schema_res;
+
+    // Idempotent migration for databases created in earlier phases/versions
+    auto try_add_col = [&](const std::string& sql) {
+        char* errmsg = nullptr;
+        sqlite3_exec(m_db, sql.c_str(), nullptr, nullptr, &errmsg);
+        if (errmsg) sqlite3_free(errmsg);
+    };
+    try_add_col("ALTER TABLE tasks ADD COLUMN speed_limit_bps INTEGER NOT NULL DEFAULT 0;");
+    try_add_col("ALTER TABLE tasks ADD COLUMN alternate_urls_json TEXT NOT NULL DEFAULT '[]';");
+    try_add_col("ALTER TABLE tasks ADD COLUMN schedule_stop_time_local TEXT;");
+
+    return Result<void>::Ok();
 }
 
 void SqliteStore::Close() {
@@ -162,15 +178,17 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
         INSERT INTO tasks (
             task_id, task_type, state, queue_id, queue_order, category,
             url, page_url, file_name, save_dir, part_path,
-            total_bytes, downloaded_bytes, range_supported, max_connections,
+            total_bytes, downloaded_bytes, range_supported, max_connections, speed_limit_bps,
             etag, last_modified, headers_json, encrypted_auth_blob, stream_options_json,
-            expected_sha256, error_code, error_message, created_at_ms, updated_at_ms, completed_at_ms
+            expected_sha256, error_code, error_message, alternate_urls_json, schedule_stop_time_local,
+            created_at_ms, updated_at_ms, completed_at_ms
         ) VALUES (
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?
         )
         ON CONFLICT(task_id) DO UPDATE SET
             task_type=excluded.task_type,
@@ -187,6 +205,7 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
             downloaded_bytes=excluded.downloaded_bytes,
             range_supported=excluded.range_supported,
             max_connections=excluded.max_connections,
+            speed_limit_bps=excluded.speed_limit_bps,
             etag=excluded.etag,
             last_modified=excluded.last_modified,
             headers_json=excluded.headers_json,
@@ -195,6 +214,8 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
             expected_sha256=excluded.expected_sha256,
             error_code=excluded.error_code,
             error_message=excluded.error_message,
+            alternate_urls_json=excluded.alternate_urls_json,
+            schedule_stop_time_local=excluded.schedule_stop_time_local,
             updated_at_ms=excluded.updated_at_ms,
             completed_at_ms=excluded.completed_at_ms;
     )SQL";
@@ -208,6 +229,11 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
     std::string state_s = TaskStateToString(task.state);
     std::string headers_s = headers_obj.dump();
     std::string stream_s = stream_obj.dump();
+    json::Array alt_arr;
+    for (const auto& u : task.alternate_urls) {
+        if (!u.empty()) alt_arr.push_back(u);
+    }
+    std::string alt_s = json::Value(alt_arr).dump();
     int64_t now_ms = NowEpochMs();
     int64_t created_ms = task.created_at_ms > 0 ? task.created_at_ms : now_ms;
 
@@ -226,21 +252,28 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
     sqlite3_bind_int64(stmt, 13, static_cast<int64_t>(task.downloaded_bytes));
     sqlite3_bind_int(stmt, 14, task.range_supported ? 1 : 0);
     sqlite3_bind_int(stmt, 15, static_cast<int>(task.max_connections));
-    sqlite3_bind_text(stmt, 16, task.etag.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 17, task.last_modified.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 18, headers_s.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 16, static_cast<int64_t>(task.speed_limit_bps));
+    sqlite3_bind_text(stmt, 17, task.etag.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 18, task.last_modified.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 19, headers_s.c_str(), -1, SQLITE_TRANSIENT);
     if (encrypted_auth.empty()) {
-        sqlite3_bind_null(stmt, 19);
+        sqlite3_bind_null(stmt, 20);
     } else {
-        sqlite3_bind_blob(stmt, 19, encrypted_auth.data(), static_cast<int>(encrypted_auth.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 20, encrypted_auth.data(), static_cast<int>(encrypted_auth.size()), SQLITE_TRANSIENT);
     }
-    sqlite3_bind_text(stmt, 20, stream_s.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 21, task.expected_sha256.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 22, task.error_code.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 23, task.error_message.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 24, created_ms);
-    sqlite3_bind_int64(stmt, 25, now_ms);
-    sqlite3_bind_int64(stmt, 26, task.completed_at_ms);
+    sqlite3_bind_text(stmt, 21, stream_s.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 22, task.expected_sha256.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 23, task.error_code.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 24, task.error_message.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 25, alt_s.c_str(), -1, SQLITE_TRANSIENT);
+    if (task.schedule_stop_time_local.empty()) {
+        sqlite3_bind_null(stmt, 26);
+    } else {
+        sqlite3_bind_text(stmt, 26, task.schedule_stop_time_local.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_int64(stmt, 27, created_ms);
+    sqlite3_bind_int64(stmt, 28, now_ms);
+    sqlite3_bind_int64(stmt, 29, task.completed_at_ms);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -335,7 +368,7 @@ Result<void> SqliteStore::UpdateTaskProgressAndSegments(
             updated_at_ms = ?,
             completed_at_ms = CASE WHEN ? > 0 THEN ? ELSE completed_at_ms END,
             encrypted_auth_blob = CASE WHEN ? IN ('COMPLETED', 'CANCELED') THEN NULL ELSE encrypted_auth_blob END
-        WHERE task_id = ?;
+        WHERE task_id = ? AND (state NOT IN ('CANCELED', 'COMPLETED') OR ? IN ('CANCELED', 'COMPLETED'));
     )SQL";
 
     sqlite3_stmt* stmt = nullptr;
@@ -354,6 +387,7 @@ Result<void> SqliteStore::UpdateTaskProgressAndSegments(
     sqlite3_bind_int64(stmt, 10, comp_ms);
     sqlite3_bind_text(stmt, 11, state_s.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 12, task_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 13, state_s.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 
@@ -407,9 +441,10 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
     const char* sql = R"SQL(
         SELECT task_id, task_type, state, queue_id, queue_order, category,
                url, page_url, file_name, save_dir, part_path,
-               total_bytes, downloaded_bytes, range_supported, max_connections,
+               total_bytes, downloaded_bytes, range_supported, max_connections, speed_limit_bps,
                etag, last_modified, headers_json, encrypted_auth_blob, stream_options_json,
-               expected_sha256, error_code, error_message, created_at_ms, updated_at_ms, completed_at_ms
+               expected_sha256, error_code, error_message, alternate_urls_json, schedule_stop_time_local,
+               created_at_ms, updated_at_ms, completed_at_ms
         FROM tasks
         ORDER BY created_at_ms DESC;
     )SQL";
@@ -435,18 +470,19 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
         t.downloaded_bytes = static_cast<uint64_t>(sqlite3_column_int64(stmt, 12));
         t.range_supported = sqlite3_column_int(stmt, 13) != 0;
         t.max_connections = static_cast<uint32_t>(sqlite3_column_int(stmt, 14));
-        t.etag = ColText(stmt, 15);
-        t.last_modified = ColText(stmt, 16);
+        t.speed_limit_bps = static_cast<uint64_t>(sqlite3_column_int64(stmt, 15));
+        t.etag = ColText(stmt, 16);
+        t.last_modified = ColText(stmt, 17);
 
         try {
-            auto h_val = json::Parse(ColText(stmt, 17));
+            auto h_val = json::Parse(ColText(stmt, 18));
             for (const auto& [k, v] : h_val.as_object()) {
                 t.headers[k] = v.as_string();
             }
         } catch (...) {}
 
-        const void* blob_ptr = sqlite3_column_blob(stmt, 18);
-        int blob_len = sqlite3_column_bytes(stmt, 18);
+        const void* blob_ptr = sqlite3_column_blob(stmt, 19);
+        int blob_len = sqlite3_column_bytes(stmt, 19);
         if (blob_ptr && blob_len > 0) {
             std::vector<uint8_t> cipher(
                 static_cast<const uint8_t*>(blob_ptr),
@@ -463,7 +499,7 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
         }
 
         try {
-            std::string s_json = ColText(stmt, 19);
+            std::string s_json = ColText(stmt, 20);
             if (!s_json.empty()) {
                 auto s_val = json::Parse(s_json);
                 t.stream_options.video_filter = s_val["video_filter"].as_string("best");
@@ -477,12 +513,27 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
             }
         } catch (...) {}
 
-        t.expected_sha256 = ColText(stmt, 20);
-        t.error_code = ColText(stmt, 21);
-        t.error_message = ColText(stmt, 22);
-        t.created_at_ms = sqlite3_column_int64(stmt, 23);
-        t.updated_at_ms = sqlite3_column_int64(stmt, 24);
-        t.completed_at_ms = sqlite3_column_int64(stmt, 25);
+        t.expected_sha256 = ColText(stmt, 21);
+        t.error_code = ColText(stmt, 22);
+        t.error_message = ColText(stmt, 23);
+
+        try {
+            std::string alt_json = ColText(stmt, 24);
+            if (!alt_json.empty()) {
+                auto alt_val = json::Parse(alt_json);
+                if (alt_val.is_array()) {
+                    for (const auto& elem : alt_val.as_array()) {
+                        std::string u = elem.as_string();
+                        if (!u.empty()) t.alternate_urls.push_back(u);
+                    }
+                }
+            }
+        } catch (...) {}
+
+        t.schedule_stop_time_local = ColText(stmt, 25);
+        t.created_at_ms = sqlite3_column_int64(stmt, 26);
+        t.updated_at_ms = sqlite3_column_int64(stmt, 27);
+        t.completed_at_ms = sqlite3_column_int64(stmt, 28);
 
         tasks.push_back(std::move(t));
     }

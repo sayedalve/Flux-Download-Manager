@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "brisk_engine/segment_scheduler.hpp"
+#include "brisk_engine/http_client.hpp"
 #include "common/types.hpp"
 
 namespace openidm::brisk {
@@ -43,6 +44,7 @@ struct EngineConfig {
     int max_retries_per_worker{6};
     uint64_t min_split_bytes{131072}; // 128 KiB minimum split remainder
     bool allow_loopback_redirect{false};
+    HttpClient::HttpNetworkOptions net_opts{};
 };
 
 class TokenBucketLimiter {
@@ -85,14 +87,16 @@ public:
     using ProgressCallback = std::function<void(const EngineProgress&)>;
 
     // Executes a synchronous or background download for TaskModel, updating task in place
-    // and firing on_progress periodically.
+    // and firing on_progress periodically. Dual token-bucket rate limiting enforces both
+    // per-task bandwidth limits and aggregate global bandwidth limits simultaneously.
     Result<std::filesystem::path> ExecuteDownload(
         TaskModel& task,
         std::atomic<bool>& pause_requested,
         std::atomic<bool>& cancel_requested,
-        std::atomic<uint64_t>& speed_limit_bps,
+        std::atomic<uint64_t>& task_speed_limit_bps,
         ProgressCallback on_progress,
-        std::shared_ptr<TokenBucketLimiter> shared_limiter = nullptr);
+        std::shared_ptr<TokenBucketLimiter> global_limiter = nullptr,
+        std::atomic<uint64_t>* global_speed_limit_bps = nullptr);
 
 private:
     EngineConfig m_cfg;

@@ -116,24 +116,34 @@ std::vector<std::string> SiteGrabber::ExtractUrlsFromHtml(std::string_view html,
     std::set<std::string> seen;
 
     static const std::regex kHrefSrcRegex(
-        R"((?:href|src|data-src|data-url)\s*=\s*["']([^"'#\s>]+)["'])",
+        R"((?:href|src|data-src|data-url|action|poster)\s*=\s*["']([^"'#\s>]+)["'])",
+        std::regex::icase | std::regex::optimize);
+
+    static const std::regex kCssUrlRegex(
+        R"(url\(\s*["']?([^"')#\s]+)["']?\s*\))",
         std::regex::icase | std::regex::optimize);
 
     std::string s(html);
-    auto words_begin = std::sregex_iterator(s.begin(), s.end(), kHrefSrcRegex);
-    auto words_end = std::sregex_iterator();
 
-    for (std::sregex_iterator it = words_begin; it != words_end; ++it) {
-        std::smatch match = *it;
-        if (match.size() >= 2) {
-            std::string raw = match[1].str();
-            std::string resolved = ResolveUrl(base_url, raw);
-            if (!resolved.empty() && !seen.count(resolved)) {
-                seen.insert(resolved);
-                urls.push_back(resolved);
+    auto scan_regex = [&](const std::regex& re) {
+        auto begin = std::sregex_iterator(s.begin(), s.end(), re);
+        auto end = std::sregex_iterator();
+        for (std::sregex_iterator it = begin; it != end; ++it) {
+            std::smatch match = *it;
+            if (match.size() >= 2) {
+                std::string raw = match[1].str();
+                std::string resolved = ResolveUrl(base_url, raw);
+                if (!resolved.empty() && !seen.count(resolved)) {
+                    seen.insert(resolved);
+                    urls.push_back(resolved);
+                }
             }
         }
-    }
+    };
+
+    scan_regex(kHrefSrcRegex);
+    scan_regex(kCssUrlRegex);
+
     return urls;
 }
 

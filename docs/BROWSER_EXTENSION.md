@@ -106,12 +106,28 @@ To minimize security risk and pass Chrome Web Store / Firefox AMO review without
 
 ---
 
-## 7. Client-Side and Browser-Generated File Capture (Blob / Data URLs)
+## 7. Client-Side Files and Hardened Download Interception Architecture
 
-1. **Architecture:** When web applications generate files in-memory (`Blob`, `data:` URLs, ChatGPT code/artifact exports) and trigger downloads programmatically via `HTMLAnchorElement.prototype.click()` or `dispatchEvent()`, external download processes (WinHTTP) cannot access the ephemeral in-memory URLs due to browser sandboxing and cross-origin isolation.
-2. **Delayed Revocation & Chunked Streaming:**
-   - The Layer 3 MAIN-world hook (`catch.js`) intercepts `URL.createObjectURL` to retain in-memory `Blob` handles and delays `URL.revokeObjectURL` by 30 seconds to prevent premature garbage collection.
-   - On anchor click or synthetic dispatch, `catch.js` reads the `Blob` in bounded 256 KB slices and converts them to base64.
-   - Chunks are streamed via JSON-RPC (`download.startChunkedTransfer`, `download.transferChunk`, `download.completeChunkedTransfer`) directly into a staging file in `%LOCALAPPDATA%\Flux\tmp\`.
-   - Upon completion, `openidm.exe` moves the file to the user's download directory, executes a Windows Defender antivirus scan, and notifies the desktop UI.
-3. **Fail-Safe Browser Fallback:** If the desktop application is offline or the native messaging RPC rejects the transfer, the extension triggers a fallback with an explicit bypass flag (`fluxBypass`), ensuring the browser handles the download normally without data loss.
+1. **Native Handling of Client-Side `blob:` and `data:` URLs:**
+   - Client-side in-memory files (`blob:`, `data:` URLs, ChatGPT code/artifact exports, Canvas exports) reside exclusively in browser renderer memory and cannot be reached via external WinHTTP sockets.
+   - The extension strictly preserves the browser's native download pipeline for `blob:` and `data:` URLs without suppressing user gestures or monkey-patching `HTMLAnchorElement.prototype.click` / `EventTarget.prototype.dispatchEvent`.
+   - `catch.js` remains a passive media sniffer (XHR/fetch inspection, MediaSource, manifest parsing, YouTube player metadata) and never suppresses anchor clicks.
+
+2. **Gesture-Preserving Click Intent Correlation:**
+   - When a user clicks a downloadable link, `content-script.js` records the click metadata (URL, suggested filename, `download` attribute, referrer, and unique `correlationId`) and sends `{ action: "linkClicked" }` to the service worker.
+   - The content script does **not** cancel the click (`preventDefault()` / `stopPropagation()`). The browser naturally begins the download request, preserving all browser cookies, session state, and redirected destinations.
+
+3. **Chrome `onDeterminingFilename` Coordination:**
+   - In Chromium browsers (Chrome, Edge, Brave), `chrome.downloads.onDeterminingFilename` receives the download with full HTTP response headers (`Content-Disposition`, MIME type, redirected final URL).
+   - The event natively holds the browser file save prompt while `background.js` checks eligibility and queries `flux.exe` via `download.offer` over Native Messaging.
+   - **Acceptance:** If Flux accepts, `suggest()` is called and `chrome.downloads.cancel()` cleanly cancels the browser download while Flux handles the segmented download.
+   - **Offline / Declined / Timeout:** If Flux is offline, times out (5000 ms), or declines, `suggest()` is resolved and `chrome.downloads.resume()` is called, allowing the browser to download the file without user disruption.
+
+4. **Manifest V3 Service Worker Lifecycle Persistence:**
+   - Service worker state is persisted via `chrome.storage.session` (with automatic fallback to `chrome.storage.local`).
+   - Persisted state includes active tab media candidates, tab URL mappings (up to 50 tabs), and a ring buffer of recent link click correlations (up to 30 items with 30-minute expiration), ensuring click correlation succeeds even if the service worker suspended between link click and download creation.
+   - Tab closure (`tabs.onRemoved`) automatically commits storage pruning.
+
+5. **Named Pipe Concurrency and Native Messaging Reliability:**
+   - In `src/nmh/main.cpp`, client connection attempts handle `ERROR_PIPE_BUSY` by waiting on `WaitNamedPipeW` (3000 ms), eliminating spurious daemon launch attempts under concurrent tab activity.
+   - Stdout frame serialization enforces a strict 1 MiB message limit, returning a standard JSON-RPC 2.0 error frame if exceeded to prevent browser native host termination.

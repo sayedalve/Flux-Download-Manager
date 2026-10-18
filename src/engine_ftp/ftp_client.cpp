@@ -173,9 +173,13 @@ Result<std::pair<int, std::string>> ReadFtpResponse(SocketType s) {
 
 Result<std::pair<int, std::string>> SendFtpCommand(SocketType s, const std::string& cmd) {
     std::string wire = cmd + "\r\n";
-    int sent = send(s, wire.data(), static_cast<int>(wire.size()), 0);
-    if (sent < static_cast<int>(wire.size())) {
-        return Result<std::pair<int, std::string>>::Err("ERR_FTP_SEND", "Failed to send FTP command: " + cmd);
+    size_t total_sent = 0;
+    while (total_sent < wire.size()) {
+        int sent = send(s, wire.data() + total_sent, static_cast<int>(wire.size() - total_sent), 0);
+        if (sent <= 0) {
+            return Result<std::pair<int, std::string>>::Err("ERR_FTP_SEND", "Failed to send FTP command: " + cmd);
+        }
+        total_sent += static_cast<size_t>(sent);
     }
     return ReadFtpResponse(s);
 }
@@ -193,11 +197,9 @@ Result<FtpUrl> FtpUrl::Parse(std::string_view url_str) {
         out.scheme = "ftp";
         offset = prefix_ftp.size();
     } else if (s.compare(0, prefix_ftps.size(), prefix_ftps) == 0) {
-        out.scheme = "ftps";
-        out.port = 990;
-        offset = prefix_ftps.size();
+        return Result<FtpUrl>::Err("ERR_FTPS_UNSUPPORTED", "FTPS (FTP over TLS/SSL) is not supported. Plaintext transmission over ftps:// is prohibited.");
     } else {
-        return Result<FtpUrl>::Err("ERR_INVALID_FTP_URL", "URL must begin with ftp:// or ftps://");
+        return Result<FtpUrl>::Err("ERR_INVALID_FTP_URL", "URL must begin with ftp://");
     }
 
     size_t path_pos = s.find('/', offset);
@@ -222,6 +224,7 @@ Result<FtpUrl> FtpUrl::Parse(std::string_view url_str) {
         } else {
             out.user = PathSanitizer::UrlDecode(userinfo);
         }
+        out.username = out.user;
     }
 
     // Host & Port
@@ -263,6 +266,10 @@ Result<uint64_t> FtpClient::ProbeFileSize(
     const FtpUrl& url,
     int timeout_ms,
     bool allow_loopback) {
+
+    if (url.scheme == "ftps") {
+        return Result<uint64_t>::Err("ERR_FTPS_UNSUPPORTED", "FTPS connections are unsupported; plaintext transmission is prohibited.");
+    }
 
     auto conn_res = ConnectHost(url.host, url.port, timeout_ms, allow_loopback);
     if (!conn_res.ok()) return Result<uint64_t>::Err(conn_res.error->code, conn_res.error->message);
@@ -309,11 +316,16 @@ Result<uint64_t> FtpClient::DownloadFile(
     uint64_t resume_offset,
     std::atomic<bool>& pause_requested,
     std::atomic<bool>& cancel_requested,
-    std::atomic<uint64_t>& speed_limit_bps,
+    std::atomic<uint64_t>& task_speed_limit_bps,
     FtpProgressCallback on_progress,
     std::shared_ptr<brisk::TokenBucketLimiter> global_limiter,
+    std::atomic<uint64_t>* global_speed_limit_bps,
     int timeout_ms,
     bool allow_loopback) {
+
+    if (url.scheme == "ftps") {
+        return Result<uint64_t>::Err("ERR_FTPS_UNSUPPORTED", "FTPS connections are unsupported; plaintext transmission is prohibited.");
+    }
 
     auto conn_res = ConnectHost(url.host, url.port, timeout_ms, allow_loopback);
     if (!conn_res.ok()) return Result<uint64_t>::Err(conn_res.error->code, conn_res.error->message);
@@ -347,42 +359,72 @@ Result<uint64_t> FtpClient::DownloadFile(
         if (ss >> code >> bytes) total_size = bytes;
     }
 
-    // Passive Mode (PASV)
-    auto pasv_res = SendFtpCommand(ctrl.Get(), "PASV");
-    if (!pasv_res.ok() || pasv_res.value->first != 227) {
-        return Result<uint64_t>::Err("ERR_FTP_PASV", "PASV command failed");
+    // Passive Mode Negotiation: Try EPSV (RFC 2428) first, fallback to PASV (RFC 959)
+    std::string data_host = url.host;
+    uint16_t data_port = 0;
+
+    auto epsv_res = SendFtpCommand(ctrl.Get(), "EPSV");
+    if (epsv_res.ok() && epsv_res.value->first == 229) {
+        const std::string& epsv_str = epsv_res.value->second;
+        size_t p1 = epsv_str.find("|||");
+        if (p1 != std::string::npos) {
+            size_t p2 = epsv_str.find('|', p1 + 3);
+            if (p2 != std::string::npos) {
+                data_port = static_cast<uint16_t>(std::atoi(epsv_str.substr(p1 + 3, p2 - p1 - 3).c_str()));
+            }
+        }
     }
 
-    // Parse (h1,h2,h3,h4,p1,p2)
-    const std::string& pasv_str = pasv_res.value->second;
-    size_t open_paren = pasv_str.find('(');
-    size_t close_paren = pasv_str.find(')', open_paren);
-    if (open_paren == std::string::npos || close_paren == std::string::npos) {
-        return Result<uint64_t>::Err("ERR_FTP_PASV", "Invalid PASV response format");
-    }
-    std::string ip_port_str = pasv_str.substr(open_paren + 1, close_paren - open_paren - 1);
-    int h1, h2, h3, h4, p1, p2;
-    if (sscanf(ip_port_str.c_str(), "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
-        return Result<uint64_t>::Err("ERR_FTP_PASV", "Failed to parse PASV host/port");
-    }
+    if (data_port == 0) {
+        // Fallback to PASV
+        auto pasv_res = SendFtpCommand(ctrl.Get(), "PASV");
+        if (!pasv_res.ok() || pasv_res.value->first != 227) {
+            return Result<uint64_t>::Err("ERR_FTP_PASV", "PASV and EPSV commands failed");
+        }
 
-    char data_ip[32];
-    snprintf(data_ip, sizeof(data_ip), "%d.%d.%d.%d", h1, h2, h3, h4);
-    uint16_t data_port = static_cast<uint16_t>((p1 << 8) | p2);
+        const std::string& pasv_str = pasv_res.value->second;
+        size_t open_paren = pasv_str.find('(');
+        size_t close_paren = pasv_str.find(')', open_paren);
+        if (open_paren == std::string::npos || close_paren == std::string::npos) {
+            return Result<uint64_t>::Err("ERR_FTP_PASV", "Invalid PASV response format");
+        }
+        std::string ip_port_str = pasv_str.substr(open_paren + 1, close_paren - open_paren - 1);
+        int h1, h2, h3, h4, p1, p2;
+        if (sscanf(ip_port_str.c_str(), "%d,%d,%d,%d,%d,%d", &h1, &h2, &h3, &h4, &p1, &p2) != 6) {
+            return Result<uint64_t>::Err("ERR_FTP_PASV", "Failed to parse PASV host/port");
+        }
+
+        data_port = static_cast<uint16_t>((p1 << 8) | p2);
+        char data_ip[32];
+        snprintf(data_ip, sizeof(data_ip), "%d.%d.%d.%d", h1, h2, h3, h4);
+        uint32_t ip_val = ((h1 & 0xFF) << 24) | ((h2 & 0xFF) << 16) | ((h3 & 0xFF) << 8) | (h4 & 0xFF);
+
+        // Standard FTP NAT workaround: if the server advertises a private/loopback IP address,
+        // use the control connection's host address to prevent NAT traversal drop.
+        if (!allow_loopback && brisk::HttpClient::IsPrivateOrLoopbackIp(ip_val)) {
+            data_host = url.host;
+        } else {
+            data_host = std::string(data_ip);
+        }
+    }
 
     // Connect Data Socket
-    auto data_conn = ConnectHost(data_ip, data_port, timeout_ms, allow_loopback);
+    auto data_conn = ConnectHost(data_host, data_port, timeout_ms, allow_loopback);
     if (!data_conn.ok()) {
-        return Result<uint64_t>::Err("ERR_FTP_DATA_CONNECT", "Failed to connect to FTP data port " + std::string(data_ip) + ":" + std::to_string(data_port));
+        return Result<uint64_t>::Err("ERR_FTP_DATA_CONNECT", "Failed to connect to FTP data port " + data_host + ":" + std::to_string(data_port));
     }
     AutoSocket data_sock(data_conn.value.value());
 
-    // REST offset if resuming
+    // REST offset validation if resuming (RFC 3659)
+    bool resume_accepted = false;
     if (resume_offset > 0) {
         auto rest_res = SendFtpCommand(ctrl.Get(), "REST " + std::to_string(resume_offset));
-        if (!rest_res.ok() || rest_res.value->first != 350) {
-            OPENIDM_LOG_WARN("FtpClient", "FTP server rejected REST " + std::to_string(resume_offset) + "; restarting from zero");
+        if (rest_res.ok() && rest_res.value->first == 350) {
+            resume_accepted = true;
+        } else {
+            OPENIDM_LOG_WARN("FtpClient", "FTP server rejected REST " + std::to_string(resume_offset) + "; restarting transfer from zero");
             resume_offset = 0;
+            resume_accepted = false;
         }
     }
 
@@ -393,23 +435,26 @@ Result<uint64_t> FtpClient::DownloadFile(
     }
 
     std::ios_base::openmode mode = std::ios::binary | std::ios::out;
-    if (resume_offset > 0) {
-        mode |= std::ios::in; // Open existing
+    if (resume_accepted && resume_offset > 0) {
+        mode |= std::ios::in; // Open existing partial file
     } else {
-        mode |= std::ios::trunc;
+        mode |= std::ios::trunc; // Clean truncation: never append to stale content
     }
 
     std::fstream ofs(target_part_path, mode);
     if (!ofs.is_open()) {
         return Result<uint64_t>::Err("ERR_STORAGE_OPEN", "Failed to open part file: " + target_part_path.string());
     }
-    ofs.seekp(resume_offset, std::ios::beg);
+    if (resume_accepted && resume_offset > 0) {
+        ofs.seekp(resume_offset, std::ios::beg);
+    }
 
     uint64_t total_written = resume_offset;
     std::vector<char> buf(65536);
     auto start_time = std::chrono::steady_clock::now();
     uint64_t last_bytes = resume_offset;
     auto last_calc = start_time;
+    auto task_limiter = std::make_shared<brisk::TokenBucketLimiter>();
 
     while (!pause_requested.load() && !cancel_requested.load()) {
         int n = recv(data_sock.Get(), buf.data(), static_cast<int>(buf.size()), 0);
@@ -420,13 +465,16 @@ Result<uint64_t> FtpClient::DownloadFile(
             break; // EOF
         }
 
-        // Token bucket limiting
-        if (global_limiter) {
-            global_limiter->Consume(n, speed_limit_bps, cancel_requested);
+        // Dual token bucket rate limiting (per-task cap and aggregate global cap)
+        if (task_speed_limit_bps.load(std::memory_order_relaxed) > 0) {
+            task_limiter->Consume(static_cast<size_t>(n), task_speed_limit_bps, cancel_requested);
+        }
+        if (global_limiter && global_speed_limit_bps && global_speed_limit_bps->load(std::memory_order_relaxed) > 0) {
+            global_limiter->Consume(static_cast<size_t>(n), *global_speed_limit_bps, cancel_requested);
         }
 
         ofs.write(buf.data(), n);
-        total_written += n;
+        total_written += static_cast<uint64_t>(n);
 
         auto now = std::chrono::steady_clock::now();
         auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_calc).count();
@@ -449,6 +497,8 @@ Result<uint64_t> FtpClient::DownloadFile(
     data_sock.Close();
 
     if (cancel_requested.load()) {
+        std::error_code ec;
+        std::filesystem::remove(target_part_path, ec);
         SendFtpCommand(ctrl.Get(), "ABOR");
         SendFtpCommand(ctrl.Get(), "QUIT");
         return Result<uint64_t>::Err("ERR_CANCELED", "FTP download canceled");
@@ -460,6 +510,9 @@ Result<uint64_t> FtpClient::DownloadFile(
 
     auto comp_res = ReadFtpResponse(ctrl.Get());
     SendFtpCommand(ctrl.Get(), "QUIT");
+    if (comp_res.ok() && comp_res.value->first != 226 && comp_res.value->first != 250) {
+        return Result<uint64_t>::Err("ERR_FTP_TRANSFER", "FTP transfer did not complete cleanly: " + comp_res.value->second);
+    }
     return Result<uint64_t>::Ok(total_written);
 }
 

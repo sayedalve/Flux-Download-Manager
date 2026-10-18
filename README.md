@@ -137,21 +137,24 @@ Every screenshot below is captured directly from the actual running Flux desktop
   <tr>
     <td width="33%" valign="top">
       <h4>🌐 Protocols &amp; Streams</h4>
-      HTTP/1.1, HTTP/2, and HTTPS TLS 1.3 via native Windows <code>WinHTTP</code>.<br><br>
-      HLS (<code>.m3u8</code>) master and variant playlist detection, MPEG-DASH (<code>.mpd</code>) manifest probing, Microsoft Smooth Streaming (MSS), and progressive video containers (<code>.mp4</code>, <code>.webm</code>, <code>.mkv</code>, <code>.mov</code>, <code>.ts</code>).<br><br>
-      Automatic 301/302/307/308 redirect resolution, RFC 5987 / RFC 6266 encoded <code>Content-Disposition</code> filenames, and chunked transfer decoding.
+      HTTP/1.1, HTTP/2, and HTTPS TLS 1.3 via native Windows <code>WinHTTP</code> with Direct, System, and Manual Proxy modes and Windows Integrated Auth (NTLM/Negotiate).<br><br>
+      RFC 959 / 2428 / 3659 native WinSock2 FTP client with EPSV, PASV fallback, NAT private IP bypass, and REST 350 resume verification.<br><br>
+      Dynamic mirror failover (alternate URLs) with byte-exact <code>Content-Length</code> validation to prevent partial file corruption.<br><br>
+      HLS (<code>.m3u8</code>), MPEG-DASH (<code>.mpd</code>), Microsoft Smooth Streaming (MSS), and progressive containers (<code>.mp4</code>, <code>.webm</code>, <code>.mkv</code>, <code>.mov</code>, <code>.ts</code>) with pre-flight redirect resolution and 403 expired signed URL detection.
     </td>
     <td width="33%" valign="top">
       <h4>⚡ Download Engine</h4>
       Dynamic segment splitting inspired by Brisk: connection scaling (1 to 32), work-stealing range scheduler (<code>AcquireNextOrStealSegment</code>), and secondary rejection rollback (<code>RollbackUnstartedStolenSegment</code>).<br><br>
+      Dual token-bucket rate limiting enforcing both per-task speed limits and global bandwidth caps without CPU busy-waiting.<br><br>
       Crash-resilient storage backed by SQLite 3 with WAL journaling. Atomic file commits via isolated <code>*.part</code> files prevent corrupt half-written downloads.<br><br>
-      Pre-flight disk space guards, segment stall timeouts, and automatic retry backoff.
+      Automatic retry loop with exponential backoff for transient network interruptions.
     </td>
     <td width="33%" valign="top">
       <h4>🖥️ Windows 11 Native UX</h4>
-      Native Win32 desktop application with Direct2D hardware acceleration. Deep Charcoal palette (<code>#161618</code> titlebar, <code>#1E1F22</code> background), custom smooth progress bars, and subtle starfield ambient motion.<br><br>
-      Per-Monitor DPI v2 scaling (100%, 125%, 150%, 200%+), virtualized task table, middle-ellipsis filename truncation, and search-as-you-type.<br><br>
-      Full system tray integration: minimize on close, start minimized, and global tray context menu.
+      Native Win32 desktop application with Direct2D hardware acceleration. Deep Charcoal palette, custom smooth progress bars, and subtle starfield ambient motion.<br><br>
+      Hierarchical category routing (Priority: User Explicit &gt; Domain Site Rules &gt; Custom Extension Mappings &gt; Configured Category Folders &gt; Subfolders &gt; Default Dir).<br><br>
+      Task stop times, queue start/stop scheduling loop, and safe post-queue completion power actions (System Sleep / Shutdown via native Windows APIs).<br><br>
+      Per-Monitor DPI v2 scaling, virtualized task table, middle-ellipsis filename truncation, and search-as-you-type.
     </td>
   </tr>
   <tr>
@@ -162,16 +165,16 @@ Every screenshot below is captured directly from the actual running Flux desktop
       In-page "Download with Flux" video overlay button rendered inside a closed Shadow DOM (<code>mode: "closed"</code>) to prevent CSS leaks.
     </td>
     <td width="33%" valign="top">
-      <h4>🤖 Automation &amp; CLI</h4>
+      <h4>🤖 Automation &amp; Tools</h4>
       Full command-line interface: headless daemon mode (<code>--daemon</code>), queue listing (<code>--list</code>), stream probing (<code>--probe &lt;url&gt;</code>), and desktop UI state snapshots (<code>--gui-snapshot</code>).<br><br>
-      Standard JSON-RPC 2.0 communication protocol over local named pipe.<br><br>
+      Recursive Breadth-First Site Grabber with CSS <code>url()</code> &amp; HTML media attribute parsing, configurable destination folders, and SSRF private IP protection.<br><br>
       Batch task export and import via standard JSON and CSV files for easy queue backup and transfer.
     </td>
     <td width="33%" valign="top">
       <h4>🛡️ Security &amp; Privacy</h4>
       Strict path sanitization: strips path traversal (<code>..</code>), drive letters, control characters, and NTFS alternate streams (<code>:</code>).<br><br>
-      Out-of-process stream extraction workers (<code>N_m3u8DL-RE</code>, <code>FFmpeg</code>) are isolated inside restricted Windows Job Objects.<br><br>
-      Sensitive headers (<code>Cookie</code>, <code>Authorization</code>, tokens) are passed via temporary ACL-restricted response files and permanently redacted in logs.
+      Out-of-process stream extraction workers (<code>N_m3u8DL-RE</code>, <code>FFmpeg</code>) are isolated inside restricted Windows Job Objects with automatic child process cleanup.<br><br>
+      Sensitive headers (<code>Cookie</code>, <code>Authorization</code>, tokens) and proxy/server credentials are encrypted at rest with Windows DPAPI and permanently redacted in logs.
     </td>
   </tr>
 </table>
@@ -243,6 +246,7 @@ Flux includes a clean, lightweight Manifest V3 extension compatible with Google 
 - **Dual-Origin Security:** The Chromium native host manifest authorizes both store IDs and development keys, preventing native messaging connection failures when running unpacked.
 - **Zero Localhost Exposure:** Unlike legacy download managers that open an unauthenticated HTTP port on `localhost` (exposing users to drive-by website requests), Flux communicates exclusively via Native Messaging bridged to a local, user-ACL-restricted Windows Named Pipe.
 - **Media Detection:** Sniffs `.mp4`, `.webm`, `.m3u8`, and `.mpd` URLs from network requests, deduplicates master and variant playlists, and ignores individual `.ts` and `.m4s` segment requests to prevent UI flooding.
+- **Reliable Fallback & Gesture Safety:** Link clicks retain user gesture context without destructive cancellation. In Chromium browsers, `onDeterminingFilename` holds the save prompt while querying the desktop; if Flux is offline or rejects, the browser download automatically resumes with zero data loss. Client-side generated files (`blob:`, `data:` URLs, ChatGPT exports) are safely preserved for native browser handling without DOM monkey-patching.
 
 See [`docs/BROWSER_EXTENSION.md`](docs/BROWSER_EXTENSION.md) and [`docs/NATIVE_MESSAGING_AND_IPC.md`](docs/NATIVE_MESSAGING_AND_IPC.md).
 
@@ -331,14 +335,14 @@ See [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md) and [`docs/DATA
 
 ### Downloads
 
-The latest release packages are available on the [GitHub Releases page](https://github.com/flux-download-manager/flux/releases):
+The latest release packages are available on the [GitHub Releases page](https://github.com/sayedalve/Flux-Download-Manager/releases):
 
 | Package | Format | Description |
 |---|---|---|
-| **Flux Setup (x64)** | `Flux-setup-x64.exe` | Recommended Windows installer with automatic native messaging registration |
-| **Flux Portable (x64)** | `Flux-windows-x64-portable.zip` | Standalone portable executable; extract and run anywhere |
-| **Flux Portable (ARM64)** | `Flux-windows-arm64-portable.zip` | Native ARM64 portable package for Windows on Snapdragon |
-| **Browser Extension** | `flux-extension-v0.3.0.zip` | Manifest V3 extension for Google Chrome, Brave, Edge & Firefox |
+| **Flux Installer (x64)** | `Flux-Setup-x64-0.3.0.exe` | Recommended Inno Setup installer; per-user non-elevated install, desktop shortcuts, and automatic browser registration |
+| **Flux Portable Full (x64)** | `Flux-v0.3.0-Windows-x64-Full.zip` | Complete portable offline release; includes N_m3u8DL-RE and FFmpeg stream extraction workers |
+| **Flux Portable Core (x64)** | `Flux-v0.3.0-Windows-x64-Core.zip` | Lightweight portable release; high-speed segmented HTTP/HTTPS engine (< 2 MB) |
+| **Browser Extension** | `extension/` or `flux-extension-v0.3.0.zip` | Manifest V3 extension for Google Chrome, Brave, Microsoft Edge & Mozilla Firefox |
 
 ### Browser Extension Setup
 
@@ -348,26 +352,26 @@ The latest release packages are available on the [GitHub Releases page](https://
    - Click **Load unpacked** and select the `extension/` directory (or extract `flux-extension-v0.3.0.zip`).
    - Run the included PowerShell script to register the Native Messaging Host in the Windows Registry:
      ```powershell
-     powershell -ExecutionPolicy Bypass -File scripts\register_native_host.ps1
+     powershell -ExecutionPolicy Bypass -File scripts\register-native-messaging.ps1
      ```
 
 2. **Mozilla Firefox:**
    - Open `about:debugging#/runtime/this-firefox`.
-   - Click **Load Temporary Add-on...** and select `extension/manifest.firefox.json`.
+   - Click **Load Temporary Add-on...** and select `extension/manifest.firefox.json` (or `extension/manifest.json`).
 
 ### Building from Source
 
 To compile Flux from source, you need **Visual Studio 2022** (Desktop development with C++) and **CMake 3.25+**:
 
 ```cmd
-git clone https://github.com/flux-download-manager/flux.git
-cd flux
+git clone https://github.com/sayedalve/Flux-Download-Manager.git
+cd Flux-Download-Manager
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-The resulting binaries will be placed in `build\Release\`:
-- `Flux.exe`: Main desktop application and core engine.
+The resulting binaries will be placed in `build\Release\` (or `build\win-x64\Release\`):
+- `flux.exe`: Main desktop application and core engine.
 - `flux-nmh.exe`: Stateless Native Messaging Host.
 
 See [`docs/DEVELOPMENT_SETUP.md`](docs/DEVELOPMENT_SETUP.md) and [`docs/WINDOWS_BUILD_AND_PACKAGING.md`](docs/WINDOWS_BUILD_AND_PACKAGING.md).

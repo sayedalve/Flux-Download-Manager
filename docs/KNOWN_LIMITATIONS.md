@@ -17,6 +17,12 @@
    - **Behavior:** `blob:` URLs themselves are never sent to `openidm` as downloadable file URLs because `blob:` handles exist only inside the browser renderer's memory.
 3. **Sites Requiring Custom JavaScript Challenge Solving per Segment (e.g., YouTube Signature Cipher / PO Token):**
    - **Limitation:** OpenIDM is a general HTTP/HTTPS and standard HLS/DASH/MSS download manager, not a site-specific scraper engine like `yt-dlp`. Sites that dynamically sign or throttle every individual segment via proprietary JS VM challenges are not supported natively.
+4. **BitTorrent Download Execution Disabled:**
+   - **Limitation:** Bencode decoding and magnet URI parsing (BEP 3 / BEP 9) are supported for metadata inspection. However, peer-to-peer BitTorrent transfer is not implemented in this build.
+   - **Behavior:** Starting a BitTorrent or magnet download fails cleanly with error code `ERR_TORRENT_UNSUPPORTED` (*"BitTorrent downloading is not supported in this version."*). Flux does not simulate progress, does not increment piece counters via timers, and does not create empty dummy files on disk.
+5. **FTPS (FTP over TLS/SSL) Disabled Pending Verified TLS Implementation:**
+   - **Limitation:** Plain FTP (RFC 959, 2428, 3659) with PASV mode and REST resume is supported. FTPS (RFC 4217) requires TLS negotiation on control and data channels with strict certificate validation, which is not yet implemented.
+   - **Behavior:** `ftps://` URLs are rejected immediately with `ERR_FTPS_UNSUPPORTED` (*"FTPS (FTP over TLS/SSL) is not supported. Plaintext transmission over ftps:// is prohibited."*) before any socket connection is attempted, preventing plaintext credential or data leakage over unencrypted channels.
 
 ---
 
@@ -28,6 +34,9 @@
    - While OpenIDM's passive `webRequest` sniffer (`Layer 1`) still detects media and manifests inside all iframes and surfaces them in the extension toolbar popup, the in-page floating Shadow DOM button (`Layer 2`) cannot render inside an `<iframe>` if the host page sets a restrictive `sandbox` attribute that blocks script execution.
 3. **Pause/Resume on Non-Range HTTP Servers (`FR-002`):**
    - When an HTTP server omits `Accept-Ranges: bytes` or responds `200 OK` to a `Range` request, pausing the download cannot preserve progress; resuming restarts cleanly from byte `0` after clearing stale segment state.
+4. **Client-Side Generated Files (`blob:`, `data:` URLs, ChatGPT Exports):**
+   - In-memory files created by client-side web application scripts (such as ChatGPT chat exports/artifacts, WebGL Canvas snapshots, and local CSV generators) exist purely in the browser renderer heap and cannot be downloaded by external processes like WinHTTP.
+   - Flux intentionally leaves these files to the browser's native download pipeline without monkey-patching DOM events or intercepting user gestures, ensuring reliable, uncorrupted client saves.
 
 ---
 

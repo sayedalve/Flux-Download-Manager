@@ -119,6 +119,18 @@ body {
   color: var(--status-warn);
 }
 
+.conn-warning {
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: var(--status-warn);
+}
+
+.conn-error {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #EF4444;
+}
+
 /* Site Capture Switch */
 .toggle {
   display: inline-flex;

@@ -741,6 +741,25 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     task.part_path = task_tmp_dir.string();
 
     std::string input_target = task.url;
+    if (task.stream_options.cached_manifest_body.empty() && !task.url.empty() &&
+        (task.url.rfind("http://", 0) == 0 || task.url.rfind("https://", 0) == 0)) {
+        auto probe = brisk::HttpClient::ProbeResource(task.url, task.headers, task.auth_headers, {}, m_cfg.allow_loopback_manifests);
+        if (probe.ok()) {
+            if (probe.value->status_code == 403 || probe.value->status_code == 401) {
+                task.state = TaskState::kFailed;
+                task.error_code = "ERR_STREAM_URL_EXPIRED";
+                task.error_message = "Stream manifest URL expired (HTTP " + std::to_string(probe.value->status_code) + "). Please refresh URL in Flux to resume.";
+                task.status_detail = task.error_message;
+                return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+            }
+            if (!probe.value->final_url.empty() && probe.value->final_url != task.url) {
+                OPENIDM_LOG_INFO("StreamAdapter", "Manifest redirected: " + task.url + " -> " + probe.value->final_url);
+                task.url = probe.value->final_url;
+                input_target = task.url;
+            }
+        }
+    }
+
     if (!task.stream_options.cached_manifest_body.empty()) {
         bool is_dash = (task.task_type == TaskType::kStreamDash ||
                         task.stream_options.cached_manifest_body.find("<MPD") != std::string::npos);
@@ -834,7 +853,12 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     auto process_line = [&](const std::string& line) {
         if (line.empty()) return;
         OPENIDM_LOG_INFO("StreamWorker", line);
-        if (line.find("ERROR") != std::string::npos || line.find("Exception") != std::string::npos) {
+        if (line.find("ERROR") != std::string::npos ||
+            line.find("Exception") != std::string::npos ||
+            line.find("403") != std::string::npos ||
+            line.find("Forbidden") != std::string::npos ||
+            line.find("401") != std::string::npos ||
+            line.find("Unauthorized") != std::string::npos) {
             last_error_line = line;
         }
         if (line.find("Muxing") != std::string::npos || line.find("Merging") != std::string::npos) {
@@ -1087,8 +1111,19 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
         std::filesystem::remove_all(task_tmp_dir, ec);
         std::filesystem::remove(muxed_output, ec);
         task.state = TaskState::kFailed;
-        task.error_code = (last_error_line.find("DRM") != std::string::npos) ? "ERR_STREAM_DRM_PROTECTED" : "ERR_STREAM_WORKER_CRASH";
-        task.error_message = last_error_line.empty() ? ("Worker exited with code " + std::to_string(exit_code)) : last_error_line;
+        if (last_error_line.find("DRM") != std::string::npos) {
+            task.error_code = "ERR_STREAM_DRM_PROTECTED";
+            task.error_message = last_error_line;
+        } else if (last_error_line.find("403") != std::string::npos ||
+                   last_error_line.find("Forbidden") != std::string::npos ||
+                   last_error_line.find("401") != std::string::npos ||
+                   last_error_line.find("Unauthorized") != std::string::npos) {
+            task.error_code = "ERR_STREAM_URL_EXPIRED";
+            task.error_message = "Stream manifest URL expired (HTTP 403 Forbidden). Please refresh the URL in Flux to resume.";
+        } else {
+            task.error_code = "ERR_STREAM_WORKER_CRASH";
+            task.error_message = last_error_line.empty() ? ("Worker exited with code " + std::to_string(exit_code)) : last_error_line;
+        }
         task.status_detail = task.error_message;
         return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
     }

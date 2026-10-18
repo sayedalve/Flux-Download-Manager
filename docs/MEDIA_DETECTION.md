@@ -94,11 +94,12 @@ Without deduplication, the user sees three confusing `.m3u8` entries in the popu
 
 ---
 
-## 6. Explicit Limitations on MSE `blob:` URLs (`KNOWN_LIMITATIONS.md`)
+## 6. Explicit Limitations on MSE and Client-Side `blob:` URLs (`KNOWN_LIMITATIONS.md`)
 
-OpenIDM / Flux documentation and UI never promise that every `blob:` URL can be reconstructed into a downloadable file:
+OpenIDM / Flux documentation and UI never promise that every `blob:` URL can be reconstructed into an external downloadable file:
 - Standard `blob:` URLs created via `URL.createObjectURL(mediaSource)` are downloaded by capturing the **network manifest (`.m3u8`/`.mpd`)** that feeds the `MediaSource`.
 - If a site uses a custom proprietary binary WebSocket protocol or custom WebAssembly cipher to feed raw decrypted frames into `SourceBuffer.appendBuffer` without any HTTP manifest, `N_m3u8DL-RE` cannot download it. Supporting raw MSE buffer recording (`SourceBuffer` tap) is deferred as an experimental post-MVP option (`OPEN_QUESTIONS.md` `OQ-004`).
+- **Client-Side Document/Data `blob:` URLs:** In-memory client-side generated files (`blob:` or `data:` URLs from web apps, CSV/Canvas exports, and AI chat artifacts like ChatGPT exports) reside strictly in the browser renderer memory. Flux does not monkey-patch DOM click events or attempt to stream these in-memory blobs over Native Messaging, but preserves the browser's native download pipeline without disruption.
 
 ---
 

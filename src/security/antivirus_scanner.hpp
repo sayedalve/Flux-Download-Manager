@@ -14,11 +14,12 @@ enum class ScanStatus {
     kClean,
     kThreatDetected,
     kScannerError,
-    kSkipped
+    kSkipped,
+    kUnavailable
 };
 
 struct ScanReport {
-    ScanStatus status{ScanStatus::kClean};
+    ScanStatus status{ScanStatus::kUnavailable};
     std::string scanner_name;
     std::string output_message;
     int exit_code{0};

@@ -4,8 +4,7 @@
   "path": "C:\\Program Files\\Flux Download Manager\\flux-nmh.exe",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
-    "chrome-extension://ngpampappnmepgilojfohadhhmbhlaek/",
-    "chrome-extension://llbjbkhnmlidjebalopleeepgdfgcpec/"
+    "chrome-extension://mdgmlcnpodoehidlplplfegngnjnilap/",
+    "chrome-extension://chbojfoombcanhhpoclailollapkglma/"
   ]
 }

@@ -40,6 +40,11 @@ function logPipelineStage(correlationId, stage, details = {}) {
       G.diagnosticLogs.shift();
     }
   }
+
+  try {
+    console.log(`[Flux Trace] [${stage}] [${entry.correlationId}]`, details);
+  } catch (_) {}
+
   return entry;
 }
 
@@ -1181,6 +1186,20 @@ function findCorrelatedClick(tabId, downloadItem) {
     }
   }
 
+  // 2b. If effectiveTabId is not available (e.g., cross-origin or sandboxed iframe), search recent clicks across all tabs
+  if (effectiveTabId <= 0 && G.clickedLinksByTab) {
+    for (const tabClicks of G.clickedLinksByTab.values()) {
+      for (const rec of tabClicks) {
+        if ((now - rec.time) >= maxAgeMs) continue;
+        if (candidateUrls.includes(rec.normalizedUrl)) return rec;
+        if (candidateUrls.some(u => u.split("?")[0] === rec.normalizedUrl.split("?")[0])) return rec;
+        if (downloadItem.referrer && rec.referrer && normalizeCorrelationUrl(downloadItem.referrer) === normalizeCorrelationUrl(rec.referrer)) {
+          return rec;
+        }
+      }
+    }
+  }
+
   // 3. Fallback to G.lastClickedLink if within 15s and matching URL, referrer, or recent click
   if (G.lastClickedLink && (now - G.lastClickedLink.time) < 15000) {
     const lastNorm = normalizeCorrelationUrl(G.lastClickedLink.url);
@@ -1193,6 +1212,40 @@ function findCorrelatedClick(tabId, downloadItem) {
   }
 
   return null;
+}
+
+function isBlobOrDataUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  return url.startsWith("blob:") || url.startsWith("data:");
+}
+
+function classifyDownloadMechanism(context = {}) {
+  const url = context.url || (context.downloadItem && context.downloadItem.url) || "";
+  const finalUrl = context.finalUrl || (context.downloadItem && context.downloadItem.finalUrl) || "";
+  const isFrame = Boolean(context.isFrame || (context.downloadItem && context.downloadItem.tabId === -1) || (context.details && context.details.frameId > 0));
+  const hasAuth = Boolean(context.headers && (context.headers.Authorization || context.headers.Cookie));
+  const isAttachment = Boolean(context.isAttachment || (context.netMeta && context.netMeta.isAttachment));
+  const isRedirect = Boolean((finalUrl && url && finalUrl !== url) || context.hasRedirectHop);
+
+  if (url.startsWith("blob:") || url.startsWith("data:") || finalUrl.startsWith("blob:") || finalUrl.startsWith("data:")) {
+    return "BROWSER_BLOB_OR_DATA";
+  }
+  if (isFrame) {
+    return "FRAME_ORIGINATED";
+  }
+  if (isRedirect) {
+    return "REDIRECT_CHAIN";
+  }
+  if (hasAuth) {
+    return "AUTHENTICATED_SESSION";
+  }
+  if (context.isDynamicAnchor || context.wasSyntheticClick) {
+    return "JS_TRIGGERED_DYNAMIC_ANCHOR";
+  }
+  if (isAttachment || context.filenameFromContentDisposition) {
+    return "UNKNOWN_FILENAME_DYNAMIC";
+  }
+  return "ORDINARY_LINK";
 }
 
 var exportedFns = {
@@ -1228,7 +1281,9 @@ var exportedFns = {
   consumeBypassIfActive,
   recordRedirectHop,
   resolveInitialUrlFromRedirects,
-  findCorrelatedClick
+  findCorrelatedClick,
+  isBlobOrDataUrl,
+  classifyDownloadMechanism
 };
 
 Object.assign(globalThis, exportedFns);

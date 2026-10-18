@@ -50,16 +50,17 @@ sequenceDiagram
 
 ## 3. Native Messaging Host Manifests
 
-### 3.1 Chromium (`org.openidm.native.chromium.json`)
-Registered at `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\org.openidm.native` (and equivalent `Microsoft\\Edge` and `BraveSoftware\\Brave-Browser` keys):
+### 3.1 Chromium (`com.flux.downloadmanager.chromium.json`)
+Registered at `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.flux.downloadmanager` (and equivalent `Microsoft\\Edge` and `BraveSoftware\\Brave-Browser` keys):
 ```json
 {
-  "name": "org.openidm.native",
-  "description": "OpenIDM Native Messaging Host Bridge",
-  "path": "C:\\Program Files\\OpenIDM\\openidm-nmh.exe",
+  "name": "com.flux.downloadmanager",
+  "description": "Flux Download Manager Native Messaging Host",
+  "path": "C:\\Program Files\\Flux Download Manager\\flux-nmh.exe",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
+    "chrome-extension://mdgmlcnpodoehidlplplfegngnjnilap/",
+    "chrome-extension://chbojfoombcanhhpoclailollapkglma/"
   ]
 }
 ```

@@ -259,31 +259,107 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
 }
 
 
+function findAnchorFromEvent(ev) {
+  if (!ev) return null;
+  if (typeof ev.composedPath === "function") {
+    try {
+      const path = ev.composedPath();
+      for (const el of path) {
+        if (el && el.nodeType === 1 && typeof el.matches === "function") {
+          if (el.matches("a[href], [data-download-url], [data-href]")) {
+            return el;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  let target = ev.target;
+  if (target && target.nodeType === 3) {
+    target = target.parentElement;
+  }
+  if (target && typeof target.closest === "function") {
+    return target.closest("a[href], [data-download-url], [data-href]");
+  }
+  return null;
+}
+
 function handleLinkClick(ev) {
   try {
+    const correlationId = "click-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+
+    const anchor = findAnchorFromEvent(ev);
+    if (!anchor) return;
+
+    let href = anchor.href || (typeof anchor.getAttribute === "function" ? (anchor.getAttribute("data-download-url") || anchor.getAttribute("data-href")) : "") || "";
+    if (!href) return;
+
+    let isFrame = false;
+    try { isFrame = (window !== window.top); } catch (_) { isFrame = true; }
+    let referrer = "";
+    try { referrer = location.href; } catch (_) {}
+    let pageTitle = "";
+    try { pageTitle = document.title; } catch (_) {}
+
+    const isBlobOrData = href.startsWith("blob:") || href.startsWith("data:");
+    let mechanism = isBlobOrData ? "BROWSER_BLOB_OR_DATA" : (isFrame ? "FRAME_ORIGINATED" : "ORDINARY_LINK");
+    if (!ev.isTrusted) {
+      mechanism = "JS_TRIGGERED_DYNAMIC_ANCHOR";
+    }
+
+    console.log(`[Flux Trace] [CLICK_SEEN] [${correlationId}]`, {
+      url: isBlobOrData ? (href.slice(0, 48) + "...") : href,
+      target: anchor.tagName,
+      button: ev.button,
+      altKey: ev.altKey,
+      mechanism,
+      isFrame
+    });
+
+    // 1. Browser-generated in-memory Blob and Data URLs:
+    // Ephemeral in-memory Blobs and Data URLs cannot be accessed by external OS processes (WinHTTP).
+    // The browser's native download engine must handle the click synchronously while the
+    // in-memory object URL remains valid in the renderer. Do NOT cancel the event!
+    if (isBlobOrData) {
+      console.log(`[Flux Trace] [CLICK_DELEGATED_TO_BROWSER] [${correlationId}]`, {
+        mechanism: href.startsWith("blob:") ? "BROWSER_BLOB_OR_DATA" : "BROWSER_DATA_DOWNLOAD",
+        stage: "STAGE_DELEGATION",
+        url: href.slice(0, 48) + "...",
+        filename: anchor.download || "",
+        reason: "BLOB_AND_DATA_URLS_REQUIRE_BROWSER_IN_MEMORY_TRANSFER"
+      });
+      return;
+    }
+
     if (ev.altKey) {
       // IDM Alt-key bypass behavior: user explicitly requested browser-native download
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "ALT_KEY_BYPASS", mechanism });
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({ action: "bypassNextDownload" });
+        chrome.runtime.sendMessage({ action: "bypassNextDownload", correlationId });
       }
       return;
     }
 
-    if (ev.button !== undefined && ev.button !== 0 && ev.button !== 1) return;
-
-    const anchor = ev.target && typeof ev.target.closest === "function" ? ev.target.closest("a") : null;
-    if (!anchor || !anchor.href) return;
+    if (ev.button !== undefined && ev.button !== 0 && ev.button !== 1) {
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "UNSUPPORTED_BUTTON", mechanism });
+      return;
+    }
 
     // Check if this anchor was already marked for browser fallback
     if (anchor.dataset && anchor.dataset.fluxBypass === "true") {
       delete anchor.dataset.fluxBypass;
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "EXPLICIT_BYPASS_FLAG", mechanism });
       return;
     }
 
-    const href = anchor.href;
-    if (href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("mailto:")) return;
+    if (href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("mailto:")) {
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "NON_HTTP_PROTOCOL", mechanism });
+      return;
+    }
 
-    const pathname = anchor.pathname || "";
+    let pathname = anchor.pathname || "";
+    if (!pathname && typeof URL !== "undefined") {
+      try { pathname = new URL(href, (typeof location !== "undefined" ? location.href : undefined)).pathname; } catch (_) {}
+    }
     const lastDot = pathname.lastIndexOf(".");
     const ext = lastDot !== -1 ? pathname.slice(lastDot + 1).toLowerCase() : "";
     const hasDownloadAttr = typeof anchor.hasAttribute === "function" && anchor.hasAttribute("download");
@@ -294,8 +370,55 @@ function handleLinkClick(ev) {
       "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav"
     ]);
 
-    const isEligible = hasDownloadAttr || interceptExts.has(ext) || pathname.includes("/redirect") || pathname.includes("/download");
-    if (!isEligible) return;
+    let isEligible = hasDownloadAttr || interceptExts.has(ext) ||
+      pathname.includes("/redirect") || pathname.includes("/download") || pathname.includes("/dl/");
+
+    if (!isEligible && typeof URL !== "undefined") {
+      try {
+        const parsed = new URL(href, (typeof location !== "undefined" ? location.href : undefined));
+        for (const [key, val] of parsed.searchParams.entries()) {
+          const kLower = key.toLowerCase();
+          if (kLower.includes("download") || kLower === "dl" || kLower === "file" || kLower === "filename") {
+            const vDot = val.lastIndexOf(".");
+            const vExt = vDot !== -1 ? val.slice(vDot + 1).toLowerCase() : "";
+            if (interceptExts.has(vExt) || val === "1" || val === "true" || kLower.includes("download")) {
+              isEligible = true;
+              break;
+            }
+          }
+          const vDot = val.lastIndexOf(".");
+          if (vDot !== -1 && interceptExts.has(val.slice(vDot + 1).toLowerCase())) {
+            isEligible = true;
+            break;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (!isEligible) {
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, {
+        url: href,
+        reason: "NOT_DOWNLOAD_ELIGIBLE",
+        mechanism: "UNKNOWN_FILENAME_DYNAMIC",
+        note: "Deferred to browser network response for Content-Disposition determination"
+      });
+      return;
+    }
+
+    console.log(`[Flux Trace] [INTERCEPTION_STARTED] [${correlationId}]`, {
+      url: href,
+      filename: anchor.download || "",
+      hasDownloadAttr,
+      mechanism
+    });
+
+    // Prevent duplicate in-flight click offers from rapid double-clicks on the same control
+    if (anchor.__fluxClickInFlight) {
+      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "DUPLICATE_IN_FLIGHT", mechanism });
+      return;
+    }
+    anchor.__fluxClickInFlight = true;
+    setTimeout(() => { delete anchor.__fluxClickInFlight; }, 4000);
 
     // Record link click metadata for correlation
     if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
@@ -304,52 +427,118 @@ function handleLinkClick(ev) {
         url: href,
         filename: anchor.download || "",
         hasDownloadAttr,
-        referrer: (typeof location !== "undefined" ? location.href : ""),
-        pageTitle: (typeof document !== "undefined" ? document.title : ""),
-        bypass: false
+        referrer,
+        pageTitle,
+        bypass: false,
+        mechanism,
+        isFrame,
+        correlationId
       });
     }
 
     // Intercept click prior to browser's default download action
-    // If not a modified click (Ctrl/Cmd/Shift), prevent default and offer to Flux
+    // If not a modified click (Ctrl/Cmd/Shift), prevent default, stop immediate propagation, and offer to Flux
     if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey && typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
       if (typeof ev.preventDefault === "function") ev.preventDefault();
       if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+
+      console.log(`[Flux Trace] [BROWSER_ACTION_CANCELLED] [${correlationId}]`, { url: href, mechanism });
 
       chrome.runtime.sendMessage({
         action: "interceptDownloadClick",
         url: href,
         filename: anchor.download || "",
         hasDownloadAttr,
-        referrer: (typeof location !== "undefined" ? location.href : ""),
-        pageTitle: (typeof document !== "undefined" ? document.title : "")
+        referrer,
+        pageTitle,
+        mechanism,
+        isFrame,
+        correlationId
       }, (response) => {
-        if (chrome.runtime && chrome.runtime.lastError) {
-          // Native host unreachable: fallback to native browser download
-          triggerBrowserFallback(anchor, href);
+        delete anchor.__fluxClickInFlight;
+        const lastErr = (chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError.message : null;
+        if (lastErr) {
+          console.warn(`[Flux Trace] [INTERCEPTION_FAILED] [${correlationId}]`, { error: lastErr, mechanism, stage: "STAGE_FAILURE_RECOVERY" });
+          triggerBrowserFallback(anchor, href, "RUNTIME_ERROR: " + lastErr, correlationId, mechanism);
           return;
         }
-        if (!response || !response.accepted) {
-          // Flux declined or capture disabled: fallback to native browser download
-          triggerBrowserFallback(anchor, href);
+        if (!response) {
+          console.warn(`[Flux Trace] [INTERCEPTION_FAILED] [${correlationId}]`, { error: "NO_RESPONSE", mechanism, stage: "STAGE_FAILURE_RECOVERY" });
+          triggerBrowserFallback(anchor, href, "NO_RESPONSE", correlationId, mechanism);
+          return;
         }
+        if (!response.accepted) {
+          const reason = response.error || response.reason || "DECLINED";
+          const cat = response.errorCategory ? ` [${response.errorCategory}]` : "";
+          console.warn(`[Flux Trace] [INTERCEPTION_FAILED] [${correlationId}]`, { reason, category: cat, mechanism, stage: "STAGE_FAILURE_RECOVERY" });
+          triggerBrowserFallback(anchor, href, reason, correlationId, mechanism);
+          return;
+        }
+        // ACCEPTED: The download is now safely accepted in Flux!
+        // Never trigger fallback for successfully accepted downloads.
+        console.log(`[Flux Trace] [DOWNLOAD_OFFER_ACCEPTED] [${correlationId}]`, {
+          taskId: response.taskId,
+          fileName: response.fileName,
+          mechanism
+        });
       });
     }
-  } catch (_) {}
+  } catch (err) {
+    console.error("[Flux] Error in handleLinkClick:", err);
+  }
 }
 
-function triggerBrowserFallback(anchor, href) {
+function triggerBrowserFallback(anchor, href, reason = "", correlationId = "", mechanism = "") {
   try {
-    if (anchor && anchor.dataset) anchor.dataset.fluxBypass = "true";
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({ action: "bypassNextDownload", url: href });
+    if (!href) return;
+
+    if (href.startsWith("blob:") || href.startsWith("data:")) {
+      // Ephemeral browser-generated URLs cannot be recovered via top-level assign or delayed synthetic click
+      console.warn(`[Flux Trace] [BROWSER_FALLBACK_SKIPPED] [${correlationId || "fallback"}]`, {
+        url: href.slice(0, 48) + "...",
+        reason: "CANNOT_RETRY_EPHEMERAL_URL",
+        mechanism
+      });
+      return;
     }
+
+    console.log(`[Flux Trace] [BROWSER_FALLBACK_STARTED] [${correlationId || "fallback"}]`, { url: href, reason, mechanism });
+
+    // Guard against recursive fallback loops on the same URL
+    if (typeof window !== "undefined") {
+      window.__fluxFallbackActive = window.__fluxFallbackActive || new Set();
+      if (window.__fluxFallbackActive.has(href)) {
+        console.warn("[Flux] Recursive fallback prevented for:", href);
+        return;
+      }
+      window.__fluxFallbackActive.add(href);
+      setTimeout(() => {
+        if (window.__fluxFallbackActive) window.__fluxFallbackActive.delete(href);
+      }, 5000);
+    }
+
+    if (anchor && anchor.dataset) {
+      anchor.dataset.fluxBypass = "true";
+    }
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({
+        action: "bypassNextDownload",
+        url: href,
+        reason: reason || "FALLBACK",
+        mechanism,
+        correlationId
+      });
+    }
+
     if (anchor && typeof anchor.click === "function") {
       anchor.click();
     } else if (typeof location !== "undefined" && location.assign) {
       location.assign(href);
     }
-  } catch (_) {}
+  } catch (err) {
+    console.error("[Flux] Error in triggerBrowserFallback:", err);
+  }
 }
 
 function handleMediaPlaybackEvent(ev) {
@@ -438,9 +627,11 @@ function injectDeepSearchScript() {
 function initContentScript() {
   if (typeof document === "undefined" || typeof window === "undefined") return;
 
-  // 1. Intercept link clicks with capture phase
-  document.addEventListener("click", handleLinkClick, true);
-  document.addEventListener("auxclick", handleLinkClick, true);
+  // 1. Intercept link clicks with capture phase at both window and document level
+  window.addEventListener("click", handleLinkClick, { capture: true, passive: false });
+  window.addEventListener("auxclick", handleLinkClick, { capture: true, passive: false });
+  document.addEventListener("click", handleLinkClick, { capture: true, passive: false });
+  document.addEventListener("auxclick", handleLinkClick, { capture: true, passive: false });
 
   // 2. Listen to media playback events with capture phase
   document.addEventListener("play", handleMediaPlaybackEvent, true);
@@ -636,6 +827,7 @@ if (typeof module !== "undefined" && module.exports) {
     positionOverlayHost,
     scanAndAttachVideoOverlays,
     observeDynamicVideosAndFullscreen,
+    findAnchorFromEvent,
     handleLinkClick,
     handleMediaPlaybackEvent,
     extractEligiblePageLinks,

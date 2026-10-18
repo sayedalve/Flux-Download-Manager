@@ -42,19 +42,103 @@ if (-not $Unregister) {
 }
 
 # 2. Determine allowed origins
-$allowedOrigins = @(
-    "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
-    "chrome-extension://ngpampappnmepgilojfohadhhmbhlaek/",
-    "chrome-extension://llbjbkhnmlidjebalopleeepgdfgcpec/"
+$authoritativeFluxId = "mdgmlcnpodoehidlplplfegngnjnilap"
+$authoritativeOrigin = "chrome-extension://$authoritativeFluxId/"
+
+# Automatically derive ID from extension/manifest.json if present
+$manifestPath = Join-Path $RepoRoot "extension\manifest.json"
+if (Test-Path $manifestPath) {
+    try {
+        $mJson = Get-Content $manifestPath -Raw | ConvertFrom-Json
+        if ($mJson.key) {
+            $keyBytes = [System.Convert]::FromBase64String($mJson.key)
+            $sha256 = [System.Security.Cryptography.SHA256]::Create()
+            $hash = $sha256.ComputeHash($keyBytes)
+            $derivedId = ""
+            for ($i = 0; $i -lt 16; $i++) {
+                $b = $hash[$i]
+                $derivedId += [char](97 + [int](($b -shr 4) -band 0x0F))
+                $derivedId += [char](97 + [int]($b -band 0x0F))
+            }
+            if ($derivedId) {
+                $authoritativeFluxId = $derivedId
+                $authoritativeOrigin = "chrome-extension://$derivedId/"
+                Write-Host "[+] Derived authoritative Extension ID from manifest key: $derivedId" -ForegroundColor Green
+            }
+        }
+    } catch {
+        Write-Warning "Could not parse manifest.json key; using default authoritative ID: $authoritativeFluxId"
+    }
+}
+
+$allowedOrigins = [System.Collections.Generic.List[string]]::new()
+$allowedOrigins.Add($authoritativeOrigin)
+
+# Automatically derive unpacked folder path ID (Chromium UTF-16LE SHA-256 of absolute path)
+$extDir = Join-Path $RepoRoot "extension"
+if (Test-Path $extDir) {
+    try {
+        $pathBytes = [System.Text.Encoding]::Unicode.GetBytes($extDir)
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        $hash = $sha256.ComputeHash($pathBytes)
+        $pathHashId = ""
+        for ($i = 0; $i -lt 16; $i++) {
+            $b = $hash[$i]
+            $pathHashId += [char](97 + [int](($b -shr 4) -band 0x0F))
+            $pathHashId += [char](97 + [int]($b -band 0x0F))
+        }
+        $pathOrigin = "chrome-extension://$pathHashId/"
+        if (-not $allowedOrigins.Contains($pathOrigin)) {
+            $allowedOrigins.Add($pathOrigin)
+            Write-Host "[+] Authorized repository unpacked Extension ID: $pathHashId" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "Could not derive path-based unpacked extension ID: $_"
+    }
+}
+
+# Automatically discover extension IDs installed in Brave, Chrome, and Edge profiles
+$browserProfiles = @(
+    "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Secure Preferences",
+    "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Secure Preferences",
+    "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Secure Preferences"
 )
+foreach ($bp in $browserProfiles) {
+    if (Test-Path $bp) {
+        try {
+            $pref = Get-Content -Raw $bp | ConvertFrom-Json
+            $extSettings = $pref.extensions.settings
+            if ($extSettings) {
+                $extSettings.PSObject.Properties | ForEach-Object {
+                    $extObj = $_.Value
+                    $ePath = $extObj.path
+                    $eName = $extObj.manifest.name
+                    if ($ePath -match "openidm|flux" -or $eName -match "Flux|OpenIDM") {
+                        $bOrigin = "chrome-extension://$($_.Name)/"
+                        if (-not $allowedOrigins.Contains($bOrigin)) {
+                            $allowedOrigins.Add($bOrigin)
+                            Write-Host "[+] Discovered and authorized installed browser Extension ID: $($_.Name)" -ForegroundColor Green
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+}
 
 if ($ExtensionId) {
-    $cleanId = $ExtensionId.Trim()
-    $formattedOrigin = "chrome-extension://$cleanId/"
-    if ($allowedOrigins -notcontains $formattedOrigin) {
-        $allowedOrigins += $formattedOrigin
+    $cleanId = $ExtensionId.Trim().ToLower()
+    if ($cleanId -notmatch '^[a-p]{32}$') {
+        Write-Error "Invalid Extension ID format: '$ExtensionId'. Chromium extension IDs must be exactly 32 lowercase characters between 'a' and 'p'."
+        exit 1
     }
-    Write-Host "[+] Added custom Extension ID origin: $formattedOrigin" -ForegroundColor Green
+    $customOrigin = "chrome-extension://$cleanId/"
+    if (-not $allowedOrigins.Contains($customOrigin)) {
+        $allowedOrigins.Add($customOrigin)
+    }
+    Write-Host "[+] Authorized custom Extension ID origin: $customOrigin" -ForegroundColor Green
+} else {
+    Write-Host "[+] Total authorized Chromium origins: $($allowedOrigins -join ', ')" -ForegroundColor Cyan
 }
 
 # 3. Create Manifest Directory in %LOCALAPPDATA%\Flux Download Manager\manifests
@@ -167,10 +251,10 @@ foreach ($t in $targets) {
 Write-Host "`n=================================================================" -ForegroundColor Cyan
 Write-Host "  SUCCESS: Native Messaging Host Registered Successfully!       " -ForegroundColor Green
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "Next Steps for Browser Integration:" -ForegroundColor White
-Write-Host "1. In Google Chrome or Microsoft Edge, navigate to: chrome://extensions or edge://extensions" -ForegroundColor Gray
-Write-Host "2. Enable 'Developer mode' toggle in the top-right corner." -ForegroundColor Gray
+Write-Host "Next Steps for Browser Integration (Brave, Chrome, Edge):" -ForegroundColor White
+Write-Host "1. In Brave, Chrome, or Edge, navigate to: brave://extensions, chrome://extensions, or edge://extensions" -ForegroundColor Gray
+Write-Host "2. Enable the 'Developer mode' toggle in the top-right corner." -ForegroundColor Gray
 Write-Host "3. Click 'Load unpacked' and select the folder: $RepoRoot\extension" -ForegroundColor Gray
-Write-Host "4. If the browser generates a unique Extension ID (e.g., 'abcdef...'):" -ForegroundColor Gray
-Write-Host "   Re-run this script with: .\scripts\register-native-messaging.ps1 -ExtensionId <your_id>" -ForegroundColor Yellow
+Write-Host "4. Notice the extension ID is now fixed and stable: $authoritativeFluxId" -ForegroundColor Gray
+Write-Host "   (If you reload an existing unpacked extension, click the reload icon on the extension card)" -ForegroundColor Gray
 Write-Host "5. Open Flux Download Manager (flux.exe) and verify that the extension popup displays 'Desktop Connected'." -ForegroundColor White

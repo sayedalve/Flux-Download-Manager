@@ -77,9 +77,30 @@ function ensureSessionRestored(storageArea = null) {
   return sessionRestorePromise;
 }
 
-// Sends a JSON-RPC 2.0 message to flux-nmh via Native Messaging (with fallback host names & correlation logging)
-async function sendNativeRpc(method, params, customTransport = null) {
-  const correlationId = (params && params.correlationId) || generateCorrelationId("rpc");
+// Categorizes native messaging host errors for clear diagnostic logging
+function categorizeNativeError(msg) {
+  if (!msg) return "UNKNOWN_NATIVE_ERROR";
+  const lower = String(msg).toLowerCase();
+  if (lower.includes("forbidden") || lower.includes("not allowed") || lower.includes("unauthorized")) {
+    return "UNAUTHORIZED_EXTENSION_ORIGIN";
+  }
+  if (lower.includes("not found") || lower.includes("specified native messaging host not found")) {
+    return "MISSING_HOST_REGISTRATION";
+  }
+  if (lower.includes("exited") || lower.includes("crashed")) {
+    return "HOST_PROCESS_TERMINATED";
+  }
+  if (lower.includes("err_ipc_desktop_unavailable") || lower.includes("desktop_unavailable")) {
+    return "DESKTOP_APP_NOT_RUNNING";
+  }
+  if (lower.includes("timed out") || lower.includes("timeout")) {
+    return "RPC_TIMEOUT";
+  }
+  return "RPC_COMMUNICATION_ERROR";
+}
+
+async function sendNativeRpc(method, params = {}, customTransport = null) {
+  const correlationId = params.correlationId || generateCorrelationId("rpc");
   const payload = {
     jsonrpc: "2.0",
     id: "ext-" + (rpcRequestCounter++),
@@ -101,6 +122,7 @@ async function sendNativeRpc(method, params, customTransport = null) {
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendNativeMessage) {
     const hostsToTry = [G.nativeHostName, ...(G.fallbackNativeHostNames || [])];
+    const callingExtId = (chrome.runtime && chrome.runtime.id) ? chrome.runtime.id : "unknown";
     let lastErrorMsg = "Native Messaging runtime unavailable";
 
     for (const hostName of hostsToTry) {
@@ -141,20 +163,37 @@ async function sendNativeRpc(method, params, customTransport = null) {
         logPipelineStage(correlationId, "NATIVE_RPC_RESULT", {
           method,
           hostName,
+          extensionId: callingExtId,
           accepted: res ? Boolean(res.accepted !== false) : true,
           taskId: res ? (res.taskId || "") : ""
         });
         return res;
       } catch (err) {
         if (err && err.isRpcError) {
-          logPipelineStage(correlationId, "NATIVE_RPC_ERROR", { method, error: err.message });
+          logPipelineStage(correlationId, "NATIVE_RPC_ERROR", { method, hostName, error: err.message, code: err.code });
           throw err;
         }
         lastErrorMsg = err ? err.message : String(err);
+        const errType = categorizeNativeError(lastErrorMsg);
+        logPipelineStage(correlationId, "NATIVE_HOST_ATTEMPT_FAILED", {
+          hostName,
+          extensionId: callingExtId,
+          error: lastErrorMsg,
+          errorCategory: errType
+        });
       }
     }
-    logPipelineStage(correlationId, "NATIVE_RPC_UNAVAILABLE", { method, error: lastErrorMsg });
-    throw new Error(lastErrorMsg);
+    const finalCategory = categorizeNativeError(lastErrorMsg);
+    logPipelineStage(correlationId, "NATIVE_RPC_UNAVAILABLE", {
+      method,
+      extensionId: callingExtId,
+      error: lastErrorMsg,
+      errorCategory: finalCategory
+    });
+    const finalErr = new Error(lastErrorMsg);
+    finalErr.category = finalCategory;
+    finalErr.extensionId = callingExtId;
+    throw finalErr;
   }
   throw new Error("Native Messaging runtime unavailable");
 }
@@ -168,6 +207,75 @@ function updateTabBadge(tabId) {
     chrome.action.setBadgeText({ text, tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
     chrome.action.setBadgeBackgroundColor({ color: "#2563EB", tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
   } catch (_) {}
+}
+
+async function collectCookiesForDownload(targetUrl, referrerUrl = "") {
+  const cookieMap = new Map();
+  const urlsToQuery = [];
+  if (targetUrl && !targetUrl.startsWith("blob:") && !targetUrl.startsWith("data:")) {
+    urlsToQuery.push(targetUrl);
+  }
+  if (referrerUrl && !referrerUrl.startsWith("blob:") && !referrerUrl.startsWith("data:")) {
+    try {
+      const refOrigin = new URL(referrerUrl).origin;
+      const targetOrigin = targetUrl ? new URL(targetUrl).origin : "";
+      if (refOrigin !== targetOrigin) {
+        urlsToQuery.push(referrerUrl);
+      }
+    } catch (_) {}
+  }
+
+  if (typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+    for (const u of urlsToQuery) {
+      try {
+        const list = await new Promise((resolve) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (!settled) { settled = true; resolve([]); }
+          }, 350);
+          try {
+            chrome.cookies.getAll({ url: u }, (cList) => {
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                if (chrome.runtime) void chrome.runtime.lastError;
+                resolve(cList || []);
+              }
+            });
+          } catch (_) {
+            if (!settled) { settled = true; clearTimeout(timer); resolve([]); }
+          }
+        });
+        if (Array.isArray(list)) {
+          for (const c of list) {
+            if (c && c.name && !cookieMap.has(c.name)) {
+              cookieMap.set(c.name, c.value);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
+  if (cookieMap.size === 0) return "";
+  return Array.from(cookieMap.entries()).map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+function findRecentRequestHeadersForUrl(url) {
+  if (!url || !G.requestMetaMap) return {};
+  try {
+    const norm = normalizeCorrelationUrl(url);
+    for (const meta of G.requestMetaMap.values()) {
+      if (meta && meta.headers) {
+        const curNorm = meta.currentUrl ? normalizeCorrelationUrl(meta.currentUrl) : "";
+        const initNorm = meta.initialUrl ? normalizeCorrelationUrl(meta.initialUrl) : "";
+        if (curNorm === norm || initNorm === norm) {
+          return Object.assign({}, meta.headers);
+        }
+      }
+    }
+  } catch (_) {}
+  return {};
 }
 
 function notifyPopupMediaUpdated(tabId) {
@@ -444,9 +552,21 @@ async function onDownloadCreatedHandler(
   }
 
   const targetUrl = downloadItem.finalUrl || downloadItem.url;
-  if (downloadItem.byExtensionId || targetUrl.startsWith("blob:") || targetUrl.startsWith("data:") || targetUrl.startsWith("chrome-extension:")) {
+  const isBlob = targetUrl.startsWith("blob:");
+  const isData = targetUrl.startsWith("data:");
+  const isInternal = downloadItem.byExtensionId || targetUrl.startsWith("chrome-extension:") || targetUrl.startsWith("chrome:") || targetUrl.startsWith("brave:");
+  if (isBlob || isData || isInternal) {
     invokeSuggestIfNeeded();
-    return { intercepted: false, reason: "EXTENSION_OR_BLOB_URL" };
+    const mechanism = isBlob ? "BROWSER_BLOB_OR_DATA" : (isData ? "BROWSER_DATA_DOWNLOAD" : "BROWSER_INTERNAL_OR_EXTENSION");
+    logPipelineStage(generateCorrelationId("blob"), "DOWNLOAD_DELEGATED_TO_BROWSER", {
+      mechanism,
+      stage: "STAGE_DELEGATION",
+      downloadId: downloadItem.id,
+      filename: downloadItem.filename,
+      url: targetUrl.slice(0, 64),
+      reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
+    });
+    return { intercepted: false, reason: "EXTENSION_OR_BLOB_URL", mechanism };
   }
 
   const netMeta = findCorrelatedNetworkResponse(downloadItem);
@@ -515,6 +635,25 @@ async function onDownloadCreatedHandler(
     }
   }
 
+  // Check if a click offer is currently in-flight for this URL
+  if (G.inFlightClickOffers && G.inFlightClickOffers instanceof Map) {
+    const inFlightOffer = G.inFlightClickOffers.get(normTarget) || G.inFlightClickOffers.get(normOrig);
+    if (inFlightOffer) {
+      try {
+        const clickRes = await inFlightOffer;
+        if (clickRes && clickRes.accepted) {
+          invokeSuggestIfNeeded();
+          if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
+            chrome.downloads.cancel(downloadItem.id, () => {
+              if (chrome.downloads.erase) chrome.downloads.erase({ id: downloadItem.id }, () => {});
+            });
+          }
+          return { intercepted: true, reason: "ALREADY_INTERCEPTED_VIA_IN_FLIGHT_CLICK" };
+        }
+      } catch (_) {}
+    }
+  }
+
   // In Chromium, onDeterminingFilename always fires right after onCreated for every download.
   if (phase === "created") {
     // Immediately pause browser download so it cannot complete or download competing bytes
@@ -571,23 +710,28 @@ async function onDownloadCreatedHandler(
     try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
   }
 
-  const headers = Object.assign({}, (netMeta && netMeta.headers) || {}, downloadItem.headers || {});
+  const recentHeaders = findRecentRequestHeadersForUrl(targetUrl);
+  const headers = Object.assign({}, recentHeaders, (netMeta && netMeta.headers) || {}, downloadItem.headers || {});
   if (pageReferrer && !headers.Referer && !headers.referer) {
     headers.Referer = pageReferrer;
   }
-  if (!headers.Cookie && !headers.cookie && typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
-    try {
-      const cookieList = await new Promise((resolve) => {
-        chrome.cookies.getAll({ url: targetUrl }, (cList) => {
-          if (chrome.runtime) void chrome.runtime.lastError;
-          resolve(cList || []);
-        });
-      });
-      if (cookieList && cookieList.length > 0) {
-        headers.Cookie = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
-      }
-    } catch (_) {}
+  const cookieHeader = await collectCookiesForDownload(targetUrl, pageReferrer);
+  if (cookieHeader && !headers.Cookie && !headers.cookie) {
+    headers.Cookie = cookieHeader;
   }
+
+  const isFrame = Boolean(downloadItem.tabId === -1 || (clickedInfo && clickedInfo.isFrame));
+  const hasRedirectHop = Boolean(downloadItem.finalUrl && downloadItem.url && downloadItem.finalUrl !== downloadItem.url);
+  const mechanism = classifyDownloadMechanism({
+    url: downloadItem.url,
+    finalUrl: downloadItem.finalUrl,
+    downloadItem,
+    netMeta,
+    clickedInfo,
+    isFrame,
+    hasRedirectHop,
+    filenameFromContentDisposition: Boolean(netMeta && netMeta.filename)
+  });
 
   logPipelineStage(correlationId, "DOWNLOAD_OFFER_INITIATED", {
     downloadId: downloadItem.id,
@@ -597,11 +741,21 @@ async function onDownloadCreatedHandler(
     fileSize,
     mime,
     wasExplicitLinkClick,
-    isAttachment
+    isAttachment,
+    mechanism,
+    stage: "STAGE_ELIGIBILITY"
   });
 
   const executeOfferFlow = async () => {
     try {
+      logPipelineStage(correlationId, "DOWNLOAD_OFFER_SENT", {
+        url: targetUrl,
+        filename: cleanFilename,
+        fileSize,
+        mechanism,
+        stage: "STAGE_NATIVE_RPC"
+      });
+
       const result = await sendNativeRpc("download.offer", {
         url: targetUrl,
         originalUrl,
@@ -615,10 +769,19 @@ async function onDownloadCreatedHandler(
       }, customTransport);
 
       if (result && result.accepted) {
+        logPipelineStage(correlationId, "DOWNLOAD_OFFER_ACCEPTED", {
+          downloadId: downloadItem.id,
+          taskId: result.taskId,
+          fileName: result.fileName,
+          mechanism,
+          stage: "STAGE_DESKTOP_ACCEPTANCE"
+        });
         logPipelineStage(correlationId, "DOWNLOAD_ACCEPTED_BY_FLUX", {
           downloadId: downloadItem.id,
           taskId: result.taskId,
-          fileName: result.fileName
+          fileName: result.fileName,
+          mechanism,
+          stage: "STAGE_DESKTOP_ACCEPTANCE"
         });
 
         // Record target & original URLs so subsequent browser events for this download are suppressed
@@ -657,20 +820,36 @@ async function onDownloadCreatedHandler(
       }
 
       // Flux declined: allow native browser download to continue seamlessly
+      logPipelineStage(correlationId, "DOWNLOAD_OFFER_REJECTED", {
+        downloadId: downloadItem.id,
+        reason: (result && result.reason) || "DECLINED_BY_DESKTOP",
+        mechanism,
+        stage: "STAGE_DESKTOP_ACCEPTANCE"
+      });
       logPipelineStage(correlationId, "DOWNLOAD_DECLINED_BY_FLUX", {
         downloadId: downloadItem.id,
-        reason: (result && result.reason) || "DECLINED_BY_DESKTOP"
+        reason: (result && result.reason) || "DECLINED_BY_DESKTOP",
+        mechanism,
+        stage: "STAGE_DESKTOP_ACCEPTANCE"
       });
       invokeSuggestIfNeeded();
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }
-      return { intercepted: false, reason: (result && result.reason) || "DECLINED_BY_DESKTOP", correlationId };
+      return { intercepted: false, reason: (result && result.reason) || "DECLINED_BY_DESKTOP", mechanism, correlationId };
     } catch (err) {
       // Flux unreachable or RPC error: resume native browser download safely
+      logPipelineStage(correlationId, "INTERCEPTION_FAILED", {
+        downloadId: downloadItem.id,
+        error: err ? err.message : String(err),
+        mechanism,
+        stage: "STAGE_FAILURE_RECOVERY"
+      });
       logPipelineStage(correlationId, "DOWNLOAD_FALLBACK_TO_BROWSER", {
         downloadId: downloadItem.id,
-        error: err ? err.message : String(err)
+        error: err ? err.message : String(err),
+        mechanism,
+        stage: "STAGE_FAILURE_RECOVERY"
       });
       invokeSuggestIfNeeded();
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
@@ -1278,37 +1457,80 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
 
   if (msg.action === "interceptDownloadClick") {
     const rec = recordClickedLink(tabId, msg);
-    const correlationId = (rec && rec.correlationId) || generateCorrelationId("dl");
+    const correlationId = msg.correlationId || (rec && rec.correlationId) || generateCorrelationId("dl");
 
-    if (!G.enableCapture || isSiteDisabled(msg.referrer || msg.url)) {
-      sendResponse({ accepted: false, reason: "CAPTURE_DISABLED", correlationId });
+    const targetUrl = msg.url || "";
+    const isBlobOrData = isBlobOrDataUrl(targetUrl);
+    const mechanism = isBlobOrData ? "BROWSER_BLOB_OR_DATA" : (msg.mechanism || (msg.isFrame ? "FRAME_ORIGINATED" : "ORDINARY_LINK"));
+
+    logPipelineStage(correlationId, "BACKGROUND_MESSAGE_RECEIVED", {
+      action: msg.action,
+      url: isBlobOrData ? targetUrl.slice(0, 48) + "..." : targetUrl,
+      tabId,
+      referrer: msg.referrer,
+      mechanism,
+      stage: "STAGE_HEADER_COLLECTION"
+    });
+
+    // Guard: Never pass invalid internal references or ephemeral browser URLs to the native downloader!
+    if (isBlobOrData || targetUrl.startsWith("chrome-extension:") || targetUrl.startsWith("chrome:") || targetUrl.startsWith("brave:")) {
+      logPipelineStage(correlationId, "DOWNLOAD_DELEGATED_TO_BROWSER", {
+        mechanism,
+        stage: "STAGE_DELEGATION",
+        url: targetUrl.slice(0, 48) + "...",
+        reason: "BLOB_AND_DATA_URLS_MUST_STAY_IN_BROWSER_FOR_BYTE_TRANSFER"
+      });
+      sendResponse({ accepted: false, reason: "BLOB_OR_DATA_URL_MUST_STAY_IN_BROWSER", mechanism, correlationId });
+      return true;
+    }
+
+    if (!G.enableCapture || isSiteDisabled(msg.referrer || targetUrl)) {
+      logPipelineStage(correlationId, "DOWNLOAD_OFFER_REJECTED", {
+        url: targetUrl,
+        reason: "CAPTURE_DISABLED",
+        mechanism,
+        stage: "STAGE_ELIGIBILITY"
+      });
+      sendResponse({ accepted: false, reason: "CAPTURE_DISABLED", mechanism, correlationId });
       return true;
     }
 
     (async () => {
       try {
-        const targetUrl = msg.url;
         const rawFilename = msg.filename || "";
         const cleanFilename = rawFilename ? rawFilename.split(/[/\\]/).pop() : "";
 
-        // Collect request headers (Referer, Cookie)
-        const headers = {};
-        if (msg.referrer) headers.Referer = msg.referrer;
-        if (typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+        // Collect request headers (Referer, Cookie, Authorization)
+        const recentHeaders = findRecentRequestHeadersForUrl(targetUrl);
+        const headers = Object.assign({}, recentHeaders);
+        if (msg.referrer && !headers.Referer && !headers.referer) {
+          headers.Referer = msg.referrer;
+        }
+        const cookieHeader = await collectCookiesForDownload(targetUrl, msg.referrer);
+        if (cookieHeader && !headers.Cookie && !headers.cookie) {
+          headers.Cookie = cookieHeader;
+        }
+
+        // Deduplication & in-flight tracking: prevent duplicate offers on rapid double-clicks
+        G.inFlightClickOffers = G.inFlightClickOffers || new Map();
+        const clickKey = normalizeCorrelationUrl(targetUrl);
+        if (G.inFlightClickOffers.has(clickKey)) {
           try {
-            const cookieList = await new Promise((resolve) => {
-              chrome.cookies.getAll({ url: targetUrl }, (cList) => {
-                if (chrome.runtime) void chrome.runtime.lastError;
-                resolve(cList || []);
-              });
-            });
-            if (cookieList && cookieList.length > 0) {
-              headers.Cookie = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
-            }
+            const prev = await G.inFlightClickOffers.get(clickKey);
+            sendResponse(Object.assign({}, prev, { deduplicated: true, mechanism }));
+            return;
           } catch (_) {}
         }
 
-        const result = await sendNativeRpc("download.offer", {
+        logPipelineStage(correlationId, "DOWNLOAD_OFFER_SENT", {
+          url: targetUrl,
+          filename: cleanFilename,
+          headersCount: Object.keys(headers).length,
+          mechanism,
+          stage: "STAGE_NATIVE_RPC"
+        });
+
+        const offerPromise = sendNativeRpc("download.offer", {
           url: targetUrl,
           originalUrl: targetUrl,
           filename: cleanFilename,
@@ -1320,6 +1542,15 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
           headers
         });
 
+        G.inFlightClickOffers.set(clickKey, offerPromise);
+        offerPromise.finally(() => {
+          setTimeout(() => {
+            if (G.inFlightClickOffers) G.inFlightClickOffers.delete(clickKey);
+          }, 8000);
+        });
+
+        const result = await offerPromise;
+
         if (result && result.accepted) {
           if (!G.handledDownloadUrls || !(G.handledDownloadUrls instanceof Map)) {
             G.handledDownloadUrls = new Map();
@@ -1327,18 +1558,61 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
           G.handledDownloadUrls.set(normalizeCorrelationUrl(targetUrl), Date.now());
           if (msg.url) G.handledDownloadUrls.set(normalizeCorrelationUrl(msg.url), Date.now());
 
+          logPipelineStage(correlationId, "DOWNLOAD_OFFER_ACCEPTED", {
+            url: targetUrl,
+            taskId: result.taskId,
+            fileName: result.fileName,
+            mechanism,
+            stage: "STAGE_DESKTOP_ACCEPTANCE"
+          });
           logPipelineStage(correlationId, "DOWNLOAD_ACCEPTED_BY_FLUX", {
             url: targetUrl,
             taskId: result.taskId,
-            fileName: result.fileName
+            fileName: result.fileName,
+            mechanism,
+            stage: "STAGE_DESKTOP_ACCEPTANCE"
           });
 
-          sendResponse({ accepted: true, taskId: result.taskId, fileName: result.fileName, correlationId });
+          sendResponse({ accepted: true, taskId: result.taskId, fileName: result.fileName, mechanism, correlationId });
         } else {
-          sendResponse({ accepted: false, reason: (result && result.reason) || "DECLINED_BY_DESKTOP", correlationId });
+          const reason = (result && result.reason) || "DECLINED_BY_DESKTOP";
+          logPipelineStage(correlationId, "DOWNLOAD_OFFER_REJECTED", {
+            url: targetUrl,
+            reason,
+            mechanism,
+            stage: "STAGE_DESKTOP_ACCEPTANCE"
+          });
+          logPipelineStage(correlationId, "DOWNLOAD_DECLINED_BY_FLUX", {
+            url: targetUrl,
+            reason,
+            mechanism,
+            stage: "STAGE_DESKTOP_ACCEPTANCE"
+          });
+          sendResponse({ accepted: false, reason, mechanism, correlationId });
         }
       } catch (err) {
-        sendResponse({ accepted: false, error: err ? err.message : String(err), correlationId });
+        const errCategory = err && err.category ? err.category : categorizeNativeError(err ? err.message : "");
+        logPipelineStage(correlationId, "INTERCEPTION_FAILED", {
+          url: msg.url,
+          error: err ? err.message : String(err),
+          errorCategory: errCategory,
+          mechanism,
+          stage: "STAGE_FAILURE_RECOVERY"
+        });
+        logPipelineStage(correlationId, "DOWNLOAD_CLICK_OFFER_FAILED", {
+          url: msg.url,
+          error: err ? err.message : String(err),
+          errorCategory: errCategory,
+          mechanism,
+          stage: "STAGE_FAILURE_RECOVERY"
+        });
+        sendResponse({
+          accepted: false,
+          error: err ? err.message : String(err),
+          errorCategory: errCategory,
+          mechanism,
+          correlationId
+        });
       }
     })();
     return true;

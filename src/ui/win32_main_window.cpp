@@ -29,11 +29,16 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "user32.lib")
+
 #endif
 
 namespace openidm::ui {
 
 namespace {
+
+#ifdef _WIN32
+HICON CreateFluxAppIcon();
+#endif
 
 std::string ToLower(std::string_view sv) {
     std::string s(sv);
@@ -316,10 +321,19 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
             return {HitTargetType::kSidebarCategory, static_cast<int>(i), "", geom.sidebar_items[i].label};
         }
     }
-    for (size_t i = 0; i < geom.table_columns.size(); ++i) {
-        if (geom.table_columns[i].rect.width() > 0 && geom.table_columns[i].rect.height() > 0 && geom.table_columns[i].rect.Contains(x, y)) {
-            return {HitTargetType::kTableHeaderColumn, static_cast<int>(i), "", "Sort by " + geom.table_columns[i].title};
+    if (geom.toolbar_rect.Contains(x, y)) {
+        return {HitTargetType::kNone, 0, "", ""};
+    }
+    if (geom.table_header_rect.Contains(x, y)) {
+        for (size_t i = 0; i < geom.table_columns.size(); ++i) {
+            if (geom.table_columns[i].rect.width() > 0 && geom.table_columns[i].rect.height() > 0 && geom.table_columns[i].rect.Contains(x, y)) {
+                return {HitTargetType::kTableHeaderColumn, static_cast<int>(i), "", "Sort by " + geom.table_columns[i].title};
+            }
         }
+        return {HitTargetType::kNone, 0, "", ""};
+    }
+    if (geom.status_bar_rect.Contains(x, y)) {
+        return {HitTargetType::kNone, 0, "", ""};
     }
     auto rows = BuildVisibleTaskRows(scroll_offset, geom.task_rows.size());
     for (size_t i = 0; i < geom.task_rows.size(); ++i) {
@@ -2837,16 +2851,16 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     switch (msg) {
         case WM_CREATE: {
             ctx->hDlg = hwnd;
-            ctx->hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            ctx->hFontBody = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ctx->hFontBold = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontTitle = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            ctx->hFontTitle = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            ctx->hFontSmall = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             ctx->hBgBrush = CreateSolidBrush(RGB(0x16, 0x16, 0x18));
@@ -3234,7 +3248,9 @@ void ShowNewDownloadDialogWin32(
         wc.lpfnWndProc = NewDownloadDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        HICON hAppIcon = CreateFluxAppIcon();
+        wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
+        wc.hIconSm = hAppIcon;
         wc.lpszClassName = L"Flux_NewDownloadDlgClass";
         RegisterClassExW(&wc);
         class_registered = true;
@@ -3281,6 +3297,12 @@ void ShowNewDownloadDialogWin32(
 
     if (!hDlg) return;
     ctx.hDlg = hDlg;
+
+    HICON hDlgIcon = CreateFluxAppIcon();
+    if (hDlgIcon) {
+        SendMessageW(hDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hDlgIcon));
+        SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hDlgIcon));
+    }
 
     BOOL use_dark = TRUE;
     DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark, sizeof(use_dark));
@@ -3383,10 +3405,10 @@ LRESULT CALLBACK SimpleInputDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     switch (msg) {
         case WM_CREATE: {
-            ctx->hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            ctx->hFontBody = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ctx->hFontBold = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             ctx->hBgBrush = CreateSolidBrush(RGB(0x18, 0x18, 0x1E));
@@ -3491,7 +3513,9 @@ bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, con
         wc.lpfnWndProc = SimpleInputDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        HICON hAppIcon = CreateFluxAppIcon();
+        wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
+        wc.hIconSm = hAppIcon;
         wc.lpszClassName = L"Flux_SimpleInputDialogClass";
         RegisterClassExW(&wc);
         registered = true;
@@ -3518,6 +3542,12 @@ bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, con
         hwnd_parent, nullptr, hInst, &ctx);
 
     if (!hDlg) return false;
+
+    HICON hDlgIcon = CreateFluxAppIcon();
+    if (hDlgIcon) {
+        SendMessageW(hDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hDlgIcon));
+        SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hDlgIcon));
+    }
 
     BOOL use_dark = TRUE;
     DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark, sizeof(use_dark));
@@ -3581,36 +3611,36 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     switch (msg) {
         case WM_CREATE: {
             ctx->hDlg = hwnd;
-            ctx->hFontBody = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            ctx->hFontBody = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontBold = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ctx->hFontBold = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontTitle = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            ctx->hFontTitle = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            ctx->hFontSmall = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            ctx->hFontSmall = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             ctx->hBgBrush = CreateSolidBrush(RGB(0x18, 0x18, 0x1E));
 
             HINSTANCE hInst = GetModuleHandleW(nullptr);
 
-            // 1. Move to Recycle Bin Button
-            ctx->hRecycleBtn = CreateWindowExW(0, L"BUTTON", L"Move to Recycle Bin",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                24, 185, 160, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6001)), hInst, nullptr);
-
-            // 2. Permanently Delete Button (Coral Red Accent #FF4F57)
+            // 1. Permanently Delete Button (Coral Red Accent #FF4F57, Initially Focused)
             ctx->hPermanentBtn = CreateWindowExW(0, L"BUTTON", L"Permanently Delete",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                196, 185, 175, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6002)), hInst, nullptr);
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+                24, 185, 175, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6001)), hInst, nullptr);
+
+            // 2. Move to Recycle Bin Button
+            ctx->hRecycleBtn = CreateWindowExW(0, L"BUTTON", L"Move to Recycle Bin",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_OWNERDRAW,
+                209, 185, 160, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6002)), hInst, nullptr);
 
             // 3. Cancel Button
             ctx->hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                383, 185, 105, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6003)), hInst, nullptr);
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_OWNERDRAW,
+                379, 185, 105, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6003)), hInst, nullptr);
 
             return 0;
         }
@@ -3620,28 +3650,30 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             HDC hdc = dis->hDC;
             RECT rc = dis->rcItem;
             bool is_sel = (dis->itemState & ODS_SELECTED) != 0;
+            bool is_focused = (dis->itemState & ODS_FOCUS) != 0;
 
-            if (dis->CtlID == 6001) { // Recycle Bin (Surface elevated, subtle border)
-                ColorRgba bg = is_sel ? ColorRgba{0x28, 0x28, 0x32, 255} : ColorRgba{0x20, 0x20, 0x28, 255};
-                ColorRgba border{0x44, 0x44, 0x50, 255};
-                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, 1);
-                SelectObject(hdc, ctx->hFontBold);
-                SetTextColor(hdc, RGB(0xF2, 0xF2, 0xF3));
-                SetBkMode(hdc, TRANSPARENT);
-                DrawTextW(hdc, L"Move to Recycle Bin", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                return TRUE;
-            } else if (dis->CtlID == 6002) { // Permanently Delete (Coral Red Accent #FF4F57)
+            if (dis->CtlID == 6001) { // Permanently Delete (Coral Red Accent #FF4F57, Initially Focused)
                 ColorRgba bg = is_sel ? ColorRgba{0xE0, 0x43, 0x4B, 255} : ColorRgba{0xFF, 0x4F, 0x57, 255};
-                DrawRoundedBoxGdi(hdc, rc, 18, bg, bg, 0);
+                ColorRgba border = is_focused ? ColorRgba{0xFF, 0xFF, 0xFF, 255} : bg;
+                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, is_focused ? 2 : 0);
                 SelectObject(hdc, ctx->hFontBold);
                 SetTextColor(hdc, RGB(255, 255, 255));
                 SetBkMode(hdc, TRANSPARENT);
                 DrawTextW(hdc, L"Permanently Delete", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 return TRUE;
+            } else if (dis->CtlID == 6002) { // Move to Recycle Bin (Surface elevated, subtle border)
+                ColorRgba bg = is_sel ? ColorRgba{0x28, 0x28, 0x32, 255} : ColorRgba{0x20, 0x20, 0x28, 255};
+                ColorRgba border = is_focused ? ColorRgba{0xFF, 0x4F, 0x57, 255} : ColorRgba{0x44, 0x44, 0x50, 255};
+                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, is_focused ? 2 : 1);
+                SelectObject(hdc, ctx->hFontBold);
+                SetTextColor(hdc, RGB(0xF2, 0xF2, 0xF3));
+                SetBkMode(hdc, TRANSPARENT);
+                DrawTextW(hdc, L"Move to Recycle Bin", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
             } else if (dis->CtlID == 6003) { // Cancel
                 ColorRgba bg = is_sel ? ColorRgba{0x28, 0x28, 0x32, 255} : ColorRgba{0x20, 0x20, 0x28, 255};
-                ColorRgba border{0x44, 0x44, 0x50, 255};
-                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, 1);
+                ColorRgba border = is_focused ? ColorRgba{0xFF, 0x4F, 0x57, 255} : ColorRgba{0x44, 0x44, 0x50, 255};
+                DrawRoundedBoxGdi(hdc, rc, 18, bg, border, is_focused ? 2 : 1);
                 SelectObject(hdc, ctx->hFontBody);
                 SetTextColor(hdc, RGB(0xA4, 0xA5, 0xAC));
                 SetBkMode(hdc, TRANSPARENT);
@@ -3671,7 +3703,7 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetTextColor(hdc, RGB(0xDE, 0xDF, 0xE4));
             std::wstring q_text;
             if (ctx->files_info.size() == 1) {
-                q_text = L"Are you sure you want to delete '" + Utf8ToW(ctx->files_info[0].first) + L"'?";
+                q_text = L"Are you sure you want to permanently delete '" + Utf8ToW(ctx->files_info[0].first) + L"'?";
             } else {
                 q_text = L"Are you sure you want to delete " + std::to_wstring(ctx->files_info.size()) + L" selected downloads?";
             }
@@ -3680,13 +3712,18 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
             SelectObject(hdc, ctx->hFontSmall);
             SetTextColor(hdc, RGB(0x8E, 0x8E, 0x98));
-            std::wstring sub_text = L"Choose 'Move to Recycle Bin' to allow restoring later, or 'Permanently Delete' to remove from disk immediately.";
-            RECT s_rc{24, 98, 488, 140};
+            std::wstring sub_text = L"Permanently Delete deletes from disk immediately. Move to Recycle Bin allows restoring later.";
+            RECT s_rc{24, 98, 488, 138};
             DrawTextW(hdc, sub_text.c_str(), -1, &s_rc, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
             if (!ctx->files_info.empty()) {
-                std::wstring path_str = L"Path: " + Utf8ToW(ctx->files_info[0].second);
-                RECT p_rc{24, 145, 488, 170};
+                std::wstring path_str;
+                if (ctx->files_info.size() == 1) {
+                    path_str = L"Path: " + Utf8ToW((std::filesystem::path(ctx->files_info[0].second) / ctx->files_info[0].first).string());
+                } else {
+                    path_str = L"Target Folder: " + Utf8ToW(ctx->files_info[0].second) + L" (" + std::to_wstring(ctx->files_info.size()) + L" files)";
+                }
+                RECT p_rc{24, 142, 488, 170};
                 DrawTextW(hdc, path_str.c_str(), -1, &p_rc, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
 
@@ -3695,12 +3732,12 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         case WM_COMMAND: {
             int id = LOWORD(wParam);
-            if (id == 6001) { // Recycle Bin
-                ctx->view->ActionMoveSelectedToRecycleBin();
+            if (id == 6001) { // Permanently Delete
+                ctx->view->ActionDeleteSelectedWithFile();
                 DestroyWindow(hwnd);
                 return 0;
-            } else if (id == 6002) { // Permanently Delete
-                ctx->view->ActionDeleteSelectedWithFile();
+            } else if (id == 6002) { // Move to Recycle Bin
+                ctx->view->ActionMoveSelectedToRecycleBin();
                 DestroyWindow(hwnd);
                 return 0;
             } else if (id == 6003) { // Cancel
@@ -3742,7 +3779,9 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
         wc.lpfnWndProc = DeleteConfirmDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        HICON hAppIcon = CreateFluxAppIcon();
+        wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
+        wc.hIconSm = hAppIcon;
         wc.lpszClassName = L"Flux_DeleteConfirmDlgClass";
         RegisterClassExW(&wc);
         registered = true;
@@ -3776,6 +3815,12 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
 
     if (!hDlg) return;
 
+    HICON hDlgIcon = CreateFluxAppIcon();
+    if (hDlgIcon) {
+        SendMessageW(hDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hDlgIcon));
+        SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hDlgIcon));
+    }
+
     BOOL use_dark = TRUE;
     DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &use_dark, sizeof(use_dark));
 
@@ -3792,11 +3837,12 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
             } else if (msg.wParam == VK_RETURN) {
                 HWND focused = GetFocus();
                 if (focused == ctx.hRecycleBtn) {
-                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6001, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hRecycleBtn));
+                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hRecycleBtn));
                 } else if (focused == ctx.hCancelBtn) {
                     DestroyWindow(hDlg);
                 } else {
-                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hPermanentBtn));
+                    // Default enter action: Permanently Delete
+                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6001, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hPermanentBtn));
                 }
                 break;
             }
@@ -4675,50 +4721,119 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     int timer_cy = (status_rc.top + status_rc.bottom) / 2;
     DrawTimerClockGdi(hdc, timer_cx, timer_cy, timer_r, pal.text_secondary);
 
-    SelectObject(hdc, hFontBody);
-    RECT dl_stat_rc{timer_cx + timer_r * 2 + 8, status_rc.top, timer_cx + timer_r * 2 + DesignSystem::ScaleForDpi(120, m.dpi), status_rc.bottom};
-    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     auto sb = view.BuildStatusBar();
+
+    // 4a. Download Speed
+    SelectObject(hdc, hFontBody);
+    RECT dl_stat_rc{timer_cx + timer_r * 2 + 8, status_rc.top, timer_cx + timer_r * 2 + DesignSystem::ScaleForDpi(110, m.dpi), status_rc.bottom};
+    SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     std::wstring wstat_dl = std::wstring(L"\x2913 ") + Utf8ToW(sb.formatted_total_speed);
     DrawTextW(hdc, wstat_dl.c_str(), -1, &dl_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + DesignSystem::ScaleForDpi(110, m.dpi), status_rc.bottom};
+    // 4b. Upload Speed
+    RECT ul_stat_rc{dl_stat_rc.right + 10, status_rc.top, dl_stat_rc.right + DesignSystem::ScaleForDpi(100, m.dpi), status_rc.bottom};
     SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
     std::wstring wstat_ul = std::wstring(L"\x2912 ") + Utf8ToW(sb.formatted_total_upload_speed);
     DrawTextW(hdc, wstat_ul.c_str(), -1, &ul_stat_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT pri_rc{ul_stat_rc.right + 10, status_rc.top, ul_stat_rc.right + DesignSystem::ScaleForDpi(90, m.dpi), status_rc.bottom};
-    int pri_r = DesignSystem::ScaleForDpi(4, m.dpi);
+    // 4c. Active & Queued Counts
+    RECT counts_rc{ul_stat_rc.right + 12, status_rc.top, ul_stat_rc.right + DesignSystem::ScaleForDpi(145, m.dpi), status_rc.bottom};
+    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+    std::wstring wcounts = L"Active: " + std::to_wstring(sb.active_downloads) + L" | Queued: " + std::to_wstring(sb.remaining_queued);
+    DrawTextW(hdc, wcounts.c_str(), -1, &counts_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    int stat_r = DesignSystem::ScaleForDpi(4, m.dpi);
+
+    // 4d. Browser Status Indicator & Label
+    RECT brw_rc{counts_rc.right + 12, status_rc.top, counts_rc.right + DesignSystem::ScaleForDpi(125, m.dpi), status_rc.bottom};
+    bool browser_active = sb.browser_ipc_listening && sb.browser_capture_enabled;
+    ColorRgba brw_dot_color = browser_active ? ColorRgba(0x22, 0xC5, 0x5E) : (sb.browser_ipc_listening ? ColorRgba(0x3B, 0x82, 0xF6) : pal.text_muted);
+    HPEN hBrwPen = CreatePen(PS_SOLID, 1, brw_dot_color.ToWin32ColorRef());
+    HBRUSH hBrwBrush = CreateSolidBrush(brw_dot_color.ToWin32ColorRef());
+    HGDIOBJ op_brw = SelectObject(hdc, hBrwPen);
+    HGDIOBJ ob_brw = SelectObject(hdc, hBrwBrush);
+    Ellipse(hdc, brw_rc.left, timer_cy - stat_r, brw_rc.left + stat_r * 2, timer_cy + stat_r);
+    SelectObject(hdc, ob_brw);
+    SelectObject(hdc, op_brw);
+    DeleteObject(hBrwBrush);
+    DeleteObject(hBrwPen);
+
+    RECT brw_txt_rc{brw_rc.left + stat_r * 2 + 6, status_rc.top, brw_rc.right, status_rc.bottom};
+    SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, browser_active ? pal.text_primary.ToWin32ColorRef() : pal.text_secondary.ToWin32ColorRef());
+    std::wstring wbrw = browser_active ? L"Browser: Active" : (sb.browser_ipc_listening ? L"Browser: Connected" : L"Browser: Standby");
+    DrawTextW(hdc, wbrw.c_str(), -1, &brw_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // 4e. Stream Workers Status Indicator & Label
+    RECT wrk_rc{brw_rc.right + 12, status_rc.top, brw_rc.right + DesignSystem::ScaleForDpi(110, m.dpi), status_rc.bottom};
+    ColorRgba wrk_dot_color = sb.workers_ready ? ColorRgba(0x22, 0xC5, 0x5E) : pal.accent_primary;
+    HPEN hWrkPen = CreatePen(PS_SOLID, 1, wrk_dot_color.ToWin32ColorRef());
+    HBRUSH hWrkBrush = CreateSolidBrush(wrk_dot_color.ToWin32ColorRef());
+    HGDIOBJ op_wrk = SelectObject(hdc, hWrkPen);
+    HGDIOBJ ob_wrk = SelectObject(hdc, hWrkBrush);
+    Ellipse(hdc, wrk_rc.left, timer_cy - stat_r, wrk_rc.left + stat_r * 2, timer_cy + stat_r);
+    SelectObject(hdc, ob_wrk);
+    SelectObject(hdc, op_wrk);
+    DeleteObject(hWrkBrush);
+    DeleteObject(hWrkPen);
+
+    RECT wrk_txt_rc{wrk_rc.left + stat_r * 2 + 6, status_rc.top, wrk_rc.right, status_rc.bottom};
+    SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, sb.workers_ready ? pal.text_primary.ToWin32ColorRef() : pal.accent_primary.ToWin32ColorRef());
+    std::wstring wwrk = sb.workers_ready ? L"Workers: Ready" : L"Workers: Missing";
+    DrawTextW(hdc, wwrk.c_str(), -1, &wrk_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // 4f. Priority / Limiter State Indicator & Label
+    RECT pri_rc{wrk_rc.right + 12, status_rc.top, wrk_rc.right + DesignSystem::ScaleForDpi(90, m.dpi), status_rc.bottom};
     ColorRgba dot_color = limiter ? pal.accent_primary : pal.surface_elevated;
     HPEN hDotPen = CreatePen(PS_SOLID, 1, dot_color.ToWin32ColorRef());
     HBRUSH hDotBrush = CreateSolidBrush(dot_color.ToWin32ColorRef());
     HGDIOBJ op = SelectObject(hdc, hDotPen);
     HGDIOBJ ob = SelectObject(hdc, hDotBrush);
-    Ellipse(hdc, pri_rc.left, timer_cy - pri_r, pri_rc.left + pri_r * 2, timer_cy + pri_r);
+    Ellipse(hdc, pri_rc.left, timer_cy - stat_r, pri_rc.left + stat_r * 2, timer_cy + stat_r);
     SelectObject(hdc, ob);
     SelectObject(hdc, op);
     DeleteObject(hDotBrush);
     DeleteObject(hDotPen);
 
-    RECT pri_txt_rc{pri_rc.left + pri_r * 2 + 6, status_rc.top, pri_rc.right, status_rc.bottom};
+    RECT pri_txt_rc{pri_rc.left + stat_r * 2 + 6, status_rc.top, pri_rc.right, status_rc.bottom};
     SelectObject(hdc, hFontSmallBold);
     SetTextColor(hdc, limiter ? pal.text_primary.ToWin32ColorRef() : pal.text_secondary.ToWin32ColorRef());
     std::wstring wlimit = limiter ? L"LIMIT ON" : L"NORMAL";
     DrawTextW(hdc, wlimit.c_str(), -1, &pri_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+    // 4g. Active or Selected Filename (Right-aligned)
     if (!rows.empty()) {
-        std::string right_fn = rows[0].full_filename_tooltip;
-        for (const auto& r : rows) {
-            if (r.state == TaskState::kDownloading) {
-                right_fn = r.full_filename_tooltip;
-                break;
+        std::string right_fn;
+        std::string sel_id = view.GetSelectedTaskId();
+        if (!sel_id.empty()) {
+            for (const auto& r : rows) {
+                if (r.task_id == sel_id) {
+                    right_fn = r.full_filename_tooltip;
+                    break;
+                }
             }
         }
-        RECT rfn_rc{w - 320, status_rc.top, w - 16, status_rc.bottom};
-        SelectObject(hdc, hFontBody);
-        SetTextColor(hdc, pal.text_muted.ToWin32ColorRef());
-        std::wstring wrfn = Utf8ToW(right_fn);
-        DrawTextW(hdc, wrfn.c_str(), -1, &rfn_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (right_fn.empty()) {
+            for (const auto& r : rows) {
+                if (r.state == TaskState::kDownloading) {
+                    right_fn = r.full_filename_tooltip;
+                    break;
+                }
+            }
+        }
+        if (right_fn.empty()) {
+            right_fn = rows[0].full_filename_tooltip;
+        }
+
+        int fn_max_w = (std::max)(120, static_cast<int>(w - pri_rc.right - DesignSystem::ScaleForDpi(20, m.dpi)));
+        RECT rfn_rc{w - fn_max_w, status_rc.top, w - DesignSystem::ScaleForDpi(16, m.dpi), status_rc.bottom};
+        if (rfn_rc.left > pri_rc.right + DesignSystem::ScaleForDpi(10, m.dpi)) {
+            SelectObject(hdc, hFontBody);
+            SetTextColor(hdc, pal.text_muted.ToWin32ColorRef());
+            std::wstring wrfn = Utf8ToW(right_fn);
+            DrawTextW(hdc, wrfn.c_str(), -1, &rfn_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
     }
 
     // 5. Settings Center Overlay (when active)
@@ -4789,15 +4904,19 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hAppIcon));
             }
             auto geom = ctx->view->ComputeLayoutGeometry(0);
+            int edit_pad = DesignSystem::ScaleForDpi(32, ctx->view->GetMetrics().dpi);
+            int edit_h = DesignSystem::ScaleForDpi(22, ctx->view->GetMetrics().dpi);
+            int edit_y = geom.search_box_rect.top + (geom.search_box_rect.height() - edit_h) / 2;
             ctx->hSearchEdit = CreateWindowExW(
                 0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
-                std::max(10, geom.search_box_rect.width() - 40), std::max(10, geom.search_box_rect.height() - 14),
+                geom.search_box_rect.left + edit_pad, edit_y,
+                std::max(10, geom.search_box_rect.width() - edit_pad - 14), edit_h,
                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_EDIT)),
                 GetModuleHandleW(nullptr), nullptr);
+            int edit_font_sz = DesignSystem::ScaleForDpi(15, ctx->view->GetMetrics().dpi);
             HFONT hEditFont = CreateFontW(
-                -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                -edit_font_sz, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             SendMessageW(ctx->hSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hEditFont), TRUE);
@@ -4810,8 +4929,8 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             HWND hCtl = reinterpret_cast<HWND>(lParam);
             if (hCtl == ctx->hSearchEdit) {
                 SetTextColor(hdcEdit, RGB(0xF0, 0xF0, 0xF5));
-                SetBkColor(hdcEdit, RGB(0x22, 0x22, 0x26));
-                static HBRUSH hEditBrush = CreateSolidBrush(RGB(0x22, 0x22, 0x26));
+                SetBkColor(hdcEdit, RGB(0x1E, 0x1E, 0x22));
+                static HBRUSH hEditBrush = CreateSolidBrush(RGB(0x1E, 0x1E, 0x22));
                 return reinterpret_cast<LRESULT>(hEditBrush);
             }
             break;
@@ -4863,8 +4982,11 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SWP_NOZORDER | SWP_NOACTIVATE);
             auto geom = ctx->view->ComputeLayoutGeometry(ctx->view->GetScrollOffset());
             if (ctx->hSearchEdit) {
-                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
-                           std::max(10, geom.search_box_rect.width() - 40), std::max(10, geom.search_box_rect.height() - 14), TRUE);
+                int edit_pad = DesignSystem::ScaleForDpi(32, ctx->view->GetMetrics().dpi);
+                int edit_h = DesignSystem::ScaleForDpi(22, ctx->view->GetMetrics().dpi);
+                int edit_y = geom.search_box_rect.top + (geom.search_box_rect.height() - edit_h) / 2;
+                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + edit_pad, edit_y,
+                           std::max(10, geom.search_box_rect.width() - edit_pad - 14), edit_h, TRUE);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -4884,8 +5006,11 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ctx->view->SetWindowDimensions(LOWORD(lParam), HIWORD(lParam), dpi > 0 ? dpi : 96);
             auto geom = ctx->view->ComputeLayoutGeometry(ctx->view->GetScrollOffset());
             if (ctx->hSearchEdit) {
-                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
-                           std::max(10, geom.search_box_rect.width() - 40), std::max(10, geom.search_box_rect.height() - 14), TRUE);
+                int edit_pad = DesignSystem::ScaleForDpi(32, ctx->view->GetMetrics().dpi);
+                int edit_h = DesignSystem::ScaleForDpi(22, ctx->view->GetMetrics().dpi);
+                int edit_y = geom.search_box_rect.top + (geom.search_box_rect.height() - edit_h) / 2;
+                MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + edit_pad, edit_y,
+                           std::max(10, geom.search_box_rect.width() - edit_pad - 14), edit_h, TRUE);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -5070,6 +5195,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
         case WM_CONTEXTMENU: {
+            if (ctx->view->IsSettingsCenterOpen()) return 0;
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             POINT client_pt = pt;
             ScreenToClient(hwnd, &client_pt);

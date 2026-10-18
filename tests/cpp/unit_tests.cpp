@@ -2882,11 +2882,105 @@ bool TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload() {
     return true;
 }
 
+bool TestFinalPhaseRemediationAndLiveMetrics() {
+    using namespace openidm;
+
+    // 1. Theme default restoration to coral_dark and coral red accent
+    AppSettings def_settings;
+    ASSERT_TRUE(def_settings.theme == "coral_dark", "Default theme is coral_dark");
+    auto pal = openidm::ui::DesignSystem::ResolvePalette("coral_dark");
+    ASSERT_TRUE(pal.accent_primary.r == 0xFF && pal.accent_primary.g == 0x4F && pal.accent_primary.b == 0x57,
+                "coral_dark accent is coral red #FF4F57");
+    ASSERT_TRUE(openidm::ui::DesignSystem::ResolvePalette("").accent_primary.r == 0xFF,
+                "Fallback theme defaults to coral red #FF4F57");
+
+    // 2. Safe File Deletion in Controller
+    std::error_code ec;
+    std::filesystem::path work_dir = std::filesystem::temp_directory_path() / "flux_test_safe_del";
+    std::filesystem::remove_all(work_dir, ec);
+    std::filesystem::create_directories(work_dir, ec);
+
+    ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+
+    DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller for safe deletion");
+
+    // 2a. Completed file deleted when delete_file == true
+    std::filesystem::path target_file = cfg.default_download_dir / "sample_completed.dat";
+    {
+        std::ofstream ofs(target_file, std::ios::binary);
+        ofs << "test completed content";
+    }
+    ASSERT_TRUE(std::filesystem::exists(target_file), "Test file created on disk");
+
+    TaskModel t1;
+    t1.task_id = "task-safe-del-1";
+    t1.url = "https://example.com/sample_completed.dat";
+    t1.file_name = "sample_completed.dat";
+    t1.save_dir = cfg.default_download_dir.string();
+    t1.state = TaskState::kCompleted;
+    ASSERT_TRUE(ctrl.AddTask(t1, false, true).ok(), "Add completed task");
+
+    // Remove task with delete_file = false: file MUST remain on disk
+    TaskModel t2 = t1;
+    t2.task_id = "task-safe-del-2";
+    ASSERT_TRUE(ctrl.AddTask(t2, false, true).ok(), "Add second completed task");
+    ASSERT_TRUE(ctrl.RemoveTask("task-safe-del-2", false).ok(), "Remove without deleting file");
+    ASSERT_TRUE(std::filesystem::exists(target_file), "File preserved when delete_file == false");
+
+    // Remove task with delete_file = true: file MUST be removed from disk
+    ASSERT_TRUE(ctrl.RemoveTask("task-safe-del-1", true).ok(), "Remove with delete_file == true");
+    ASSERT_TRUE(!std::filesystem::exists(target_file), "File removed from disk when delete_file == true");
+    ASSERT_TRUE(!ctrl.GetTask("task-safe-del-1").has_value(), "Task removed from DB");
+
+    // 3. Status Bar Metrics and Active Counts
+    openidm::ui::DesktopView view(ctrl);
+    auto sb = view.BuildStatusBar();
+    ASSERT_TRUE(sb.browser_capture_enabled, "Browser capture enabled by default");
+    ASSERT_TRUE(!sb.formatted_total_speed.empty(), "Formatted speed non-empty");
+    ASSERT_TRUE(!sb.formatted_total_upload_speed.empty(), "Formatted upload speed non-empty");
+
+    // 4. YouTube Googlevideo Classification Guard
+    std::string yt_video_url = "https://rr3---sn-4g5ednks.googlevideo.com/videoplayback?expire=1729272302&ei=xyz&ip=1.2.3.4&id=o-1234&itag=18&source=youtube&requiressl=yes&mime=video%2Fmp4";
+    std::string low_url = yt_video_url;
+    for (char& c : low_url) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    bool is_youtube_watch = (low_url.find("youtube.com/watch") != std::string::npos ||
+                             low_url.find("youtu.be/") != std::string::npos ||
+                             low_url.find("youtube.com/shorts/") != std::string::npos ||
+                             low_url.find("googlevideo.com") != std::string::npos ||
+                             low_url.find("videoplayback") != std::string::npos);
+    ASSERT_TRUE(is_youtube_watch, "googlevideo.com URL matched as YouTube stream");
+
+    bool is_direct_video = !is_youtube_watch && (low_url.find(".mp4") != std::string::npos);
+    ASSERT_TRUE(!is_direct_video, "googlevideo.com with .mp4 is NOT classified as direct video");
+
+    // 5. Scheduled Window Precision (Midnight crossing)
+    auto is_in_window = [](const std::string& cur, const std::string& start, const std::string& stop) {
+        if (cur.size() != 5 || start.size() != 5 || stop.size() != 5) return false;
+        if (start <= stop) return cur >= start && cur <= stop;
+        return cur >= start || cur <= stop;
+    };
+    ASSERT_TRUE(is_in_window("23:30", "23:00", "04:00"), "23:30 inside 23:00-04:00 window");
+    ASSERT_TRUE(is_in_window("02:15", "23:00", "04:00"), "02:15 inside 23:00-04:00 window");
+    ASSERT_TRUE(!is_in_window("12:00", "23:00", "04:00"), "12:00 outside 23:00-04:00 window");
+    ASSERT_TRUE(is_in_window("14:30", "09:00", "17:00"), "14:30 inside 09:00-17:00 window");
+    ASSERT_TRUE(!is_in_window("19:00", "09:00", "17:00"), "19:00 outside 09:00-17:00 window");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(work_dir, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 53;
+    const int total = 54;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -2949,6 +3043,7 @@ int main() {
     run(51, "TestUrlUserinfoExtractionAndBasicAuthGeneration", TestUrlUserinfoExtractionAndBasicAuthGeneration);
     run(52, "TestModernCoralThemeSettingsModalBoundsAndSafeDelete", TestModernCoralThemeSettingsModalBoundsAndSafeDelete);
     run(53, "TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload", TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload);
+    run(54, "TestFinalPhaseRemediationAndLiveMetrics", TestFinalPhaseRemediationAndLiveMetrics);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

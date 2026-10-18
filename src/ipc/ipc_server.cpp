@@ -893,7 +893,17 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         std::string low_url = manifest_url;
         for (char& c : low_url) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-        bool is_direct_video = (stream_type == "HTTP_FILE" || source_type == "DIRECT_PROGRESSIVE" ||
+        bool is_youtube_watch = (source_type == "YOUTUBE_EXTRACTION" || stream_type == "YOUTUBE" ||
+                                 low_url.find("youtube.com/watch") != std::string::npos ||
+                                 low_url.find("youtu.be/") != std::string::npos ||
+                                 low_url.find("youtube.com/shorts/") != std::string::npos ||
+                                 low_url.find("googlevideo.com") != std::string::npos ||
+                                 low_url.find("videoplayback") != std::string::npos ||
+                                 (!cached_body.empty() && cached_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos) ||
+                                 (!cached_body.empty() && cached_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos));
+
+        bool is_direct_video = !is_youtube_watch &&
+                               (stream_type == "HTTP_FILE" || source_type == "DIRECT_PROGRESSIVE" ||
                                 low_url.find(".mp4") != std::string::npos || low_url.find(".webm") != std::string::npos ||
                                 low_url.find(".mkv") != std::string::npos || low_url.find(".mov") != std::string::npos ||
                                 low_url.find(".avi") != std::string::npos || low_url.find(".flv") != std::string::npos ||
@@ -901,20 +911,18 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
                                 low_url.find(".aac") != std::string::npos || low_url.find(".flac") != std::string::npos) &&
                                (low_url.find(".m3u8") == std::string::npos && low_url.find(".mpd") == std::string::npos);
 
-        bool is_dash = (stream_type == "DASH" || low_url.find(".mpd") != std::string::npos ||
+        bool is_dash = !is_youtube_watch &&
+                       (stream_type == "DASH" || low_url.find(".mpd") != std::string::npos ||
                         (!cached_body.empty() && (cached_body.find("<MPD") != std::string::npos || cached_body.find("<mpd") != std::string::npos)));
 
-        bool is_hls = (stream_type == "HLS" || low_url.find(".m3u8") != std::string::npos ||
+        bool is_hls = !is_youtube_watch &&
+                      (stream_type == "HLS" || low_url.find(".m3u8") != std::string::npos ||
                        (!cached_body.empty() && cached_body.find("#EXTM3U") != std::string::npos));
 
-        bool is_youtube_watch = (source_type == "YOUTUBE_EXTRACTION" || stream_type == "YOUTUBE" ||
-                                 low_url.find("youtube.com/watch") != std::string::npos ||
-                                 low_url.find("youtu.be/") != std::string::npos ||
-                                 low_url.find("youtube.com/shorts/") != std::string::npos ||
-                                 (!cached_body.empty() && cached_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos) ||
-                                 (!cached_body.empty() && cached_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos));
-
-        if (is_direct_video && !is_dash && !is_hls) {
+        if (is_youtube_watch) {
+            t.task_type = TaskType::kStreamHls;
+            t.category = "Video";
+        } else if (is_direct_video && !is_dash && !is_hls) {
             t.task_type = TaskType::kHttpFile;
             bool is_audio = (low_url.find(".mp3") != std::string::npos || low_url.find(".m4a") != std::string::npos ||
                              low_url.find(".aac") != std::string::npos || low_url.find(".flac") != std::string::npos);
@@ -922,7 +930,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         } else if (is_dash) {
             t.task_type = TaskType::kStreamDash;
             t.category = "Video";
-        } else if (is_hls || is_youtube_watch) {
+        } else if (is_hls) {
             t.task_type = TaskType::kStreamHls;
             t.category = "Video";
         } else {

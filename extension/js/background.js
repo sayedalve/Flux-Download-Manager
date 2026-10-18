@@ -262,7 +262,7 @@ function updateTabBadge(tabId) {
   const text = count > 0 ? String(count) : "";
   try {
     chrome.action.setBadgeText({ text, tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
-    chrome.action.setBadgeBackgroundColor({ color: "#2563EB", tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
+    chrome.action.setBadgeBackgroundColor({ color: "#FF4F57", tabId: (typeof tabId === "number" && tabId > 0) ? tabId : undefined });
   } catch (_) {}
 }
 
@@ -1252,24 +1252,40 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
 
   if (msg.action === "getMediaList") {
     ensureSessionRestored().then(async () => {
-      const targetTabUrl = msg.tabUrl || G.tabUrlMap.get(tabId) || "";
+      let resolvedTabId = tabId;
+      if (resolvedTabId <= 0 && typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.query === "function") {
+        try {
+          const activeTabs = await new Promise((res) => chrome.tabs.query({ active: true, lastFocusedWindow: true }, res));
+          if (activeTabs && activeTabs[0] && activeTabs[0].id) {
+            resolvedTabId = activeTabs[0].id;
+          }
+        } catch (_) {}
+      }
+      if (resolvedTabId <= 0 && G.cacheData.size > 0) {
+        for (const k of G.cacheData.keys()) {
+          resolvedTabId = k;
+          break;
+        }
+      }
+
+      const targetTabUrl = msg.tabUrl || G.tabUrlMap.get(resolvedTabId) || "";
 
       // If no candidates are cached yet, probe the active tab content script (or YouTube watch URL)
-      let currentList = G.cacheData.get(tabId) || [];
-      if (currentList.length === 0 && tabId > 0 && typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.sendMessage === "function") {
+      let currentList = G.cacheData.get(resolvedTabId) || [];
+      if (currentList.length === 0 && resolvedTabId > 0 && typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.sendMessage === "function") {
         try {
           await new Promise((resolve) => {
-            chrome.tabs.sendMessage(tabId, { action: "probePageMedia" }, () => {
+            chrome.tabs.sendMessage(resolvedTabId, { action: "probePageMedia" }, () => {
               if (chrome.runtime) void chrome.runtime.lastError;
               resolve();
             });
           });
         } catch (_) {}
-        currentList = G.cacheData.get(tabId) || [];
+        currentList = G.cacheData.get(resolvedTabId) || [];
       }
 
-      if (currentList.length === 0 && isYouTubeWatchOrShortsUrl(targetTabUrl) && !isSiteDisabled(targetTabUrl) && !(G.playerErrors && G.playerErrors.has(tabId))) {
-        addOrDeduplicateMediaCandidate(tabId, {
+      if (currentList.length === 0 && isYouTubeWatchOrShortsUrl(targetTabUrl) && !isSiteDisabled(targetTabUrl) && !(G.playerErrors && G.playerErrors.has(resolvedTabId))) {
+        addOrDeduplicateMediaCandidate(resolvedTabId, {
           url: targetTabUrl,
           ext: "mp4",
           streamType: "YOUTUBE",
@@ -1280,7 +1296,7 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
           tabUrl: targetTabUrl,
           headers: { Referer: targetTabUrl }
         });
-        updateTabBadge(tabId);
+        updateTabBadge(resolvedTabId);
       }
 
       return sendNativeRpc("system.handshake", { protocolVersion: "1.0" })
@@ -1291,8 +1307,8 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
             workersAvailable: Boolean(hs && hs.workersAvailable),
             captureEnabled: G.enableCapture,
             siteDisabled: isSiteDisabled(targetTabUrl),
-            playerError: (G.playerErrors && G.playerErrors.get(tabId)) || "",
-            candidates: G.cacheData.get(tabId) || []
+            playerError: (G.playerErrors && G.playerErrors.get(resolvedTabId)) || "",
+            candidates: G.cacheData.get(resolvedTabId) || []
           });
         })
         .catch((err) => {
@@ -1305,8 +1321,8 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
             nativeErrorMessage: err ? err.message : "",
             captureEnabled: G.enableCapture,
             siteDisabled: isSiteDisabled(targetTabUrl),
-            playerError: (G.playerErrors && G.playerErrors.get(tabId)) || "",
-            candidates: G.cacheData.get(tabId) || []
+            playerError: (G.playerErrors && G.playerErrors.get(resolvedTabId)) || "",
+            candidates: G.cacheData.get(resolvedTabId) || []
           });
         });
     });

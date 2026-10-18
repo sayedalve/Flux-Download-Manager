@@ -709,7 +709,7 @@ void DownloadController::ScheduleLoop() {
                                 m_store.UpsertTask(t);
                             }
                         }
-                    } else if (!q.stop_time_local.empty()) {
+                    } else if (!q.stop_time_local.empty() && cur_hh_mm == q.stop_time_local) {
                         for (auto& [id, t] : m_tasks) {
                             if (t.queue_id == q.queue_id && !t.scheduled &&
                                 (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kQueued)) {
@@ -718,7 +718,7 @@ void DownloadController::ScheduleLoop() {
                                     ait->second->pause_requested.store(true);
                                 }
                                 t.state = TaskState::kPaused;
-                                t.status_detail = "Paused (Queue Scheduled Stop)";
+                                t.status_detail = "Paused (Queue Scheduled Stop " + q.stop_time_local + ")";
                                 m_store.UpsertTask(t);
                             }
                         }
@@ -1473,7 +1473,13 @@ Result<void> DownloadController::RemoveTask(const std::string& task_id, bool del
         // Only delete completed user output file if delete_file == true was explicitly requested!
         if (delete_file && it->second.state == TaskState::kCompleted) {
             std::filesystem::path fp = std::filesystem::path(it->second.save_dir) / it->second.file_name;
-            std::filesystem::remove(fp, ec);
+            if (std::filesystem::exists(fp, ec)) {
+                std::filesystem::remove(fp, ec);
+                if (ec) {
+                    OPENIDM_LOG_ERROR("Controller", "Failed to delete output file " + fp.string() + ": " + ec.message());
+                    return Result<void>::Err("ERR_FILE_DELETE_FAILED", "Failed to delete file from disk: " + ec.message());
+                }
+            }
         }
         m_tasks.erase(it);
     }

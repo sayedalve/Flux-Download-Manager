@@ -437,8 +437,8 @@ function classifyNetworkResource(details) {
         return {
           url,
           ext: resolvedExt,
-          streamType: "HTTP_FILE",
-          sourceType: SourceType.DIRECT_PROGRESSIVE,
+          streamType: "YOUTUBE",
+          sourceType: isYouTubeWatchOrShortsUrl(tabUrl) ? SourceType.YOUTUBE_EXTRACTION : SourceType.DIRECT_PROGRESSIVE,
           mime: mimeParam,
           size: totalSize,
           itag,

@@ -351,10 +351,10 @@ public:
         m.corner_radius = ScaleForDpi(6, dpi);
         m.focus_ring_width = std::max(1, ScaleForDpi(2, dpi));
 
-        // Enforce >= 12px caption floor and >= 14px body floor for modern Windows 11 readability
+        // Enforce >= 12px caption floor and >= 15px body floor for modern Windows 11 readability
         m.font_caption_px = ScaleForDpi(12, dpi);
-        m.font_body_px = ScaleForDpi(14, dpi);
-        m.font_body_strong_px = ScaleForDpi(14, dpi);
+        m.font_body_px = ScaleForDpi(15, dpi);
+        m.font_body_strong_px = ScaleForDpi(15, dpi);
         m.font_subtitle_px = ScaleForDpi(16, dpi);
         m.font_title_px = ScaleForDpi(20, dpi);
         return m;

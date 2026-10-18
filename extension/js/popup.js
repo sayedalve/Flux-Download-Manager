@@ -426,6 +426,23 @@ function initPopupUI() {
           return;
         }
         queryAndLoad(targetTab.id, targetTab.url || "");
+      } else {
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }, (lastTabs) => {
+          if (lastTabs && lastTabs[0]) {
+            let targetTab = lastTabs[0];
+            if (targetTab.url && targetTab.url.startsWith("chrome-extension://")) {
+              chrome.tabs.query({ lastFocusedWindow: true }, (allTabs) => {
+                const nonExt = (allTabs || []).find(t => t.url && !t.url.startsWith("chrome-extension://"));
+                if (nonExt) targetTab = nonExt;
+                queryAndLoad(targetTab.id, targetTab.url || "");
+              });
+              return;
+            }
+            queryAndLoad(targetTab.id, targetTab.url || "");
+          } else {
+            queryAndLoad(0, "");
+          }
+        });
       }
     });
   }

@@ -527,13 +527,11 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
         Result<std::filesystem::path> res;
         bool is_yt = (task_type_str == "YOUTUBE_EXTRACTION" ||
                       local_task.url.find("googlevideo.com") != std::string::npos ||
-                      local_task.url.find("youtube.com") != std::string::npos ||
-                      local_task.url.find("youtu.be") != std::string::npos ||
-                      local_task.page_url.find("youtube.com") != std::string::npos ||
-                      local_task.stream_options.cached_manifest_body.find("YOUTUBE") != std::string::npos ||
-                      (!local_task.stream_options.cached_manifest_body.empty() &&
-                       (local_task.stream_options.cached_manifest_body.front() == '{' ||
-                        local_task.stream_options.cached_manifest_body.front() == '[')));
+                      local_task.url.find("youtube.com/watch") != std::string::npos ||
+                      local_task.url.find("youtu.be/") != std::string::npos ||
+                      local_task.url.find("youtube.com/shorts/") != std::string::npos ||
+                      local_task.stream_options.cached_manifest_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos ||
+                      local_task.stream_options.cached_manifest_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos);
         auto progress_cb = [&](const stream::StreamProgress& sp) {
             std::lock_guard<std::mutex> lock(m_mutex);
             auto it = m_tasks.find(task_id);
@@ -816,6 +814,22 @@ Result<void> DownloadController::RemoveTask(const std::string& task_id, bool del
         m_tasks.erase(it);
     }
     return m_store.DeleteTask(task_id);
+}
+
+Result<void> DownloadController::UpdateTask(const TaskModel& task) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_tasks.find(task.task_id);
+    if (it == m_tasks.end() || m_deleted_tasks.count(task.task_id)) {
+        return Result<void>::Err("ERR_NOT_FOUND", "Task not found");
+    }
+    it->second = task;
+    it->second.updated_at_ms = NowEpochMs();
+    auto db_res = m_store.UpsertTask(it->second);
+    if (!db_res.ok()) {
+        return Result<void>::Err(db_res.error->code, db_res.error->message);
+    }
+    m_cv.notify_all();
+    return Result<void>::Ok();
 }
 
 Result<int> DownloadController::ClearCompletedHistory() {

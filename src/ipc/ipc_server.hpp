@@ -40,6 +40,9 @@ public:
     void SetCaptureEnabled(bool enabled) { m_capture_enabled.store(enabled); }
     bool IsCaptureEnabled() const { return m_capture_enabled.load(); }
 
+    using OfferNotificationCallback = std::function<void(const TaskModel& task)>;
+    void SetOfferNotificationCallback(OfferNotificationCallback cb) { m_offer_cb = std::move(cb); }
+
     static std::string DefaultSocketPath();
 
 private:
@@ -51,6 +54,7 @@ private:
     int m_listen_fd{-1};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_capture_enabled{true};
+    OfferNotificationCallback m_offer_cb;
     std::thread m_accept_thread;
 
     struct ClientWorkerEntry {

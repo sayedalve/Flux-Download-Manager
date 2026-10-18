@@ -85,6 +85,7 @@ public:
     Result<void> CancelTask(const std::string& task_id);
     Result<void> RetryTask(const std::string& task_id);
     Result<void> RemoveTask(const std::string& task_id, bool delete_file = false);
+    Result<void> UpdateTask(const TaskModel& task);
     Result<int> ClearCompletedHistory();
 
     void PauseAllTasks();

@@ -398,6 +398,25 @@ public:
     void SelectFirstRow();
     void SelectLastRow();
 
+    // Table Scrolling & Column Sizing
+    size_t GetScrollOffset() const { return m_scroll_offset; }
+    void SetScrollOffset(size_t offset) { m_scroll_offset = offset; }
+    void ScrollBy(int delta_rows);
+
+    int GetColumnWidth(size_t col_idx) const;
+    void SetColumnWidth(size_t col_idx, int width);
+    bool IsResizingColumn() const { return m_resizing_col_index >= 0; }
+    int GetResizingColumnIndex() const { return m_resizing_col_index; }
+    void StartColumnResize(int col_idx, int mouse_x);
+    void UpdateColumnResize(int mouse_x);
+    void EndColumnResize();
+    int HitTestColumnDivider(int x, int y, size_t scroll_offset = 0) const;
+
+#ifdef _WIN32
+    void SetWindowHwnd(HWND hwnd) { m_hwnd = hwnd; }
+    HWND GetWindowHwnd() const { return m_hwnd; }
+#endif
+
     // Computed View Models
     std::vector<TaskModel> GetFilteredAndSortedTasks() const;
     std::vector<FormattedTaskRow> BuildVisibleTaskRows(size_t scroll_offset = 0, size_t max_visible_rows = 100) const;
@@ -510,6 +529,15 @@ private:
     bool m_select_all_checked{false};
     std::set<std::string> m_checked_task_ids;
     bool m_speed_limiter_active{false};
+
+    size_t m_scroll_offset{0};
+    mutable std::vector<int> m_column_widths;
+    int m_resizing_col_index{-1};
+    int m_resize_start_x{0};
+    int m_resize_orig_width{0};
+#ifdef _WIN32
+    HWND m_hwnd{nullptr};
+#endif
 };
 
 } // namespace openidm::ui

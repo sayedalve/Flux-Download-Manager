@@ -180,7 +180,7 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     };
     for (size_t i = 0; i < 7; ++i) {
         const auto& [cat, cnt] = cats[i];
-        RectI crc = (i == 0) ? g.filter_dropdown_rect : RectI{filt_x, sort_y + static_cast<int>(i * 30), filt_x + filt_w, sort_y + static_cast<int>((i + 1) * 30)};
+        RectI crc = (i == 0) ? g.filter_dropdown_rect : RectI{w + 300, static_cast<int>(i * 35), w + 450, static_cast<int>((i + 1) * 35)};
         g.sidebar_items.push_back({cat, CategoryToLabel(cat), cnt, cat == m_selected_category, crc});
     }
     g.sidebar_rect = {0, bar_h, 0, bar_h};
@@ -194,18 +194,28 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     g.status_toggle_off_rect = {16, h - sb_h + (sb_h - 24) / 2, 62, h - sb_h + (sb_h + 24) / 2};
 
     int col_chk_w = 44;
-    int col_size_w = DesignSystem::ScaleForDpi(100, m.dpi);
-    int col_stat_w = DesignSystem::ScaleForDpi(170, m.dpi);
-    int col_dl_w = DesignSystem::ScaleForDpi(130, m.dpi);
-    int col_ul_w = DesignSystem::ScaleForDpi(100, m.dpi);
-    int col_added_w = DesignSystem::ScaleForDpi(140, m.dpi);
+    int def_size_w = DesignSystem::ScaleForDpi(100, m.dpi);
+    int def_stat_w = DesignSystem::ScaleForDpi(170, m.dpi);
+    int def_dl_w = DesignSystem::ScaleForDpi(130, m.dpi);
+    int def_ul_w = DesignSystem::ScaleForDpi(100, m.dpi);
+    int def_added_w = DesignSystem::ScaleForDpi(140, m.dpi);
 
-    int remaining_w = std::max(100, w - col_chk_w - col_size_w - col_stat_w - col_dl_w - col_ul_w - col_added_w - 32);
-    int col_name_w = remaining_w;
+    int remaining_w = std::max(100, w - col_chk_w - def_size_w - def_stat_w - def_dl_w - def_ul_w - def_added_w - 32);
+
+    if (m_column_widths.size() < 6) {
+        m_column_widths = {col_chk_w + remaining_w, def_size_w, def_stat_w, def_dl_w, def_ul_w, def_added_w};
+    }
+
+    int col_name_total_w = m_column_widths[0];
+    int col_size_w = m_column_widths[1];
+    int col_stat_w = m_column_widths[2];
+    int col_dl_w = m_column_widths[3];
+    int col_ul_w = m_column_widths[4];
+    int col_added_w = m_column_widths[5];
 
     int cx = 16;
-    g.table_columns.push_back({SortColumn::kFileName, "Name", {cx, bar_h, cx + col_chk_w + col_name_w, bar_h + hdr_h}});
-    cx += col_chk_w + col_name_w;
+    g.table_columns.push_back({SortColumn::kFileName, "Name", {cx, bar_h, cx + col_name_total_w, bar_h + hdr_h}});
+    cx += col_name_total_w;
 
     g.table_columns.push_back({SortColumn::kSize, "Size", {cx, bar_h, cx + col_size_w, bar_h + hdr_h}});
     cx += col_size_w;
@@ -234,7 +244,7 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     for (const auto& r : visible_rows) {
         if (ry + row_h > g.table_body_rect.bottom) break;
         RectI row_rc{0, ry, w, ry + row_h};
-        RectI fn_rc{16 + col_chk_w, ry, 16 + col_chk_w + col_name_w, ry + row_h};
+        RectI fn_rc{16 + col_chk_w, ry, 16 + col_name_total_w, ry + row_h};
         RectI prog_rc{16 + col_chk_w + 24, ry + row_h - 14, 16 + col_chk_w + 180, ry + row_h - 11};
         RectI act_rc{dl_col_left, ry + (row_h - 22) / 2, dl_col_left + 22, ry + (row_h + 22) / 2};
         RectI chk_rc{16, ry + (row_h - 20) / 2, 36, ry + (row_h + 20) / 2};
@@ -297,7 +307,7 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
         }
     }
     for (size_t i = 0; i < geom.sidebar_items.size(); ++i) {
-        if (geom.sidebar_items[i].rect.Contains(x, y)) {
+        if (geom.sidebar_items[i].rect.width() > 0 && geom.sidebar_items[i].rect.height() > 0 && geom.sidebar_items[i].rect.Contains(x, y)) {
             return {HitTargetType::kSidebarCategory, static_cast<int>(i), "", geom.sidebar_items[i].label};
         }
     }
@@ -797,6 +807,73 @@ void DesktopView::SelectFirstRow() {
 void DesktopView::SelectLastRow() {
     auto list = GetFilteredAndSortedTasks();
     m_selected_task_id = list.empty() ? "" : list.back().task_id;
+}
+
+void DesktopView::ScrollBy(int delta_rows) {
+    auto filtered = GetFilteredAndSortedTasks();
+    int row_h = DesignSystem::ScaleForDpi(52, m_metrics.dpi);
+    int hdr_h = DesignSystem::ScaleForDpi(38, m_metrics.dpi);
+    int bar_h = DesignSystem::ScaleForDpi(48, m_metrics.dpi);
+    int sb_h = DesignSystem::ScaleForDpi(36, m_metrics.dpi);
+    int body_h = std::max(50, m_window_height - bar_h - hdr_h - sb_h);
+    size_t visible_count = static_cast<size_t>(std::max(1, body_h / row_h));
+
+    if (filtered.size() <= visible_count) {
+        m_scroll_offset = 0;
+        return;
+    }
+    size_t max_scroll = filtered.size() - visible_count;
+    int cur = static_cast<int>(m_scroll_offset) + delta_rows;
+    if (cur < 0) cur = 0;
+    if (cur > static_cast<int>(max_scroll)) cur = static_cast<int>(max_scroll);
+    m_scroll_offset = static_cast<size_t>(cur);
+}
+
+int DesktopView::GetColumnWidth(size_t col_idx) const {
+    if (col_idx < m_column_widths.size()) {
+        return m_column_widths[col_idx];
+    }
+    return 100;
+}
+
+void DesktopView::SetColumnWidth(size_t col_idx, int width) {
+    if (col_idx < m_column_widths.size()) {
+        m_column_widths[col_idx] = std::max(50, width);
+    }
+}
+
+void DesktopView::StartColumnResize(int col_idx, int mouse_x) {
+    if (col_idx >= 0 && col_idx < static_cast<int>(m_column_widths.size())) {
+        m_resizing_col_index = col_idx;
+        m_resize_start_x = mouse_x;
+        m_resize_orig_width = m_column_widths[static_cast<size_t>(col_idx)];
+    }
+}
+
+void DesktopView::UpdateColumnResize(int mouse_x) {
+    if (m_resizing_col_index >= 0 && m_resizing_col_index < static_cast<int>(m_column_widths.size())) {
+        int delta = mouse_x - m_resize_start_x;
+        int new_w = std::max(50, m_resize_orig_width + delta);
+        m_column_widths[static_cast<size_t>(m_resizing_col_index)] = new_w;
+    }
+}
+
+void DesktopView::EndColumnResize() {
+    m_resizing_col_index = -1;
+}
+
+int DesktopView::HitTestColumnDivider(int x, int y, size_t scroll_offset) const {
+    auto geom = ComputeLayoutGeometry(scroll_offset);
+    if (y < geom.table_header_rect.top || y > geom.table_header_rect.bottom) {
+        return -1;
+    }
+    for (size_t i = 0; i < geom.table_columns.size(); ++i) {
+        int r_edge = geom.table_columns[i].rect.right;
+        if (std::abs(x - r_edge) <= 4) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 std::vector<TaskModel> DesktopView::GetFilteredAndSortedTasks() const {
@@ -2362,9 +2439,18 @@ std::string DesktopView::RenderFullDesktopSnapshotText() const {
 namespace {
 
 constexpr UINT WM_OPENIDM_TRAYICON = WM_APP + 101;
+constexpr UINT WM_OPENIDM_SHOW_NEW_DOWNLOAD = WM_APP + 102;
 constexpr UINT IDT_UI_REFRESH      = 1001;
 constexpr UINT IDT_COSMIC_DRIFT    = 1002;
 constexpr int  IDC_SEARCH_EDIT     = 1101;
+
+struct OfferNotificationData {
+    std::string task_id;
+    std::string url;
+    std::string file_name;
+    std::string save_dir;
+    uint64_t file_size{0};
+};
 
 constexpr int IDM_TRAY_SHOW        = 2001;
 constexpr int IDM_TRAY_HIDE        = 2002;
@@ -2467,8 +2553,11 @@ struct NewDownloadDialogContext {
     HWND hSaveDirEdit{nullptr};
     HWND hBrowseBtn{nullptr};
     HWND hQualityCombo{nullptr};
+    HWND hFileSizeLabel{nullptr};
     HWND hSpaceLabel{nullptr};
     HWND hStartChk{nullptr};
+    HWND hScheduleChk{nullptr};
+    HWND hScheduleTimeEdit{nullptr};
     HWND hDownloadBtn{nullptr};
     HWND hCancelBtn{nullptr};
     HFONT hFontBody{nullptr};
@@ -2477,8 +2566,14 @@ struct NewDownloadDialogContext {
     HFONT hFontSmall{nullptr};
     HBRUSH hBgBrush{nullptr};
     HBRUSH hEditBrush{nullptr};
+    std::string existing_task_id;
+    std::string initial_filename;
+    std::string initial_save_dir;
+    int64_t initial_file_size{-1};
     bool submitted{false};
 };
+
+void DrawRoundedBoxGdi(HDC hdc, const RECT& rc, int radius, ColorRgba bg, ColorRgba border, int border_w);
 
 LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto* ctx = reinterpret_cast<NewDownloadDialogContext*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -2526,7 +2621,7 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
             // Save Dir Edit
             auto s = ctx->controller->GetSettings();
-            std::wstring def_dir = Utf8ToW(s.default_download_dir);
+            std::wstring def_dir = ctx->initial_save_dir.empty() ? Utf8ToW(s.default_download_dir) : Utf8ToW(ctx->initial_save_dir);
             ctx->hSaveDirEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def_dir.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 24, 198, 420, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5003)), hInst, nullptr);
@@ -2551,6 +2646,15 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Audio Only (MP3 / M4A)"));
             SendMessageW(ctx->hQualityCombo, CB_SETCURSEL, 0, 0);
 
+            // File Size Label
+            std::wstring sz_text = (ctx->initial_file_size > 0)
+                ? (L"Size: " + Utf8ToW(DesktopView::FormatSizePretty(static_cast<uint64_t>(ctx->initial_file_size))))
+                : L"Size: Unknown";
+            ctx->hFileSizeLabel = CreateWindowExW(0, L"STATIC", sz_text.c_str(),
+                WS_CHILD | WS_VISIBLE,
+                320, 260, 236, 22, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5012)), hInst, nullptr);
+            SendMessageW(ctx->hFileSizeLabel, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+
             // Disk Space Label
             std::string space_text = "Disk space: Checking...";
             auto space_res = PathSanitizer::CheckAvailableDiskSpace(s.default_download_dir, 1024);
@@ -2565,23 +2669,60 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             // Start Immediately Checkbox
             ctx->hStartChk = CreateWindowExW(0, L"BUTTON", L"Start download immediately",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                24, 328, 260, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5007)), hInst, nullptr);
+                24, 328, 240, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5007)), hInst, nullptr);
             SendMessageW(ctx->hStartChk, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
             SendMessageW(ctx->hStartChk, BM_SETCHECK, s.auto_start_downloads ? BST_CHECKED : BST_UNCHECKED, 0);
 
-            // Download Button
-            ctx->hDownloadBtn = CreateWindowExW(0, L"BUTTON", L"Download",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                326, 368, 120, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5008)), hInst, nullptr);
-            SendMessageW(ctx->hDownloadBtn, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBold), TRUE);
+            // Schedule Checkbox
+            ctx->hScheduleChk = CreateWindowExW(0, L"BUTTON", L"Schedule download for:",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                24, 358, 190, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5010)), hInst, nullptr);
+            SendMessageW(ctx->hScheduleChk, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
 
-            // Cancel Button
+            // Schedule Time Edit
+            ctx->hScheduleTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"23:00",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | WS_DISABLED,
+                220, 358, 80, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5011)), hInst, nullptr);
+            SendMessageW(ctx->hScheduleTimeEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+
+            // Download Button (Owner-drawn red accent)
+            ctx->hDownloadBtn = CreateWindowExW(0, L"BUTTON", L"Download",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                326, 400, 120, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5008)), hInst, nullptr);
+
+            // Cancel Button (Owner-drawn dark surface)
             ctx->hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                456, 368, 100, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5009)), hInst, nullptr);
-            SendMessageW(ctx->hCancelBtn, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                456, 400, 100, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5009)), hInst, nullptr);
 
             return 0;
+        }
+        case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            if (!dis) return FALSE;
+            HDC hdcBtn = dis->hDC;
+            RECT rcBtn = dis->rcItem;
+            bool is_selected = (dis->itemState & ODS_SELECTED) != 0;
+
+            if (dis->CtlID == 5008) { // Download button (red accent #FF4F57)
+                ColorRgba bg_col = is_selected ? ColorRgba{0xE0, 0x43, 0x4B, 255} : ColorRgba{0xFF, 0x4F, 0x57, 255};
+                DrawRoundedBoxGdi(hdcBtn, rcBtn, 18, bg_col, bg_col, 0);
+                SelectObject(hdcBtn, ctx->hFontBold);
+                SetTextColor(hdcBtn, RGB(255, 255, 255));
+                SetBkMode(hdcBtn, TRANSPARENT);
+                DrawTextW(hdcBtn, L"Download", -1, &rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            } else if (dis->CtlID == 5009) { // Cancel button
+                ColorRgba bg_col = is_selected ? ColorRgba{0x33, 0x33, 0x38, 255} : ColorRgba{0x22, 0x22, 0x26, 255};
+                ColorRgba border_col{0x44, 0x44, 0x4C, 255};
+                DrawRoundedBoxGdi(hdcBtn, rcBtn, 18, bg_col, border_col, 1);
+                SelectObject(hdcBtn, ctx->hFontBody);
+                SetTextColor(hdcBtn, RGB(0xDE, 0xDF, 0xE4));
+                SetBkMode(hdcBtn, TRANSPARENT);
+                DrawTextW(hdcBtn, L"Cancel", -1, &rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            break;
         }
         case WM_CTLCOLOREDIT: {
             HDC hdcEdit = reinterpret_cast<HDC>(wParam);
@@ -2594,6 +2735,8 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             HWND hCtl = reinterpret_cast<HWND>(lParam);
             if (hCtl == ctx->hSpaceLabel) {
                 SetTextColor(hdcStatic, RGB(0x8E, 0x8E, 0x98));
+            } else if (hCtl == ctx->hFileSizeLabel) {
+                SetTextColor(hdcStatic, RGB(0x38, 0xBD, 0xF8));
             } else {
                 SetTextColor(hdcStatic, RGB(0xA4, 0xA5, 0xAC));
             }
@@ -2670,6 +2813,24 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
 
+            if (id == 5007 && code == BN_CLICKED) { // Start immediately toggled
+                bool start_chk = (SendMessageW(ctx->hStartChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                if (start_chk) {
+                    SendMessageW(ctx->hScheduleChk, BM_SETCHECK, BST_UNCHECKED, 0);
+                    EnableWindow(ctx->hScheduleTimeEdit, FALSE);
+                }
+                return 0;
+            }
+
+            if (id == 5010 && code == BN_CLICKED) { // Schedule toggled
+                bool sched = (SendMessageW(ctx->hScheduleChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                EnableWindow(ctx->hScheduleTimeEdit, sched ? TRUE : FALSE);
+                if (sched) {
+                    SendMessageW(ctx->hStartChk, BM_SETCHECK, BST_UNCHECKED, 0);
+                }
+                return 0;
+            }
+
             if (id == 5008 && code == BN_CLICKED) { // Download
                 wchar_t url_buf[2048]{};
                 GetWindowTextW(ctx->hUrlEdit, url_buf, 2047);
@@ -2701,6 +2862,7 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 else if (cur_sel == 5) vfilter = "audio";
 
                 bool start_now = (SendMessageW(ctx->hStartChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                bool sched = (SendMessageW(ctx->hScheduleChk, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
                 AddDownloadDialogInput in;
                 in.url = u;
@@ -2708,10 +2870,38 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 in.save_dir = sd;
                 in.max_connections = ctx->controller->GetSettings().default_connections_per_task;
                 in.start_immediately = start_now;
+                in.scheduled = sched;
+                if (sched) {
+                    wchar_t tbuf[64]{};
+                    GetWindowTextW(ctx->hScheduleTimeEdit, tbuf, 63);
+                    in.schedule_time_local = WToUtf8(tbuf);
+                }
                 in.video_filter = vfilter;
                 bool is_yt = (u.find("youtube.com") != std::string::npos || u.find("youtu.be") != std::string::npos);
                 if (is_yt || u.find(".m3u8") != std::string::npos || u.find(".mpd") != std::string::npos) {
                     in.is_stream = true;
+                }
+
+                if (!ctx->existing_task_id.empty()) {
+                    auto t_opt = ctx->controller->GetTask(ctx->existing_task_id);
+                    if (t_opt.has_value()) {
+                        auto t = *t_opt;
+                        if (!fn.empty()) t.file_name = fn;
+                        if (!sd.empty()) t.save_dir = sd;
+                        t.scheduled = sched;
+                        if (sched) {
+                            wchar_t tbuf[64]{};
+                            GetWindowTextW(ctx->hScheduleTimeEdit, tbuf, 63);
+                            t.schedule_time_local = WToUtf8(tbuf);
+                        }
+                        ctx->controller->UpdateTask(t);
+                        if (start_now) {
+                            ctx->controller->StartTask(ctx->existing_task_id);
+                        }
+                        ctx->submitted = true;
+                        DestroyWindow(hwnd);
+                        return 0;
+                    }
                 }
 
                 auto res = ctx->view->SubmitAddDownloadDialog(in);
@@ -2727,6 +2917,10 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
 
             if (id == 5009 && code == BN_CLICKED) { // Cancel
+                if (!ctx->existing_task_id.empty()) {
+                    ctx->controller->CancelTask(ctx->existing_task_id);
+                    ctx->controller->RemoveTask(ctx->existing_task_id, false);
+                }
                 DestroyWindow(hwnd);
                 return 0;
             }
@@ -2734,6 +2928,10 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         case WM_DESTROY: {
+            if (!ctx->submitted && !ctx->existing_task_id.empty()) {
+                ctx->controller->CancelTask(ctx->existing_task_id);
+                ctx->controller->RemoveTask(ctx->existing_task_id, false);
+            }
             if (ctx->hFontBody) DeleteObject(ctx->hFontBody);
             if (ctx->hFontBold) DeleteObject(ctx->hFontBold);
             if (ctx->hFontTitle) DeleteObject(ctx->hFontTitle);
@@ -2746,7 +2944,16 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-void ShowNewDownloadDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadController& controller, const std::string& initial_url) {
+void ShowNewDownloadDialogWin32(
+    HWND hwnd_parent,
+    DesktopView& view,
+    DownloadController& controller,
+    const std::string& initial_url,
+    const std::string& suggested_filename = "",
+    const std::string& save_dir = "",
+    int64_t file_size = -1,
+    const std::string& existing_task_id = "") {
+
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     static bool class_registered = false;
     if (!class_registered) {
@@ -2765,6 +2972,10 @@ void ShowNewDownloadDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadCon
     NewDownloadDialogContext ctx;
     ctx.view = &view;
     ctx.controller = &controller;
+    ctx.existing_task_id = existing_task_id;
+    ctx.initial_filename = suggested_filename;
+    ctx.initial_save_dir = save_dir;
+    ctx.initial_file_size = file_size;
 
     std::string candidate_url = initial_url;
     if (candidate_url.empty() && OpenClipboard(hwnd_parent)) {
@@ -2785,7 +2996,7 @@ void ShowNewDownloadDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadCon
     RECT parent_rc{};
     GetWindowRect(hwnd_parent, &parent_rc);
     int dlg_w = 600;
-    int dlg_h = 470;
+    int dlg_h = 510;
     int dlg_x = parent_rc.left + (parent_rc.right - parent_rc.left - dlg_w) / 2;
     int dlg_y = parent_rc.top + (parent_rc.bottom - parent_rc.top - dlg_h) / 2;
 
@@ -2814,6 +3025,16 @@ void ShowNewDownloadDialogWin32(HWND hwnd_parent, DesktopView& view, DownloadCon
                 SetWindowTextW(ctx.hFilenameEdit, Utf8ToW(derived).c_str());
             }
         }
+    }
+    if (!suggested_filename.empty()) {
+        SetWindowTextW(ctx.hFilenameEdit, Utf8ToW(suggested_filename).c_str());
+    }
+    if (!save_dir.empty()) {
+        SetWindowTextW(ctx.hSaveDirEdit, Utf8ToW(save_dir).c_str());
+    }
+    if (file_size > 0) {
+        std::wstring s_sz = L"Size: " + Utf8ToW(DesktopView::FormatSizePretty(static_cast<uint64_t>(file_size)));
+        SetWindowTextW(ctx.hFileSizeLabel, s_sz.c_str());
     }
 
     EnableWindow(hwnd_parent, FALSE);
@@ -3148,30 +3369,33 @@ void DrawFileTypeIconGdi(HDC hdc, int x, int y, int w, int h, const FormattedTas
     auto ext_pos = name.rfind('.');
     std::string ext = (ext_pos != std::string::npos) ? name.substr(ext_pos) : "";
 
+    ColorRgba accent = pal.accent_primary; // Signature coral red #FF4F57
+    ColorRgba accent_subtle = ColorRgba{0xFF, 0x73, 0x7A, 255};
+
     if (r.is_stream || r.category == "Video" || ext == ".mp4" || ext == ".mkv" || ext == ".webm" ||
         ext == ".avi" || ext == ".mov" || ext == ".flv" || ext == ".ts" || ext == ".m4v" || ext == ".m3u8" || ext == ".mpd") {
-        DrawVideoFileIconGdi(hdc, x, y, w, h, pal.accent_primary);
+        DrawVideoFileIconGdi(hdc, x, y, w, h, accent);
     } else if (r.category == "Audio" || ext == ".mp3" || ext == ".m4a" || ext == ".aac" ||
                ext == ".flac" || ext == ".wav" || ext == ".ogg" || ext == ".opus") {
-        DrawAudioFileIconGdi(hdc, x, y, w, h, ColorRgba{0x8B, 0x5C, 0xF6, 255});
+        DrawAudioFileIconGdi(hdc, x, y, w, h, accent);
     } else if (r.category == "Compressed" || ext == ".zip" || ext == ".rar" || ext == ".7z" ||
                ext == ".tar" || ext == ".gz" || ext == ".bz2" || ext == ".xz" || ext == ".iso") {
-        DrawArchiveFileIconGdi(hdc, x, y, w, h, ColorRgba{0xF5, 0x9E, 0x0B, 255});
+        DrawArchiveFileIconGdi(hdc, x, y, w, h, accent);
     } else if (r.category == "PDF" || ext == ".pdf") {
-        DrawPdfFileIconGdi(hdc, x, y, w, h, ColorRgba{0xEF, 0x44, 0x44, 255});
+        DrawPdfFileIconGdi(hdc, x, y, w, h, accent);
     } else if (r.category == "Image" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" ||
                ext == ".gif" || ext == ".webp" || ext == ".svg" || ext == ".bmp" || ext == ".ico") {
-        DrawImageFileIconGdi(hdc, x, y, w, h, ColorRgba{0x06, 0xB6, 0xD4, 255});
+        DrawImageFileIconGdi(hdc, x, y, w, h, accent);
     } else if (r.category == "Programs" || ext == ".exe" || ext == ".msi" || ext == ".dll" ||
                ext == ".bat" || ext == ".cmd" || ext == ".ps1") {
-        DrawExecutableFileIconGdi(hdc, x, y, w, h, ColorRgba{0x10, 0xB9, 0x81, 255});
+        DrawExecutableFileIconGdi(hdc, x, y, w, h, accent);
     } else if (r.category == "Documents" || ext == ".txt" || ext == ".doc" || ext == ".docx" ||
                ext == ".xls" || ext == ".xlsx" || ext == ".ppt" || ext == ".pptx" || ext == ".csv" ||
                ext == ".md" || ext == ".json" || ext == ".xml" || ext == ".cpp" || ext == ".h" ||
                ext == ".hpp" || ext == ".js" || ext == ".ts" || ext == ".py") {
-        DrawDocumentFileIconGdi(hdc, x, y, w, h, ColorRgba{0x60, 0xA5, 0xFA, 255});
+        DrawDocumentFileIconGdi(hdc, x, y, w, h, accent);
     } else {
-        DrawGenericFileIconGdi(hdc, x, y, w, h, pal.text_secondary);
+        DrawGenericFileIconGdi(hdc, x, y, w, h, accent_subtle);
     }
 }
 
@@ -3223,35 +3447,36 @@ void DrawSearchGlassGdi(HDC hdc, int x, int y, int size, ColorRgba col) {
     DeleteObject(hPen);
 }
 
-void DrawSlidersGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
+void DrawGearGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
     int cx = (rc.left + rc.right) / 2;
     int cy = (rc.top + rc.bottom) / 2;
-    HPEN hPen = CreatePen(PS_SOLID, 1, col.ToWin32ColorRef());
-    HBRUSH hBrush = CreateSolidBrush(col.ToWin32ColorRef());
+    HPEN hPen = CreatePen(PS_SOLID, 2, col.ToWin32ColorRef());
     HGDIOBJ oldPen = SelectObject(hdc, hPen);
-    HGDIOBJ oldBrush = SelectObject(hdc, hBrush);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
-    int y0 = cy - 5;
-    int y1 = cy;
-    int y2 = cy + 5;
-    int left = cx - 7;
-    int right = cx + 7;
+    int r_outer = 6;
+    Ellipse(hdc, cx - r_outer, cy - r_outer, cx + r_outer + 1, cy + r_outer + 1);
 
-    MoveToEx(hdc, left, y0, nullptr); LineTo(hdc, right, y0);
-    MoveToEx(hdc, left, y1, nullptr); LineTo(hdc, right, y1);
-    MoveToEx(hdc, left, y2, nullptr); LineTo(hdc, right, y2);
+    int r_inner = 2;
+    Ellipse(hdc, cx - r_inner, cy - r_inner, cx + r_inner + 1, cy + r_inner + 1);
 
-    RECT k0{cx - 2, y0 - 2, cx + 1, y0 + 3};
-    RECT k1{cx + 2, y1 - 2, cx + 5, y1 + 3};
-    RECT k2{cx - 5, y2 - 2, cx - 2, y2 + 3};
-    FillRect(hdc, &k0, static_cast<HBRUSH>(hBrush));
-    FillRect(hdc, &k1, static_cast<HBRUSH>(hBrush));
-    FillRect(hdc, &k2, static_cast<HBRUSH>(hBrush));
+    int tooth = 3;
+    MoveToEx(hdc, cx + r_outer, cy, nullptr); LineTo(hdc, cx + r_outer + tooth, cy);
+    MoveToEx(hdc, cx - r_outer, cy, nullptr); LineTo(hdc, cx - r_outer - tooth, cy);
+    MoveToEx(hdc, cx, cy + r_outer, nullptr); LineTo(hdc, cx, cy + r_outer + tooth);
+    MoveToEx(hdc, cx, cy - r_outer, nullptr); LineTo(hdc, cx, cy - r_outer - tooth);
+    MoveToEx(hdc, cx + 4, cy + 4, nullptr); LineTo(hdc, cx + 7, cy + 7);
+    MoveToEx(hdc, cx - 4, cy - 4, nullptr); LineTo(hdc, cx - 7, cy - 7);
+    MoveToEx(hdc, cx + 4, cy - 4, nullptr); LineTo(hdc, cx + 7, cy - 7);
+    MoveToEx(hdc, cx - 4, cy + 4, nullptr); LineTo(hdc, cx - 7, cy + 7);
 
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
-    DeleteObject(hBrush);
     DeleteObject(hPen);
+}
+
+void DrawSlidersGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
+    DrawGearGlyphGdi(hdc, rc, col);
 }
 
 void DrawCaretGlyphGdi(HDC hdc, int cx, int cy, ColorRgba col, bool up = false) {
@@ -3394,13 +3619,24 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     HGDIOBJ old_bm = SelectObject(hdc, hbm);
 
     const auto& pal = view.GetPalette();
-    auto geom = view.ComputeLayoutGeometry(0);
+    auto geom = view.ComputeLayoutGeometry(view.GetScrollOffset());
+
+    const auto& m = view.GetMetrics();
+    auto all_tasks = view.GetFilteredAndSortedTasks();
+    int row_h_calc = DesignSystem::ScaleForDpi(52, m.dpi);
+    size_t visible_count = static_cast<size_t>(std::max(1, geom.table_body_rect.height() / row_h_calc));
+    SCROLLINFO si{};
+    si.cbSize = sizeof(SCROLLINFO);
+    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    si.nMin = 0;
+    si.nMax = static_cast<int>(all_tasks.size() > 0 ? all_tasks.size() - 1 : 0);
+    si.nPage = static_cast<UINT>(visible_count);
+    si.nPos = static_cast<int>(view.GetScrollOffset());
+    SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
 
     // 0. Base Matte Charcoal Canvas
     FillRectSolid(hdc, client_rc, pal.app_background);
     SetBkMode(hdc, TRANSPARENT);
-
-    const auto& m = view.GetMetrics();
 
     HFONT hFontBody = CreateFontW(
         -m.font_body_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -3479,17 +3715,10 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     DrawRoundedBoxGdi(hdc, search_rc, 20, pal.surface_primary, pal.border_subtle, 1);
     DrawSearchGlassGdi(hdc, search_rc.left + 14, search_rc.top + (search_rc.bottom - search_rc.top) / 2 - 6, 13, pal.text_muted);
 
-    // Ctrl K chip inside search box
-    RECT ctrl_k_rc{search_rc.right - 64, search_rc.top + 7, search_rc.right - 12, search_rc.bottom - 7};
-    DrawRoundedBoxGdi(hdc, ctrl_k_rc, 6, pal.surface_elevated, pal.border_focus, 1);
-    SelectObject(hdc, hFontSmallBold);
-    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-    DrawTextW(hdc, L"Ctrl K", -1, &ctrl_k_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    // 1.6 Sliders Button (Settings)
-    RECT sliders_rc = ToWinRect(geom.search_sliders_rect);
-    DrawRoundedBoxGdi(hdc, sliders_rc, 20, pal.surface_primary, pal.border_subtle, 1);
-    DrawSlidersGlyphGdi(hdc, sliders_rc, pal.text_secondary);
+    // 1.6 Settings Gear Button
+    RECT settings_rc = ToWinRect(geom.settings_button_rect);
+    DrawRoundedBoxGdi(hdc, settings_rc, 20, pal.surface_primary, pal.border_subtle, 1);
+    DrawGearGlyphGdi(hdc, settings_rc, pal.text_secondary);
 
     // 2. Table Column Headers
     RECT header_rc = ToWinRect(geom.table_header_rect);
@@ -3505,7 +3734,7 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     FillRectSolid(hdc, hdr_div, pal.border_subtle);
 
     // 3. Task Rows
-    auto rows = view.BuildVisibleTaskRows(0, geom.task_rows.size());
+    auto rows = view.BuildVisibleTaskRows(view.GetScrollOffset(), geom.task_rows.size());
     if (rows.empty()) {
         RECT empty_rc = ToWinRect(geom.table_body_rect);
         SelectObject(hdc, hFontBody);
@@ -3533,7 +3762,7 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             RECT idx_rc{chk_rc.right + 4, rrc.top, chk_rc.right + 24, rrc.bottom};
             SelectObject(hdc, hFontBody);
             SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-            std::wstring widx = std::to_wstring(i + 1);
+            std::wstring widx = std::to_wstring(view.GetScrollOffset() + i + 1);
             DrawTextW(hdc, widx.c_str(), -1, &idx_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
             int icon_x = idx_rc.right + 6;
@@ -3548,11 +3777,11 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             std::wstring wfn = Utf8ToW(r.display_filename);
             DrawTextW(hdc, wfn.c_str(), -1, &fn_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-            // Sleek horizontal linear progress bar with explicit percentage display
+            // Sleek horizontal linear progress bar (8px height) with explicit percentage display
             int bar_x = icon_x + icon_w + 10;
-            int bar_y = rrc.top + 33;
+            int bar_y = rrc.top + 31;
             int bar_max_w = std::min(160, std::max(60, rl.filename_rect.right - bar_x - 70));
-            int bar_h = 5;
+            int bar_h = DesignSystem::ScaleForDpi(8, m.dpi);
             RECT track_rc{bar_x, bar_y, bar_x + bar_max_w, bar_y + bar_h};
             FillRectSolid(hdc, track_rc, pal.progress_track);
             int fill_w = static_cast<int>(static_cast<double>(bar_max_w) * std::clamp(r.progress_fraction, 0.0, 1.0));
@@ -3560,9 +3789,9 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
                 RECT fill_rc{bar_x, bar_y, bar_x + fill_w, bar_y + bar_h};
                 FillRectSolid(hdc, fill_rc, r.progress_fill_color);
             }
-            RECT pct_rc{bar_x + bar_max_w + 8, bar_y - 6, bar_x + bar_max_w + 70, bar_y + bar_h + 6};
-            SelectObject(hdc, hFontSmall);
-            SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
+            RECT pct_rc{bar_x + bar_max_w + 8, bar_y - 4, bar_x + bar_max_w + 70, bar_y + bar_h + 4};
+            SelectObject(hdc, hFontSmallBold);
+            SetTextColor(hdc, (r.state == TaskState::kDownloading) ? pal.accent_primary.ToWin32ColorRef() : pal.text_secondary.ToWin32ColorRef());
             std::wstring wpct;
             if (r.state == TaskState::kCompleted) wpct = L"100%";
             else if (r.state == TaskState::kQueued) wpct = L"0%";
@@ -3799,11 +4028,11 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                 geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
-                std::max(10, geom.search_box_rect.width() - 95), std::max(10, geom.search_box_rect.height() - 14),
+                std::max(10, geom.search_box_rect.width() - 40), std::max(10, geom.search_box_rect.height() - 14),
                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SEARCH_EDIT)),
                 GetModuleHandleW(nullptr), nullptr);
             HFONT hEditFont = CreateFontW(
-                -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
             SendMessageW(ctx->hSearchEdit, WM_SETFONT, reinterpret_cast<WPARAM>(hEditFont), TRUE);
@@ -3836,6 +4065,18 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             return 0;
         }
+        case WM_SETCURSOR: {
+            if (LOWORD(lParam) == HTCLIENT) {
+                POINT pt{};
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                if (ctx->view->IsResizingColumn() || ctx->view->HitTestColumnDivider(pt.x, pt.y, ctx->view->GetScrollOffset()) >= 0) {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                    return TRUE;
+                }
+            }
+            break;
+        }
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
             mmi->ptMinTrackSize.x = ctx->view->GetMetrics().min_window_width;
@@ -3855,10 +4096,10 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 suggested->right - suggested->left,
                 suggested->bottom - suggested->top,
                 SWP_NOZORDER | SWP_NOACTIVATE);
-            auto geom = ctx->view->ComputeLayoutGeometry(0);
+            auto geom = ctx->view->ComputeLayoutGeometry(ctx->view->GetScrollOffset());
             if (ctx->hSearchEdit) {
                 MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
-                           std::max(10, geom.search_box_rect.width() - 95), std::max(10, geom.search_box_rect.height() - 14), TRUE);
+                           std::max(10, geom.search_box_rect.width() - 40), std::max(10, geom.search_box_rect.height() - 14), TRUE);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -3876,16 +4117,69 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ctx->view->SetWindowVisibility(IsWindowVisible(hwnd) != FALSE, false);
             UINT dpi = GetDpiForWindow(hwnd);
             ctx->view->SetWindowDimensions(LOWORD(lParam), HIWORD(lParam), dpi > 0 ? dpi : 96);
-            auto geom = ctx->view->ComputeLayoutGeometry(0);
+            auto geom = ctx->view->ComputeLayoutGeometry(ctx->view->GetScrollOffset());
             if (ctx->hSearchEdit) {
                 MoveWindow(ctx->hSearchEdit, geom.search_box_rect.left + 30, geom.search_box_rect.top + 7,
-                           std::max(10, geom.search_box_rect.width() - 95), std::max(10, geom.search_box_rect.height() - 14), TRUE);
+                           std::max(10, geom.search_box_rect.width() - 40), std::max(10, geom.search_box_rect.height() - 14), TRUE);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         case WM_MOUSEMOVE: {
-            ctx->view->HandleMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), 0);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            if (ctx->view->IsResizingColumn()) {
+                ctx->view->UpdateColumnResize(x);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            size_t scroll_offset = ctx->view->GetScrollOffset();
+            ctx->view->HandleMouseMove(x, y, scroll_offset);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            if (ctx->view->IsResizingColumn()) {
+                ReleaseCapture();
+                ctx->view->EndColumnResize();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        }
+        case WM_MOUSEWHEEL: {
+            short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+            int rows_to_scroll = (zDelta > 0) ? -3 : 3;
+            ctx->view->ScrollBy(rows_to_scroll);
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_POS;
+            si.nPos = static_cast<int>(ctx->view->GetScrollOffset());
+            SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_VSCROLL: {
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_ALL;
+            GetScrollInfo(hwnd, SB_VERT, &si);
+            int cur_pos = si.nPos;
+            switch (LOWORD(wParam)) {
+                case SB_LINEUP:   cur_pos -= 1; break;
+                case SB_LINEDOWN: cur_pos += 1; break;
+                case SB_PAGEUP:   cur_pos -= std::max(1, static_cast<int>(si.nPage)); break;
+                case SB_PAGEDOWN: cur_pos += std::max(1, static_cast<int>(si.nPage)); break;
+                case SB_THUMBTRACK:
+                case SB_THUMBPOSITION: cur_pos = HIWORD(wParam); break;
+                case SB_TOP:    cur_pos = si.nMin; break;
+                case SB_BOTTOM: cur_pos = si.nMax; break;
+                default: break;
+            }
+            ctx->view->SetScrollOffset(static_cast<size_t>(std::max(0, cur_pos)));
+            si.fMask = SIF_POS;
+            si.nPos = static_cast<int>(ctx->view->GetScrollOffset());
+            SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3893,7 +4187,16 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_LBUTTONDBLCLK: {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
-            auto hit = ctx->view->HitTestPoint(x, y, 0);
+            size_t scroll_offset = ctx->view->GetScrollOffset();
+
+            int div_idx = ctx->view->HitTestColumnDivider(x, y, scroll_offset);
+            if (div_idx >= 0 && msg == WM_LBUTTONDOWN) {
+                SetCapture(hwnd);
+                ctx->view->StartColumnResize(div_idx, x);
+                return 0;
+            }
+
+            auto hit = ctx->view->HitTestPoint(x, y, scroll_offset);
 
             if (ctx->view->IsSettingsCenterOpen()) {
                 if (hit.type == HitTargetType::kSettingsItemControl && hit.task_id == "default_download_dir") {
@@ -3911,13 +4214,13 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
-                ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, 0);
+                ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, scroll_offset);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
 
             if (hit.type == HitTargetType::kSortDropdown) {
-                auto geom = ctx->view->ComputeLayoutGeometry(0);
+                auto geom = ctx->view->ComputeLayoutGeometry(scroll_offset);
                 POINT pt{geom.sort_dropdown_rect.left, geom.sort_dropdown_rect.bottom + 2};
                 ClientToScreen(hwnd, &pt);
                 HMENU hMenu = CreatePopupMenu();
@@ -3944,7 +4247,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
 
             if (hit.type == HitTargetType::kFilterDropdown) {
-                auto geom = ctx->view->ComputeLayoutGeometry(0);
+                auto geom = ctx->view->ComputeLayoutGeometry(scroll_offset);
                 POINT pt{geom.filter_dropdown_rect.left, geom.filter_dropdown_rect.bottom + 2};
                 ClientToScreen(hwnd, &pt);
                 HMENU hMenu = CreatePopupMenu();
@@ -3972,10 +4275,10 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 return 0;
             }
 
-            ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, 0);
+            ctx->view->HandleMouseClick(x, y, msg == WM_LBUTTONDBLCLK, scroll_offset);
 
             if (hit.type == HitTargetType::kToolbarButton || hit.type == HitTargetType::kAddDownloadButton) {
-                auto geom = ctx->view->ComputeLayoutGeometry(0);
+                auto geom = ctx->view->ComputeLayoutGeometry(scroll_offset);
                 if (hit.type == HitTargetType::kAddDownloadButton) {
                     ShowAddUrlQuickDialogWin32(hwnd, *ctx->view, *ctx->controller);
                 } else if (hit.index >= 0 && static_cast<size_t>(hit.index) < geom.toolbar_buttons.size()) {
@@ -3999,7 +4302,8 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             POINT client_pt = pt;
             ScreenToClient(hwnd, &client_pt);
-            auto hit = ctx->view->HitTestPoint(client_pt.x, client_pt.y, 0);
+            size_t scroll_offset = ctx->view->GetScrollOffset();
+            auto hit = ctx->view->HitTestPoint(client_pt.x, client_pt.y, scroll_offset);
             if (hit.type == HitTargetType::kTaskRow || hit.type == HitTargetType::kTaskRowActionButton) {
                 ctx->view->SelectTask(hit.task_id);
             }
@@ -4125,11 +4429,36 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                 }
                             }
                         }
+                    } else {
+                        std::string target_str = WToUtf8(filePath);
+                        ShowNewDownloadDialogWin32(hwnd, *ctx->view, *ctx->controller, target_str, p.filename().string());
                     }
                 }
             }
             DragFinish(hDrop);
             InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        case WM_OPENIDM_SHOW_NEW_DOWNLOAD: {
+            auto* offer = reinterpret_cast<OfferNotificationData*>(lParam);
+            if (offer) {
+                if (IsIconic(hwnd)) {
+                    ShowWindow(hwnd, SW_RESTORE);
+                } else if (!IsWindowVisible(hwnd)) {
+                    ShowWindow(hwnd, SW_SHOW);
+                }
+                SetForegroundWindow(hwnd);
+                ShowNewDownloadDialogWin32(
+                    hwnd,
+                    *ctx->view,
+                    *ctx->controller,
+                    offer->url,
+                    offer->file_name,
+                    offer->save_dir,
+                    static_cast<int64_t>(offer->file_size),
+                    offer->task_id);
+                delete offer;
+            }
             return 0;
         }
         case WM_TIMER: {
@@ -4304,6 +4633,15 @@ int DesktopView::RunWin32MessageLoop() {
     ctx.nid.hIcon = wc.hIcon;
     wcsncpy_s(ctx.nid.szTip, L"Flux Download Manager", _TRUNCATE);
     ctx.tray_added = (Shell_NotifyIconW(NIM_ADD, &ctx.nid) != FALSE);
+
+    SetWindowHwnd(hwnd);
+    if (m_ipc_server) {
+        m_ipc_server->SetOfferNotificationCallback(
+            [hwnd](const TaskModel& task) {
+                auto* offer = new OfferNotificationData{task.task_id, task.url, task.file_name, task.save_dir, task.total_bytes};
+                PostMessageW(hwnd, WM_OPENIDM_SHOW_NEW_DOWNLOAD, 0, reinterpret_cast<LPARAM>(offer));
+            });
+    }
 
     SetTimer(hwnd, IDT_UI_REFRESH, 100, nullptr);
     SetTimer(hwnd, IDT_COSMIC_DRIFT, 350, nullptr);

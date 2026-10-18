@@ -485,10 +485,17 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
 
         TaskModel t;
         std::string tab_url = params["tabUrl"].as_string();
-        bool is_youtube = (url.find("youtube.com") != std::string::npos || url.find("youtu.be") != std::string::npos ||
-                           tab_url.find("youtube.com") != std::string::npos || tab_url.find("youtu.be") != std::string::npos);
-        if (is_youtube || url.find(".m3u8") != std::string::npos || url.find(".mpd") != std::string::npos) {
-            t.task_type = (url.find(".mpd") != std::string::npos) ? TaskType::kStreamDash : TaskType::kStreamHls;
+        bool is_youtube_watch = (url.find("youtube.com/watch") != std::string::npos ||
+                                 url.find("youtu.be/") != std::string::npos ||
+                                 url.find("youtube.com/shorts/") != std::string::npos);
+        if (url.find(".mpd") != std::string::npos) {
+            t.task_type = TaskType::kStreamDash;
+            t.category = "Video";
+            t.stream_options.video_filter = "best";
+            t.stream_options.audio_filter = "all";
+            t.stream_options.output_format = "mp4";
+        } else if (url.find(".m3u8") != std::string::npos || is_youtube_watch) {
+            t.task_type = TaskType::kStreamHls;
             t.category = "Video";
             t.stream_options.video_filter = "best";
             t.stream_options.audio_filter = "all";
@@ -500,7 +507,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         t.page_url = tab_url;
         t.correlation_id = params["correlationId"].as_string();
         t.file_name = PathSanitizer::SanitizeFileName(params["filename"].as_string());
-        if (t.file_name.empty() && is_youtube) {
+        if (t.file_name.empty() && is_youtube_watch) {
             t.file_name = "youtube_video.mp4";
         }
         if (params.contains("saveDir")) {
@@ -515,13 +522,16 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
-        bool auto_start = m_controller.GetSettings().auto_start_downloads;
+        bool auto_start = m_offer_cb ? false : m_controller.GetSettings().auto_start_downloads;
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             json::Value res = json::Object{};
             res["accepted"] = false;
             res["reason"] = add_res.error->code + ": " + add_res.error->message;
             return MakeRpcResult(id, std::move(res)).dump();
+        }
+        if (m_offer_cb) {
+            m_offer_cb(*add_res.value);
         }
         json::Value res = json::Object{};
         res["accepted"] = true;
@@ -634,13 +644,44 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
 
         TaskModel t;
-        if (stream_type == "DASH" || manifest_url.find(".mpd") != std::string::npos) {
+        std::string low_url = manifest_url;
+        for (char& c : low_url) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        bool is_direct_video = (stream_type == "HTTP_FILE" || source_type == "DIRECT_PROGRESSIVE" ||
+                                low_url.find(".mp4") != std::string::npos || low_url.find(".webm") != std::string::npos ||
+                                low_url.find(".mkv") != std::string::npos || low_url.find(".mov") != std::string::npos ||
+                                low_url.find(".avi") != std::string::npos || low_url.find(".flv") != std::string::npos ||
+                                low_url.find(".mp3") != std::string::npos || low_url.find(".m4a") != std::string::npos ||
+                                low_url.find(".aac") != std::string::npos || low_url.find(".flac") != std::string::npos) &&
+                               (low_url.find(".m3u8") == std::string::npos && low_url.find(".mpd") == std::string::npos);
+
+        bool is_dash = (stream_type == "DASH" || low_url.find(".mpd") != std::string::npos ||
+                        (!cached_body.empty() && (cached_body.find("<MPD") != std::string::npos || cached_body.find("<mpd") != std::string::npos)));
+
+        bool is_hls = (stream_type == "HLS" || low_url.find(".m3u8") != std::string::npos ||
+                       (!cached_body.empty() && cached_body.find("#EXTM3U") != std::string::npos));
+
+        bool is_youtube_watch = (source_type == "YOUTUBE_EXTRACTION" || stream_type == "YOUTUBE" ||
+                                 low_url.find("youtube.com/watch") != std::string::npos ||
+                                 low_url.find("youtu.be/") != std::string::npos ||
+                                 low_url.find("youtube.com/shorts/") != std::string::npos ||
+                                 (!cached_body.empty() && cached_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos) ||
+                                 (!cached_body.empty() && cached_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos));
+
+        if (is_direct_video && !is_dash && !is_hls) {
+            t.task_type = TaskType::kHttpFile;
+            bool is_audio = (low_url.find(".mp3") != std::string::npos || low_url.find(".m4a") != std::string::npos ||
+                             low_url.find(".aac") != std::string::npos || low_url.find(".flac") != std::string::npos);
+            t.category = is_audio ? "Audio" : "Video";
+        } else if (is_dash) {
             t.task_type = TaskType::kStreamDash;
-        } else if (stream_type == "YOUTUBE" || stream_type == "SITE_EXTRACTION" || stream_type == "VIMEO" ||
-                   stream_type == "HLS" || manifest_url.find(".m3u8") != std::string::npos || !cached_body.empty()) {
+            t.category = "Video";
+        } else if (is_hls || is_youtube_watch) {
             t.task_type = TaskType::kStreamHls;
+            t.category = "Video";
         } else {
             t.task_type = TaskType::kHttpFile;
+            t.category = "Video";
         }
         t.url = manifest_url;
         t.page_url = params["tabUrl"].as_string();
@@ -674,6 +715,9 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             return MakeRpcError(id, -32602, add_res.error->code + ": " + add_res.error->message).dump();
+        }
+        if (m_offer_cb) {
+            m_offer_cb(*add_res.value);
         }
         json::Value res = json::Object{};
         res["accepted"] = true;

@@ -692,14 +692,13 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     ProgressCallback on_progress) {
 
     std::error_code ec;
-    if (task.url.find("googlevideo.com") != std::string::npos ||
-        task.url.find("youtube.com") != std::string::npos ||
-        task.url.find("youtu.be") != std::string::npos ||
-        task.page_url.find("youtube.com") != std::string::npos ||
-        task.stream_options.cached_manifest_body.find("YOUTUBE") != std::string::npos ||
-        (!task.stream_options.cached_manifest_body.empty() &&
-         (task.stream_options.cached_manifest_body.front() == '{' ||
-          task.stream_options.cached_manifest_body.front() == '['))) {
+    bool is_yt = (task.url.find("googlevideo.com") != std::string::npos ||
+                  task.url.find("youtube.com/watch") != std::string::npos ||
+                  task.url.find("youtu.be/") != std::string::npos ||
+                  task.url.find("youtube.com/shorts/") != std::string::npos ||
+                  task.stream_options.cached_manifest_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos ||
+                  task.stream_options.cached_manifest_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos);
+    if (is_yt) {
         return ExecuteYouTubeExtraction(task, pause_requested, cancel_requested, speed_limit_bps, on_progress);
     }
 
@@ -1704,9 +1703,12 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             if (last_yt_err.find("DRM") != std::string::npos || last_yt_err.find("protected") != std::string::npos) {
                 task.error_code = "ERR_STREAM_DRM_PROTECTED";
                 task.error_message = "Stream uses unsupported DRM protection. Flux does not circumvent DRM.";
-            } else {
+            } else if (is_youtube_host) {
                 task.error_code = "ERR_YOUTUBE_EXTRACTION_FAILED";
                 task.error_message = last_yt_err.empty() ? ("yt-dlp exited with code " + std::to_string(yt_exit)) : last_yt_err;
+            } else {
+                task.error_code = "ERR_STREAM_WORKER_FAILED";
+                task.error_message = last_yt_err.empty() ? ("Stream worker exited with code " + std::to_string(yt_exit)) : last_yt_err;
             }
             task.status_detail = task.error_message;
             return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
@@ -1717,10 +1719,15 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     if (video_url.empty()) {
         std::filesystem::remove_all(task_tmp_dir, ec);
         task.state = TaskState::kFailed;
-        task.error_code = requires_cipher ? "ERR_YOUTUBE_EXTRACTOR_REQUIRED" : "ERR_YOUTUBE_NO_PLAYABLE_STREAM";
-        task.error_message = requires_cipher
-            ? "YouTube stream uses signatureCipher encryption and requires yt-dlp (install yt-dlp in tools/ or PATH)"
-            : "No playable video stream URL could be resolved from YouTube player response";
+        if (is_youtube_host) {
+            task.error_code = requires_cipher ? "ERR_YOUTUBE_EXTRACTOR_REQUIRED" : "ERR_YOUTUBE_NO_PLAYABLE_STREAM";
+            task.error_message = requires_cipher
+                ? "YouTube stream uses signatureCipher encryption and requires yt-dlp (install yt-dlp in tools/ or PATH)"
+                : "No playable video stream URL could be resolved from YouTube player response";
+        } else {
+            task.error_code = "ERR_MANIFEST_PARSE_FAILED";
+            task.error_message = "No playable media stream found for video source";
+        }
         task.status_detail = task.error_message;
         return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
     }

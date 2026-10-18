@@ -191,6 +191,8 @@ Copy-Item -Force (Join-Path $BuildDir "flux-nmh.exe") (Join-Path $DistDir "flux-
 Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistDir "tools\win-x64\yt-dlp.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\N_m3u8DL-RE.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\ffmpeg.exe")
 Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistDir "tools\yt-dlp.exe")
 New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "extension") | Out-Null
 Copy-Item -Recurse -Force (Join-Path $RepoRoot "extension\*") (Join-Path $DistDir "extension\")

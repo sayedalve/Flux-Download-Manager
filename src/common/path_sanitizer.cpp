@@ -659,7 +659,6 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
         }
     }
     const std::filesystem::path bundled_dirs[] = {
-        exe_dir,
         exe_dir / "tools" / "win-x64",
         exe_dir / "tools",
         exe_dir.parent_path() / "tools" / "win-x64",
@@ -669,7 +668,8 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
         exe_dir.parent_path().parent_path().parent_path() / "tools" / "win-x64",
         exe_dir.parent_path().parent_path().parent_path() / "tools",
         std::filesystem::current_path() / "tools" / "win-x64",
-        std::filesystem::current_path() / "tools"
+        std::filesystem::current_path() / "tools",
+        exe_dir
     };
     for (const auto& dir : bundled_dirs) {
         if (dir.empty()) continue;
@@ -694,6 +694,17 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
             if (std::filesystem::exists(candidate, ec)) {
                 return candidate;
             }
+        }
+    }
+
+    // 3. Check well-known installation paths for Node.js if searching for node
+    if (base == "node") {
+        const std::filesystem::path standard_node_paths[] = {
+            "C:\\Program Files\\nodejs\\node.exe",
+            "C:\\Program Files (x86)\\nodejs\\node.exe"
+        };
+        for (const auto& np : standard_node_paths) {
+            if (std::filesystem::exists(np, ec)) return np;
         }
     }
 

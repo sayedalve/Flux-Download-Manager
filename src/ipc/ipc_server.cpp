@@ -862,17 +862,34 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         if (cached_body.empty() && params.contains("extractorJson") && !params["extractorJson"].as_string().empty()) {
             cached_body = params["extractorJson"].as_string();
         }
+
+        std::string low_url = manifest_url;
+        for (char& c : low_url) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        bool is_explicit_youtube = (source_type == "YOUTUBE_EXTRACTION" || stream_type == "YOUTUBE" ||
+                                    low_url.find("youtube.com") != std::string::npos ||
+                                    low_url.find("youtu.be") != std::string::npos ||
+                                    low_url.find("googlevideo.com") != std::string::npos ||
+                                    low_url.find("videoplayback") != std::string::npos ||
+                                    !params["videoId"].as_string().empty());
+
         if (cached_body.empty() && (params.contains("videoUrl") || params.contains("pairedAudioUrl"))) {
             std::string vu = params["videoUrl"].as_string();
             std::string au = params["pairedAudioUrl"].as_string();
             if (!vu.empty() || !au.empty()) {
-                json::Object jdesc;
-                jdesc["fluxType"] = "YOUTUBE_STREAM";
-                jdesc["videoUrl"] = vu;
-                jdesc["audioUrl"] = au;
-                jdesc["watchUrl"] = params["tabUrl"].as_string();
-                jdesc["videoId"] = params["videoId"].as_string();
-                cached_body = json::Value(std::move(jdesc)).dump();
+                if (is_explicit_youtube) {
+                    json::Object jdesc;
+                    jdesc["fluxType"] = "YOUTUBE_STREAM";
+                    jdesc["videoUrl"] = vu;
+                    jdesc["audioUrl"] = au;
+                    jdesc["watchUrl"] = params["tabUrl"].as_string();
+                    jdesc["videoId"] = params["videoId"].as_string();
+                    cached_body = json::Value(std::move(jdesc)).dump();
+                } else if (manifest_url.empty() || manifest_url == params["tabUrl"].as_string()) {
+                    manifest_url = vu.empty() ? au : vu;
+                    low_url = manifest_url;
+                    for (char& c : low_url) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
             }
         }
 
@@ -895,10 +912,8 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
 
         TaskModel t;
-        std::string low_url = manifest_url;
-        for (char& c : low_url) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-        bool is_youtube_watch = (source_type == "YOUTUBE_EXTRACTION" || stream_type == "YOUTUBE" ||
+        bool is_youtube_watch = (is_explicit_youtube ||
                                  low_url.find("youtube.com/watch") != std::string::npos ||
                                  low_url.find("youtu.be/") != std::string::npos ||
                                  low_url.find("youtube.com/shorts/") != std::string::npos ||
@@ -964,7 +979,9 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             title = title.substr(0, yt_suffix);
         }
         std::string out_fmt = params["outputFormat"].as_string("mp4");
-        if (!title.empty()) {
+        if (params.contains("fileName") && !params["fileName"].as_string().empty()) {
+            t.file_name = PathSanitizer::SanitizeFileName(params["fileName"].as_string());
+        } else if (!title.empty()) {
             std::string sanitized_title = PathSanitizer::SanitizeFileName(title);
             std::string dot_ext = "." + out_fmt;
             if (sanitized_title.size() > dot_ext.size() &&
@@ -972,6 +989,18 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
                 t.file_name = sanitized_title;
             } else {
                 t.file_name = sanitized_title + dot_ext;
+            }
+        }
+        if (t.file_name.empty()) {
+            std::string raw_target = t.url;
+            auto qpos = raw_target.find('?');
+            if (qpos != std::string::npos) raw_target = raw_target.substr(0, qpos);
+            auto spos = raw_target.rfind('/');
+            std::string leaf = (spos != std::string::npos) ? raw_target.substr(spos + 1) : "";
+            if (!leaf.empty() && leaf.find('.') != std::string::npos) {
+                t.file_name = PathSanitizer::SanitizeFileName(leaf);
+            } else {
+                t.file_name = "video." + out_fmt;
             }
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);

@@ -393,9 +393,64 @@ async function runTests() {
   assert.strictEqual(isYoutube, true, "YouTube stream candidate identified");
   const canonicalWatch = fakeYoutubeCandidate.pageUrl || ("https://www.youtube.com/watch?v=" + fakeYoutubeCandidate.videoId);
   assert.strictEqual(canonicalWatch, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "Resolved canonical watch URL matches YouTube video page");
+  console.log("[13/13] Testing Quality Variant Differentiation & Header Preservation without Playing-Stream Downgrade...");
+  let sentRpcParams = null;
+  const mockTransport = async (payload) => {
+    sentRpcParams = payload.params;
+    return { accepted: true, taskId: "task-mock-stream-1" };
+  };
+
+  const fakeYtCand = {
+    candidateId: "cand-yt-1080",
+    url: "https://rr1---sn-4g5ednks.googlevideo.com/videoplayback?itag=18&expire=999",
+    streamType: "YOUTUBE",
+    sourceType: "YOUTUBE_EXTRACTION",
+    isGoogleVideo: true,
+    tabUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    videoUrl: "https://rr1---sn-4g5ednks.googlevideo.com/videoplayback?itag=18&expire=999", // currently playing 360p
+    referer: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    qualities: [
+      { id: "1080p_60fps_webm", resolution: "1080p60", videoFilter: "1080p60", videoUrl: "", ext: "webm" },
+      { id: "1080p_mp4", resolution: "1080p", videoFilter: "1080p", videoUrl: "", ext: "mp4" },
+      { id: "360p_mp4", resolution: "360p", videoFilter: "360p", videoUrl: "https://rr1---sn-4g5ednks.googlevideo.com/videoplayback?itag=18&expire=999", ext: "mp4" }
+    ]
+  };
+
+  // Submit with 1080p MP4 quality: MUST NOT fall back to candidate.videoUrl (the playing 360p stream)!
+  await submitMediaCandidateToOpenIDM(fakeYtCand, {
+    selectedQuality: fakeYtCand.qualities[1], // 1080p MP4
+    qualityId: "1080p_mp4"
+  }, mockTransport);
+
+  assert(sentRpcParams, "RPC params sent to mock transport");
+  assert.strictEqual(sentRpcParams.videoUrl, "", "videoUrl is empty so backend delegates to yt-dlp with requested videoFilter");
+  assert.strictEqual(sentRpcParams.videoFilter, "1080p", "Selected videoFilter matches 1080p");
+  assert.strictEqual(sentRpcParams.resolution, "1080p", "Resolution matches 1080p");
+  assert.strictEqual(sentRpcParams.watchUrl, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "Watch URL preserved");
+  assert(sentRpcParams.headers["Referer"] || sentRpcParams.headers["referer"], "Referer header preserved for stream extraction");
+
+  // HLS stream with chosen quality variant URL
+  const fakeHlsCand = {
+    candidateId: "cand-hls-pimpbunny",
+    url: "https://cdn.example.com/stream/master.m3u8",
+    streamType: "HLS",
+    sourceType: "HLS_MANIFEST",
+    referer: "https://pimpbunny.com/video/99",
+    qualities: [
+      { id: "720p", resolution: "720p", variantUrl: "https://cdn.example.com/stream/720p.m3u8" }
+    ]
+  };
+  await submitMediaCandidateToOpenIDM(fakeHlsCand, {
+    selectedQuality: fakeHlsCand.qualities[0],
+    qualityId: "720p"
+  }, mockTransport);
+
+  assert.strictEqual(sentRpcParams.manifestUrl, "https://cdn.example.com/stream/720p.m3u8", "Variant URL prioritized when chosen quality selected");
+  assert.strictEqual(sentRpcParams.headers["Referer"], "https://pimpbunny.com/video/99", "Referer header preserved from candidate.referer");
+
   console.log("  -> PASS");
 
-  console.log("\nBrowser Extension & Detection Suite: 12 / 12 suites PASSED.");
+  console.log("\nBrowser Extension & Detection Suite: 13 / 13 suites PASSED.");
 }
 
 runTests().catch((err) => {

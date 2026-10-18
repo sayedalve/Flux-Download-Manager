@@ -59,6 +59,13 @@ public:
         const std::string& filename,
         const std::vector<std::string>& lines);
 
+    // Writes ACL-restricted Netscape-formatted cookie file for yt-dlp / external workers
+    static Result<std::filesystem::path> WriteNetscapeCookieFile(
+        const std::filesystem::path& task_tmp_dir,
+        const std::string& filename,
+        const std::string& cookie_str,
+        const std::string& domain_hint);
+
     // Parses N_m3u8DL-RE meta.json output and detects unsupported DRM (NFR-015)
     static Result<StreamProbeResult> ParseMetaJson(const std::filesystem::path& meta_json_path);
 

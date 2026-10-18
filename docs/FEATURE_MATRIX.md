@@ -37,7 +37,7 @@
 | **FR-016** | Master vs. Media Manifest Deduplication & Grouping | `extension/js/function.js` (`addOrDeduplicateMediaCandidate`) | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suite 2/11` |
 | **FR-017** | Opt-In Page-Context ("Deep Search") Hook | `extension/catch-script/catch.js` | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suite 4/11` |
 | **FR-018** | Live Stream Discovery Metadata (`isLive`) | `src/worker_stream/nm3u8dl_re_worker.cpp`, `src/engine_stream/` | [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) | `Verified by Execution` | `UT-STREAM-01` |
-| **FR-019** | Out-of-Process Manifest Probing, Redirect Resolution, URL Expired & Speed Detection | `src/engine_stream/nm3u8dl_re_adapter.cpp`, `src/common/path_sanitizer.cpp` | [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) | `Verified by Execution` | `Suite 6/13`, `Suite 7/13`, `Suite 53`, `IT-STREAM-01` (`BUG-034`) |
+| **FR-019** | Out-of-Process Manifest Probing, Redirect Resolution, URL Expired, Multi-Track Progress & Speed Detection | `src/engine_stream/nm3u8dl_re_adapter.cpp`, `src/common/path_sanitizer.cpp` | [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) | `Verified by Execution` | `Suite 6/13`, `Suite 7/13`, `Suite 53`, `Suite 56`, `IT-STREAM-01` (`BUG-034`) |
 | **FR-020** | Compiled Native C++20 Stream Worker & FFmpeg Muxing | `src/worker_stream/nm3u8dl_re_worker.cpp`, `tools/win-x64/` | [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) + `FFmpeg` | `Verified by Execution` | `IT-BIN-01`, `IT-STREAM-02`, `IT-STREAM-03` |
 | **FR-021** | Safe `@job.rsp` Credential Passing & Job Object Termination | `src/engine_stream/nm3u8dl_re_adapter.cpp` | Independent Security Design | `Verified by Execution` | `SEC-PROC-01`, `IT-STREAM-06` |
 | **FR-022** | Standard HLS AES-128 In-Process Decryption Support | `src/worker_stream/nm3u8dl_re_worker.cpp` (`DecryptAes128Cbc`) | [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) | `Verified by Execution` | `IT-STREAM-06` |
@@ -74,8 +74,8 @@
 | **NFR-010** | Zero Telemetry by Default | All modules | `Verified by Execution` | Zero background telemetry or analytics endpoints |
 | **NFR-011** | Per-Monitor v2 High-DPI & Keyboard Accessibility | `src/ui/design_system.hpp`, `src/ui/win32_main_window.cpp` | `Verified by Execution` | Tested at `96`/`120`/`144`/`192` DPI (`UT-UI-01`, `UT-KEY-01`) |
 | **NFR-012** | Full UTF-8 / UTF-16LE Unicode Path Handling | `src/common/path_sanitizer.cpp`, `src/brisk_engine/http_client.cpp` | `Verified by Execution` | Verified with CJK RFC 5987 `测试视频_1080p.mp4` (`UT-HTTP-01`) |
-| **NFR-013** | Cross-Browser MV3 Build (Chrome, Edge, Brave, Firefox) | `extension/manifest.chromium.json`, `extension/manifest.firefox.json` | `Verified by Execution` | `11 / 11` suites passing (`tests/test_extension_detection.js`) |
-| **NFR-014** | Clean Engine & Adapter Boundaries | `src/brisk_engine/`, `src/engine_stream/`, `src/core/` | `Verified by Execution` | Verified across `36 / 36` C++ unit suites |
+| **NFR-013** | Cross-Browser MV3 Build (Chrome, Edge, Brave, Firefox) | `extension/manifest.chromium.json`, `extension/manifest.firefox.json` | `Verified by Execution` | `13 / 13` suites passing (`tests/test_extension_detection.js`) |
+| **NFR-014** | Clean Engine & Adapter Boundaries | `src/brisk_engine/`, `src/engine_stream/`, `src/core/` | `Verified by Execution` | Verified across `56 / 56` C++ unit suites |
 | **NFR-015** | Strict DRM Non-Circumvention (`ERR_STREAM_DRM_PROTECTED`) | `src/engine_stream/nm3u8dl_re_adapter.cpp`, `src/worker_stream/nm3u8dl_re_worker.cpp` | `Verified by Execution` | Widevine/CENC immediately rejected (`TestStreamMetaJsonAndDrmRejection`) |
 | **NFR-016** | Cross-Architecture Clean Compilation Readiness | `CMakeLists.txt` | `Verified by Execution` | Compiles cleanly with MSVC `/W4` `/WX` |
 

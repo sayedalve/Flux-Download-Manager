@@ -244,14 +244,14 @@ function classifyMediaSourceType(candidateOrUrl, mime = "", cachedBody = "") {
   // 4. Actual HLS Manifests
   if (streamType === "HLS" || ext === "m3u8" || ext === "m3u" ||
       effectiveMime.includes("mpegurl")) {
-    if (isWebpageWatchUrl(url)) return SourceType.YOUTUBE_EXTRACTION;
+    if (isYouTubeWatchOrShortsUrl(url)) return SourceType.YOUTUBE_EXTRACTION;
     return SourceType.HLS_MANIFEST;
   }
 
   // 5. Actual DASH Manifests
   if (streamType === "DASH" || streamType === "MSS" || ext === "mpd" || ext === "ism" ||
       effectiveMime.includes("dash+xml") || effectiveMime.includes("vnd.mpeg.dash.mpd")) {
-    if (isWebpageWatchUrl(url)) return SourceType.YOUTUBE_EXTRACTION;
+    if (isYouTubeWatchOrShortsUrl(url)) return SourceType.YOUTUBE_EXTRACTION;
     return SourceType.DASH_MANIFEST;
   }
 

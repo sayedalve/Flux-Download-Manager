@@ -164,7 +164,15 @@
         const fps = Number(f.fps || 30);
         const bw = Number(f.bitrate || f.averageBitrate || 0);
         const resLabel = f.qualityLabel || (height > 0 ? `${height}p` : "HD");
-        const key = resLabel.toLowerCase();
+        const isMp4 = mime.includes("mp4");
+        const codecKey = isMp4 ? "mp4" : "webm";
+        const fpsSuffix = fps > 30 ? `${fps}` : "";
+        const fpsKey = fpsSuffix ? `${fpsSuffix}fps_` : "";
+        const key = `${resLabel.toLowerCase()}_${fpsKey}${codecKey}`;
+        const displayRes = `${resLabel}${fpsSuffix ? fpsSuffix : ""}`;
+        const displayLabel = `${displayRes} (${isMp4 ? "MP4" : "WebM"})`;
+        const vFilter = height > 0 ? (fps > 30 ? `${height}p${fps}` : `${height}p`) : resLabel;
+
         const hasDirectUrl = Boolean(f.url);
         const cleanVUrl = hasDirectUrl ? normalizeGooglevideoUrl(f.url) : "";
         const needsMux = Boolean(isAdaptiveFmt && cleanBestAudioUrl);
@@ -174,13 +182,12 @@
         const estVBytes = (vSize === 0 && bw > 0 && durSec > 0) ? Math.round((bw / 8) * durSec) : 0;
         const estABytes = (needsMux && audioByteLen === 0 && durSec > 0) ? Math.round((128000 / 8) * durSec) : 0;
         const totalSize = vSize > 0 ? (vSize + (needsMux ? audioByteLen : 0)) : (estVBytes + (needsMux ? (audioByteLen > 0 ? audioByteLen : estABytes) : 0));
-        const isSizeEstimated = (vSize === 0 && totalSize > 0);
-        const isMp4 = mime.includes("mp4");
+        const isSizeEstimated = Boolean(vSize === 0 && totalSize > 0);
 
         const entry = {
           id: key,
-          label: `${resLabel} (${isMp4 ? "MP4" : "WebM"})`,
-          resolution: resLabel,
+          label: displayLabel,
+          resolution: displayRes,
           width,
           height,
           fps,
@@ -188,24 +195,23 @@
           bandwidth: bw,
           size: totalSize,
           sizeEstimated: isSizeEstimated,
-          ext: "mp4",
-          mime: mime.split(";")[0] || "video/mp4",
+          ext: isMp4 ? "mp4" : "webm",
+          mime: mime.split(";")[0] || (isMp4 ? "video/mp4" : "video/webm"),
           videoUrl: unpairedAdaptive ? "" : cleanVUrl,
           pairedAudioUrl: needsMux ? cleanBestAudioUrl : "",
           requiresAudioMux: needsMux,
           requiresCipherExtraction: requiresCipher,
-          videoFilter: height > 0 ? `${height}p` : resLabel
+          videoFilter: vFilter
         };
 
         const existing = qualityMap.get(key);
         if (!existing) {
           qualityMap.set(key, entry);
         } else {
-          // Prefer direct URL over cipher, and MP4 (avc1) over WebM at the same resolution
+          // Prefer direct URL over cipher, and higher bitrate
           const existingDirect = Boolean(existing.videoUrl);
           if ((hasDirectUrl && !existingDirect) ||
-              (hasDirectUrl === existingDirect && isMp4 && !existing.mime.includes("mp4")) ||
-              (hasDirectUrl === existingDirect && isMp4 === existing.mime.includes("mp4") && bw > existing.bandwidth)) {
+              (hasDirectUrl === existingDirect && bw > existing.bandwidth)) {
             qualityMap.set(key, entry);
           }
         }
@@ -216,6 +222,9 @@
 
       const qualities = Array.from(qualityMap.values()).sort((a, b) => {
         if ((b.height || 0) !== (a.height || 0)) return (b.height || 0) - (a.height || 0);
+        if ((b.fps || 0) !== (a.fps || 0)) return (b.fps || 0) - (a.fps || 0);
+        if (a.ext === "mp4" && b.ext !== "mp4") return -1;
+        if (a.ext !== "mp4" && b.ext === "mp4") return 1;
         return (b.bandwidth || 0) - (a.bandwidth || 0);
       });
 

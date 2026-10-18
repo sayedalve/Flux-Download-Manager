@@ -859,11 +859,13 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
     }
 
     std::string task_type_str = TaskTypeToString(local_task.task_type);
-    if (local_task.url.find("youtube.com") != std::string::npos ||
-        local_task.url.find("watch?v=") != std::string::npos ||
-        local_task.page_url.find("youtube.com") != std::string::npos ||
-        local_task.page_url.find("watch?v=") != std::string::npos ||
-        local_task.stream_options.cached_manifest_body.find("YOUTUBE") != std::string::npos) {
+    bool is_youtube_task = (local_task.url.find("youtube.com") != std::string::npos ||
+                            local_task.url.find("youtu.be") != std::string::npos ||
+                            local_task.page_url.find("youtube.com") != std::string::npos ||
+                            local_task.page_url.find("youtu.be") != std::string::npos ||
+                            local_task.stream_options.cached_manifest_body.find("\"fluxType\":\"YOUTUBE_STREAM\"") != std::string::npos ||
+                            local_task.stream_options.cached_manifest_body.find("\"fluxType\": \"YOUTUBE_STREAM\"") != std::string::npos);
+    if (is_youtube_task) {
         task_type_str = "YOUTUBE_EXTRACTION";
     }
 

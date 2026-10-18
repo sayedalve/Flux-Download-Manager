@@ -628,9 +628,19 @@ std::string DesktopView::FormatSizePretty(uint64_t bytes) {
 
 std::string DesktopView::FormatSpeedKbps(uint64_t bps) {
     if (bps == 0) return "0 KB/s";
-    uint64_t kbps = (bps + 512) / 1024;
-    if (kbps == 0 && bps > 0) kbps = 1;
-    return std::to_string(kbps) + " KB/s";
+    char buf[64]{};
+    if (bps < 1024ULL * 1024ULL) {
+        uint64_t kbps = (bps + 512) / 1024;
+        if (kbps == 0 && bps > 0) kbps = 1;
+        std::snprintf(buf, sizeof(buf), "%llu KB/s", static_cast<unsigned long long>(kbps));
+    } else if (bps < 1024ULL * 1024ULL * 1024ULL) {
+        double mbps = static_cast<double>(bps) / (1024.0 * 1024.0);
+        std::snprintf(buf, sizeof(buf), "%.2f MB/s", mbps);
+    } else {
+        double gbps = static_cast<double>(bps) / (1024.0 * 1024.0 * 1024.0);
+        std::snprintf(buf, sizeof(buf), "%.2f GB/s", gbps);
+    }
+    return std::string(buf);
 }
 
 void DesktopView::ToggleSelectAll() {
@@ -5888,9 +5898,14 @@ int DesktopView::RunWin32MessageLoop() {
     SetWindowHwnd(hwnd);
     if (m_ipc_server) {
         m_ipc_server->SetOfferNotificationCallback(
-            [hwnd](const TaskModel& task) {
-                auto* offer = new OfferNotificationData{task.task_id, task.url, task.file_name, task.save_dir, task.total_bytes};
-                PostMessageW(hwnd, WM_OPENIDM_SHOW_NEW_DOWNLOAD, 0, reinterpret_cast<LPARAM>(offer));
+            [hwnd, this](const TaskModel& task) {
+                if (!m_controller.GetSettings().auto_start_downloads) {
+                    auto* offer = new OfferNotificationData{task.task_id, task.url, task.file_name, task.save_dir, task.total_bytes};
+                    PostMessageW(hwnd, WM_OPENIDM_SHOW_NEW_DOWNLOAD, 0, reinterpret_cast<LPARAM>(offer));
+                } else {
+                    PostMessageW(hwnd, WM_TIMER, IDT_UI_REFRESH, 0);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
             });
     }
 

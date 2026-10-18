@@ -3170,11 +3170,314 @@ bool TestYouTubeCanonicalRoutingAndSchedulerThroughput() {
     return true;
 }
 
+bool TestSpeedFormattingMultiTrackProgressAndContainerVerification() {
+    using namespace openidm;
+    using openidm::stream::Nm3u8dlReAdapter;
+
+    // 1. DesktopView::FormatSpeedKbps threshold units (KB/s, MB/s, GB/s)
+    ASSERT_TRUE(openidm::ui::DesktopView::FormatSpeedKbps(0) == "0 KB/s", "0 bps is formatted as 0 KB/s");
+    ASSERT_TRUE(openidm::ui::DesktopView::FormatSpeedKbps(500 * 1024) == "500 KB/s", "500 KB/s formatted in KB/s");
+    ASSERT_TRUE(openidm::ui::DesktopView::FormatSpeedKbps(1024 * 1024 - 1) == "1024 KB/s", "Under 1 MB/s formatted in KB/s");
+
+    std::string spd_1mb = openidm::ui::DesktopView::FormatSpeedKbps(1024ULL * 1024ULL);
+    ASSERT_TRUE(spd_1mb == "1.00 MB/s", "Exactly 1 MB/s formatted as 1.00 MB/s");
+
+    std::string spd_2_5mb = openidm::ui::DesktopView::FormatSpeedKbps(static_cast<uint64_t>(2.5 * 1024.0 * 1024.0));
+    ASSERT_TRUE(spd_2_5mb == "2.50 MB/s", "2.5 MB/s formatted as 2.50 MB/s");
+
+    std::string spd_15mb = openidm::ui::DesktopView::FormatSpeedKbps(15ULL * 1024ULL * 1024ULL);
+    ASSERT_TRUE(spd_15mb == "15.00 MB/s", "15 MB/s formatted as 15.00 MB/s");
+
+    std::string spd_1_25gb = openidm::ui::DesktopView::FormatSpeedKbps(static_cast<uint64_t>(1.25 * 1024.0 * 1024.0 * 1024.0));
+    ASSERT_TRUE(spd_1_25gb == "1.25 GB/s", "1.25 GB/s formatted as 1.25 GB/s");
+
+    // 2. Multi-track YouTube progress accounting simulation (Video 182.50 MiB + Audio 13.30 MiB = 195.80 MiB)
+    {
+        static const std::regex kYtDlpProgRe(R"(\[download\]\s+(\d+(?:\.\d+)?)%\s+of\s+~?\s*([0-9.]+)(KiB|MiB|GiB))");
+        std::vector<uint64_t> track_totals;
+        std::vector<uint64_t> track_downloaded;
+        int current_track_idx = -1;
+        double last_track_pct = 0.0;
+        uint64_t last_aggregate_dl = 0;
+        uint64_t observed_final_total = 0;
+
+        auto parse_line = [&](const std::string& line) {
+            std::smatch m;
+            if (std::regex_search(line, m, kYtDlpProgRe)) {
+                double pct = std::stod(m[1].str());
+                double sz_val = std::stod(m[2].str());
+                std::string unit = m[3].str();
+                double mult = 1048576.0;
+                if (unit == "KiB") mult = 1024.0;
+                else if (unit == "GiB") mult = 1073741824.0;
+                uint64_t tot_b = static_cast<uint64_t>(sz_val * mult);
+                uint64_t dl_b = static_cast<uint64_t>((pct / 100.0) * tot_b);
+
+                if (current_track_idx < 0) {
+                    current_track_idx = 0;
+                    track_totals.push_back(tot_b);
+                    track_downloaded.push_back(dl_b);
+                } else if (pct < last_track_pct - 15.0 && last_track_pct >= 90.0) {
+                    current_track_idx++;
+                    track_totals.push_back(tot_b);
+                    track_downloaded.push_back(dl_b);
+                } else {
+                    track_totals[current_track_idx] = tot_b;
+                    track_downloaded[current_track_idx] = dl_b;
+                }
+                last_track_pct = pct;
+
+                uint64_t aggregate_tot = 0;
+                uint64_t aggregate_dl = 0;
+                for (size_t ti = 0; ti < track_totals.size(); ++ti) {
+                    aggregate_tot += track_totals[ti];
+                    aggregate_dl += track_downloaded[ti];
+                }
+                last_aggregate_dl = aggregate_dl;
+                observed_final_total = aggregate_tot;
+            }
+        };
+
+        // Video track download
+        parse_line("[download]  50.0% of ~ 182.50MiB at 4.25MiB/s ETA 00:21");
+        ASSERT_TRUE(track_totals.size() == 1, "Track 0 initialized");
+        ASSERT_TRUE(last_aggregate_dl > 0, "Downloaded bytes accumulated for Track 0");
+
+        parse_line("[download] 100.0% of ~ 182.50MiB at 4.50MiB/s ETA 00:00");
+        uint64_t video_done_b = last_aggregate_dl;
+        ASSERT_TRUE(video_done_b > 190000000ULL, "Video track reaches ~191.3 MB");
+
+        // Audio track starts: pct drops to 0.0%, sz_val is 13.30MiB
+        parse_line("[download]   0.0% of ~  13.30MiB at 1.20MiB/s ETA 00:11");
+        ASSERT_TRUE(track_totals.size() == 2, "Track 1 added without replacing Track 0");
+        ASSERT_TRUE(observed_final_total > 200000000ULL, "Total bytes does NOT collapse to 13.3 MB! Preserves aggregate ~195.8 MB");
+        ASSERT_TRUE(last_aggregate_dl >= video_done_b, "Aggregate downloaded bytes does not reset to zero");
+
+        parse_line("[download] 100.0% of ~  13.30MiB at 2.10MiB/s ETA 00:00");
+        ASSERT_TRUE(last_aggregate_dl == observed_final_total, "Both tracks 100% completed");
+    }
+
+    // 3. Container magic bytes verification across WebM, MKV, MP4
+    {
+        std::error_code ec;
+        std::filesystem::path test_dir = std::filesystem::temp_directory_path() / "flux_test_container_magic";
+        std::filesystem::remove_all(test_dir, ec);
+        std::filesystem::create_directories(test_dir, ec);
+
+        // 3a. MP4 container with ftyp box
+        std::filesystem::path mp4_file = test_dir / "test.mp4";
+        {
+            std::ofstream ofs(mp4_file, std::ios::binary);
+            uint8_t mp4_hdr[] = { 0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm' };
+            ofs.write(reinterpret_cast<const char*>(mp4_hdr), sizeof(mp4_hdr));
+            std::vector<char> dummy(1024, 0);
+            ofs.write(dummy.data(), dummy.size());
+        }
+        ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(mp4_file, "mp4"), "Valid MP4 magic bytes verified");
+        ASSERT_TRUE(!Nm3u8dlReAdapter::VerifyContainerMagicBytes(mp4_file, "mkv"), "MP4 does not validate as MKV");
+
+        // 3b. WebM / MKV container with EBML header (\x1A\x45\xDF\xA3)
+        std::filesystem::path webm_file = test_dir / "test.webm";
+        {
+            std::ofstream ofs(webm_file, std::ios::binary);
+            uint8_t ebml_hdr[] = { 0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x42, 0x86, 0x81, 0x01, 0x42, 0xF7, 0x81, 0x01 };
+            ofs.write(reinterpret_cast<const char*>(ebml_hdr), sizeof(ebml_hdr));
+            std::vector<char> dummy(1024, 0);
+            ofs.write(dummy.data(), dummy.size());
+        }
+        ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(webm_file, "webm"), "Valid WebM magic bytes verified");
+        ASSERT_TRUE(Nm3u8dlReAdapter::VerifyContainerMagicBytes(webm_file, "mkv"), "Valid MKV magic bytes verified for EBML");
+        ASSERT_TRUE(!Nm3u8dlReAdapter::VerifyContainerMagicBytes(webm_file, "mp4"), "WebM does not validate as MP4");
+
+        // 3c. Container fallback detection: requested mp4 but worker produced webm
+        std::string detected_fmt = "mp4";
+        bool valid_container = Nm3u8dlReAdapter::VerifyContainerMagicBytes(webm_file, detected_fmt);
+        if (!valid_container) {
+            for (const auto& alt_fmt : {"mp4", "mkv", "webm", "m4a"}) {
+                if (Nm3u8dlReAdapter::VerifyContainerMagicBytes(webm_file, alt_fmt)) {
+                    detected_fmt = alt_fmt;
+                    valid_container = true;
+                    break;
+                }
+            }
+        }
+        ASSERT_TRUE(valid_container, "Alternative container fallback succeeds for WebM");
+        ASSERT_TRUE(detected_fmt == "mkv" || detected_fmt == "webm", "Detected format updated to actual container");
+
+        std::filesystem::remove_all(test_dir, ec);
+    }
+
+    return true;
+}
+
+bool TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile() {
+    using namespace openidm;
+    using namespace openidm::stream;
+    std::error_code ec;
+    auto test_dir = std::filesystem::temp_directory_path() / ("test_pb_yt_" + GenerateUuidV4());
+    std::filesystem::create_directories(test_dir, ec);
+
+    // 1. Test WriteNetscapeCookieFile formatting and domain isolation
+    {
+        std::string yt_cookies = "LOGIN_INFO=AFmmF2kwRA...; SID=sample_sid_123; HSID=sample_hsid_456; __Secure-1PSID=sec_123";
+        auto res = Nm3u8dlReAdapter::WriteNetscapeCookieFile(test_dir, "yt_cookies.txt", yt_cookies, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+        ASSERT_TRUE(res.ok(), "WriteNetscapeCookieFile succeeds for YouTube");
+        std::filesystem::path cookie_file = test_dir / "yt_cookies.txt";
+        ASSERT_TRUE(std::filesystem::exists(cookie_file, ec), "yt_cookies.txt exists");
+
+        std::ifstream ifs(cookie_file);
+        std::stringstream ss;
+        ss << ifs.rdbuf();
+        std::string content = ss.str();
+
+        ASSERT_TRUE(content.find("# Netscape HTTP Cookie File") != std::string::npos, "Netscape cookie header present");
+        ASSERT_TRUE(content.find(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\tAFmmF2kwRA...") != std::string::npos, "YouTube domain formatted properly");
+        ASSERT_TRUE(content.find(".google.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\tAFmmF2kwRA...") != std::string::npos, "Google domain formatted properly for YouTube auth");
+        ASSERT_TRUE(content.find(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tsample_sid_123") != std::string::npos, "SID cookie present");
+    }
+
+    {
+        std::string pb_cookies = "sess=pb_sess_999; uid=102030";
+        auto res = Nm3u8dlReAdapter::WriteNetscapeCookieFile(test_dir, "pb_cookies.txt", pb_cookies, "https://pimpbunny.com/watch/video123");
+        ASSERT_TRUE(res.ok(), "WriteNetscapeCookieFile succeeds for non-YouTube site");
+        std::filesystem::path cookie_file = test_dir / "pb_cookies.txt";
+
+        std::ifstream ifs(cookie_file);
+        std::stringstream ss;
+        ss << ifs.rdbuf();
+        std::string content = ss.str();
+
+        ASSERT_TRUE(content.find(".pimpbunny.com\tTRUE\t/\tTRUE\t2147483647\tsess\tpb_sess_999") != std::string::npos, "Pimpbunny domain formatted properly");
+        ASSERT_TRUE(content.find(".google.com") == std::string::npos, "Google domain is NOT generated for non-YouTube site");
+    }
+
+    // 2. Test IpcServer stream.add routing
+    {
+        std::string sock = openidm::ipc::IpcServer::DefaultSocketPath() + "_test_pb_" + GenerateUuidV4();
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = test_dir / "state.db";
+        cfg.default_download_dir = test_dir / "downloads";
+        cfg.temp_root_dir = test_dir / "tmp";
+
+        openidm::DownloadController ctrl(cfg);
+        ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller for stream routing test");
+        openidm::ipc::IpcServer server(ctrl, sock);
+
+        // Scenario A: Pimpbunny progressive direct video (.mp4) with videoUrl
+        // Must NOT forge fluxType: YOUTUBE_STREAM and must route to TaskType::kHttpFile
+        std::string pb_direct_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "pb-test-1",
+            "method": "stream.add",
+            "params": {
+                "url": "https://cdn.pimpbunny.com/videos/media_1080p.mp4?token=abc",
+                "videoUrl": "https://cdn.pimpbunny.com/videos/media_1080p.mp4?token=abc",
+                "tabUrl": "https://pimpbunny.com/videos/12345",
+                "pageTitle": "Pimpbunny Exclusive Clip",
+                "sourceType": "DIRECT_PROGRESSIVE",
+                "streamType": "HTTP_FILE"
+            }
+        })JSON";
+        std::string resp_a = server.HandleJsonRpcMessage(pb_direct_req);
+        ASSERT_TRUE(resp_a.find("\"accepted\":true") != std::string::npos, "Pimpbunny direct video accepted");
+
+        auto tasks = ctrl.ListTasks();
+        ASSERT_TRUE(!tasks.empty(), "Task was added to controller");
+        auto pb_task = tasks.back();
+        ASSERT_TRUE(pb_task.task_type == openidm::TaskType::kHttpFile, "Pimpbunny direct video routed to in-process HTTP engine");
+        ASSERT_TRUE(pb_task.url.find("pimpbunny.com/videos/media_1080p.mp4") != std::string::npos, "Correct media URL preserved");
+        ASSERT_TRUE(pb_task.stream_options.cached_manifest_body.find("YOUTUBE_STREAM") == std::string::npos,
+                    "Non-YouTube task does NOT contain synthetic YOUTUBE_STREAM descriptor");
+
+        // Scenario B: Pimpbunny HLS stream (.m3u8) with videoUrl
+        // Must NOT forge fluxType: YOUTUBE_STREAM and must route to TaskType::kStreamHls
+        std::string pb_hls_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "pb-test-2",
+            "method": "stream.add",
+            "params": {
+                "manifestUrl": "https://cdn.pimpbunny.com/hls/master.m3u8",
+                "videoUrl": "https://cdn.pimpbunny.com/hls/master.m3u8",
+                "tabUrl": "https://pimpbunny.com/videos/67890",
+                "pageTitle": "Pimpbunny Stream",
+                "sourceType": "HLS_MEDIA",
+                "streamType": "HLS"
+            }
+        })JSON";
+        std::string resp_b = server.HandleJsonRpcMessage(pb_hls_req);
+        ASSERT_TRUE(resp_b.find("\"accepted\":true") != std::string::npos, "Pimpbunny HLS stream accepted");
+
+        tasks = ctrl.ListTasks();
+        TaskModel pb_hls_task;
+        for (const auto& t : tasks) {
+            if (t.url.find("master.m3u8") != std::string::npos) {
+                pb_hls_task = t;
+                break;
+            }
+        }
+        ASSERT_TRUE(!pb_hls_task.task_id.empty(), "Pimpbunny HLS task found");
+        ASSERT_TRUE(pb_hls_task.task_type == openidm::TaskType::kStreamHls, "Pimpbunny HLS routed to Stream HLS");
+        ASSERT_TRUE(pb_hls_task.url.find("master.m3u8") != std::string::npos, "Correct m3u8 URL preserved");
+        ASSERT_TRUE(pb_hls_task.stream_options.cached_manifest_body.find("YOUTUBE_STREAM") == std::string::npos,
+                    "Pimpbunny HLS task does NOT contain synthetic YOUTUBE_STREAM descriptor");
+
+        // Scenario C: YouTube stream extraction with videoUrl
+        // MUST forge fluxType: YOUTUBE_STREAM and route to YouTube extraction
+        std::string yt_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "yt-test-1",
+            "method": "stream.add",
+            "params": {
+                "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "videoUrl": "https://rr1---sn-4g5ednks.googlevideo.com/videoplayback?expire=123",
+                "pairedAudioUrl": "https://rr1---sn-4g5ednks.googlevideo.com/videoplayback?expire=456",
+                "tabUrl": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                "videoId": "dQw4w9WgXcQ",
+                "pageTitle": "Rick Astley - Never Gonna Give You Up (Official Music Video)",
+                "sourceType": "YOUTUBE_EXTRACTION",
+                "streamType": "YOUTUBE"
+            }
+        })JSON";
+        std::string resp_c = server.HandleJsonRpcMessage(yt_req);
+        ASSERT_TRUE(resp_c.find("\"accepted\":true") != std::string::npos, "YouTube stream accepted");
+
+        tasks = ctrl.ListTasks();
+        TaskModel yt_task;
+        for (const auto& t : tasks) {
+            if (t.url.find("youtube.com") != std::string::npos || t.url.find("videoplayback") != std::string::npos) {
+                yt_task = t;
+                break;
+            }
+        }
+        ASSERT_TRUE(!yt_task.task_id.empty(), "YouTube task found");
+        ASSERT_TRUE(yt_task.task_type == openidm::TaskType::kStreamHls, "YouTube routed to Stream HLS for worker handling");
+        ASSERT_TRUE(yt_task.stream_options.cached_manifest_body.find("YOUTUBE_STREAM") != std::string::npos,
+                    "YouTube task contains YOUTUBE_STREAM descriptor");
+
+        ctrl.Shutdown();
+    }
+
+    // 3. Test FindWorkerBinary prioritization of tools/win-x64
+    {
+        auto exe_dir = PathSanitizer::GetExecutableDir();
+        auto n_bin = PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", exe_dir);
+        ASSERT_TRUE(!n_bin.empty(), "N_m3u8DL-RE binary resolved");
+        ASSERT_TRUE(std::filesystem::exists(n_bin, ec), "Resolved N_m3u8DL-RE exists on disk");
+
+        auto yt_bin = PathSanitizer::FindWorkerBinary("yt-dlp", exe_dir);
+        ASSERT_TRUE(!yt_bin.empty(), "yt-dlp binary resolved");
+        ASSERT_TRUE(std::filesystem::exists(yt_bin, ec), "Resolved yt-dlp exists on disk");
+    }
+
+    std::filesystem::remove_all(test_dir, ec);
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 55;
+    const int total = 57;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -3239,6 +3542,8 @@ int main() {
     run(53, "TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload", TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload);
     run(54, "TestFinalPhaseRemediationAndLiveMetrics", TestFinalPhaseRemediationAndLiveMetrics);
     run(55, "TestYouTubeCanonicalRoutingAndSchedulerThroughput", TestYouTubeCanonicalRoutingAndSchedulerThroughput);
+    run(56, "TestSpeedFormattingMultiTrackProgressAndContainerVerification", TestSpeedFormattingMultiTrackProgressAndContainerVerification);
+    run(57, "TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile", TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

@@ -373,7 +373,26 @@ async function autoProbeManifestQualities(tabId, candidate) {
   candidate.__probingQualities = true;
 
   try {
-    const resp = await fetch(candidate.url, { method: "GET" });
+    const fetchHeaders = {};
+    if (candidate.referer || candidate.tabUrl) {
+      fetchHeaders["Referer"] = candidate.referer || candidate.tabUrl;
+    }
+    if (candidate.tabUrl) {
+      try {
+        const origin = new URL(candidate.tabUrl).origin;
+        fetchHeaders["Origin"] = origin;
+      } catch (_) {}
+    }
+    if (typeof collectCookiesForDownload === "function") {
+      const cookieHeader = await collectCookiesForDownload(candidate.url, candidate.tabUrl || candidate.referer);
+      if (cookieHeader) fetchHeaders["Cookie"] = cookieHeader;
+    }
+
+    const resp = await fetch(candidate.url, {
+      method: "GET",
+      credentials: "include",
+      headers: fetchHeaders
+    });
     if (!resp || !resp.ok) return false;
     const bodyText = await resp.text();
     if (!bodyText) return false;
@@ -776,8 +795,9 @@ async function onDownloadCreatedHandler(
     }
   }
 
-  // Pause browser download while waiting for Flux acknowledgment; NEVER cancel before Flux accepts!
-  if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
+  // In onDeterminingFilename ("determine" phase), Chromium holds progress until suggest() is called.
+  // Only call chrome.downloads.pause() when not in the "determine" phase (e.g. Firefox or fallback phases).
+  if (phase !== "determine" && !customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
     try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
   }
 
@@ -982,8 +1002,8 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     }
   }
 
-  const effectiveVideoUrl = (chosenQuality && chosenQuality.videoUrl)
-    ? chosenQuality.videoUrl
+  const effectiveVideoUrl = chosenQuality
+    ? (chosenQuality.videoUrl || "")
     : (candidate.videoUrl || "");
   const effectiveAudioUrl = (chosenQuality && chosenQuality.pairedAudioUrl !== undefined)
     ? chosenQuality.pairedAudioUrl
@@ -1024,7 +1044,7 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
       title: options.pageTitle || candidate.pageTitle || baseDesc.title || "youtube_video",
       watchUrl: candidate.tabUrl || baseDesc.watchUrl || candidate.url,
       resolution: effectiveResolution || baseDesc.resolution || "Auto",
-      videoUrl: effectiveVideoUrl || (candidate.isGoogleVideo ? candidate.url : ""),
+      videoUrl: effectiveVideoUrl || (!chosenQuality && candidate.isGoogleVideo ? candidate.url : ""),
       audioUrl: effectiveAudioUrl,
       videoFilter: effectiveVideoFilter,
       requiresCipherExtraction: effectiveRequiresCipher,
@@ -1056,6 +1076,8 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
       : ((candidate.tabUrl && !candidate.tabUrl.includes("googlevideo.com"))
           ? candidate.tabUrl
           : (candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : candidate.url));
+  } else if (sourceType === SourceType.HLS_MANIFEST && chosenQuality && chosenQuality.variantUrl && !validCachedManifest) {
+    targetManifestUrl = chosenQuality.variantUrl;
   } else if (sourceType === SourceType.DIRECT_PROGRESSIVE && effectiveVideoUrl) {
     targetManifestUrl = effectiveVideoUrl;
   }
@@ -1066,23 +1088,17 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   }
 
   const headers = Object.assign({}, candidate.headers || {});
-  if (!headers.Referer && !headers.referer && candidate.tabUrl) {
-    headers.Referer = candidate.tabUrl;
+  if (!headers.Referer && !headers.referer) {
+    if (candidate.referer) headers.Referer = candidate.referer;
+    else if (candidate.tabUrl) headers.Referer = candidate.tabUrl;
   }
-  if (!headers.Cookie && !headers.cookie && typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
+  if (!headers["User-Agent"] && !headers["user-agent"] && typeof navigator !== "undefined" && navigator.userAgent) {
+    headers["User-Agent"] = navigator.userAgent;
+  }
+  if (!headers.Cookie && !headers.cookie && typeof collectCookiesForDownload === "function") {
     try {
-      const cookieUrl = candidate.tabUrl || candidate.url || targetManifestUrl || "";
-      if (cookieUrl && (cookieUrl.startsWith("http://") || cookieUrl.startsWith("https://"))) {
-        const cookieList = await new Promise((resolve) => {
-          chrome.cookies.getAll({ url: cookieUrl }, (cList) => {
-            if (chrome.runtime) void chrome.runtime.lastError;
-            resolve(cList || []);
-          });
-        });
-        if (cookieList && cookieList.length > 0) {
-          headers.Cookie = cookieList.map(c => `${c.name}=${c.value}`).join("; ");
-        }
-      }
+      const cookieHeader = await collectCookiesForDownload(targetManifestUrl, candidate.referer || candidate.tabUrl || "");
+      if (cookieHeader) headers.Cookie = cookieHeader;
     } catch (_) {}
   }
 

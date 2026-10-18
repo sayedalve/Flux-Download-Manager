@@ -61,6 +61,9 @@ struct WorkerOptions {
     std::string select_audio{"all"};
     std::string select_subtitle{"all"};
     std::string mux_format{"mp4"};
+    bool drop_video{false};
+    bool drop_audio{false};
+    bool allow_loopback{false};
     std::string custom_hls_method;
     std::string custom_hls_key;
     std::map<std::string, std::string> headers;
@@ -255,8 +258,21 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
         } else if ((tok == "-M" || tok == "--mux-after-done") && i + 1 < expanded.size()) {
             std::string mux_s = expanded[i + 1];
             if (mux_s.find("format=mkv") != std::string::npos) opts.mux_format = "mkv";
+            else if (mux_s.find("format=m4a") != std::string::npos) opts.mux_format = "m4a";
+            else if (mux_s.find("format=mp3") != std::string::npos) opts.mux_format = "mp3";
+            else if (mux_s.find("format=webm") != std::string::npos) opts.mux_format = "webm";
+            else if (mux_s.find("format=ts") != std::string::npos) opts.mux_format = "ts";
             else opts.mux_format = "mp4";
             i += 2;
+        } else if (tok == "--drop-video") {
+            opts.drop_video = true;
+            ++i;
+        } else if (tok == "--drop-audio") {
+            opts.drop_audio = true;
+            ++i;
+        } else if (tok == "--allow-loopback") {
+            opts.allow_loopback = true;
+            ++i;
         } else if ((tok == "-H" || tok == "--header") && i + 1 < expanded.size()) {
             std::string hdr = expanded[i + 1];
             auto colon = hdr.find(':');
@@ -301,11 +317,13 @@ bool FetchBytes(
     const std::string& url_or_path,
     const std::map<std::string, std::string>& headers,
     std::vector<uint8_t>& out_bytes,
-    std::string& out_resolved_url) {
+    std::string& out_resolved_url,
+    bool allow_loopback = false,
+    bool is_manifest_input = false) {
 
     std::error_code ec;
     std::filesystem::path p(url_or_path);
-    if (std::filesystem::exists(p, ec) && std::filesystem::is_regular_file(p, ec)) {
+    if (is_manifest_input && std::filesystem::exists(p, ec) && std::filesystem::is_regular_file(p, ec)) {
         std::ifstream ifs(p, std::ios::binary);
         if (!ifs) return false;
         out_bytes.assign((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
@@ -321,7 +339,7 @@ bool FetchBytes(
         std::nullopt,
         std::nullopt,
         20000,
-        true,
+        allow_loopback,
         cancel,
         [&](const openidm::brisk::HttpResponseMeta& meta) -> bool {
             out_resolved_url = meta.final_url;
@@ -356,6 +374,7 @@ void ParseHlsMediaPlaylist(const std::string& text, const std::string& playlist_
     std::string enc_method = "NONE";
     std::string key_uri;
     std::string key_iv;
+    uint64_t media_sequence = 0;
     double total_dur = 0.0;
     double cur_dur = 2.0;
 
@@ -365,7 +384,13 @@ void ParseHlsMediaPlaylist(const std::string& text, const std::string& playlist_
         std::string ln = Trim(raw_line);
         if (ln.empty()) continue;
 
-        if (ln.rfind("#EXT-X-MAP:", 0) == 0) {
+        if (ln.rfind("#EXT-X-MEDIA-SEQUENCE:", 0) == 0) {
+            try {
+                media_sequence = std::stoull(ln.substr(22));
+            } catch (...) {
+                media_sequence = 0;
+            }
+        } else if (ln.rfind("#EXT-X-MAP:", 0) == 0) {
             auto attrs = ParseM3u8Attributes(ln.substr(11));
             if (attrs.count("URI")) {
                 track.init_url = ResolveUrl(playlist_url, attrs["URI"]);
@@ -390,13 +415,25 @@ void ParseHlsMediaPlaylist(const std::string& text, const std::string& playlist_
             try { cur_dur = std::stod(val); } catch (...) { cur_dur = 2.0; }
         } else if (ln.front() != '#') {
             SegmentItem seg;
-            seg.index = static_cast<uint32_t>(track.segments.size());
+            uint32_t seg_idx = static_cast<uint32_t>(track.segments.size());
+            seg.index = seg_idx;
             seg.url = ResolveUrl(playlist_url, ln);
             seg.duration = cur_dur;
             seg.encrypted = encrypted;
             seg.method = enc_method;
             seg.key_uri = key_uri;
-            seg.iv_hex = key_iv;
+            if (encrypted && enc_method == "AES_128") {
+                if (!key_iv.empty()) {
+                    seg.iv_hex = key_iv;
+                } else {
+                    uint64_t seq_num = media_sequence + seg_idx;
+                    char iv_buf[33];
+                    std::snprintf(iv_buf, sizeof(iv_buf), "0000000000000000%016llX", static_cast<unsigned long long>(seq_num));
+                    seg.iv_hex = iv_buf;
+                }
+            } else {
+                seg.iv_hex = key_iv;
+            }
             track.segments.push_back(std::move(seg));
             total_dur += cur_dur;
         }
@@ -406,6 +443,40 @@ void ParseHlsMediaPlaylist(const std::string& text, const std::string& playlist_
     track.encryption_method = enc_method;
 }
 
+double ParseIso8601DurationSec(const std::string& str) {
+    if (str.empty() || str[0] != 'P') return 0.0;
+    double total_sec = 0.0;
+    double cur_val = 0.0;
+    bool in_time = false;
+    for (size_t i = 1; i < str.size(); ++i) {
+        char c = str[i];
+        if (c == 'T') {
+            in_time = true;
+        } else if ((c >= '0' && c <= '9') || c == '.') {
+            size_t end_idx = i;
+            while (end_idx < str.size() && ((str[end_idx] >= '0' && str[end_idx] <= '9') || str[end_idx] == '.')) {
+                ++end_idx;
+            }
+            try {
+                cur_val = std::stod(str.substr(i, end_idx - i));
+            } catch (...) {
+                cur_val = 0.0;
+            }
+            i = end_idx - 1;
+        } else if (c == 'H') {
+            total_sec += cur_val * 3600.0;
+            cur_val = 0.0;
+        } else if (c == 'M') {
+            total_sec += in_time ? (cur_val * 60.0) : (cur_val * 86400.0 * 30.0);
+            cur_val = 0.0;
+        } else if (c == 'S') {
+            total_sec += cur_val;
+            cur_val = 0.0;
+        }
+    }
+    return total_sec;
+}
+
 std::string ExtractXmlAttr(const std::string& tag_text, const std::string& attr_name) {
     std::regex re(attr_name + R"re(=\s*"([^"]*)")re");
     std::smatch m;
@@ -413,6 +484,32 @@ std::string ExtractXmlAttr(const std::string& tag_text, const std::string& attr_
         return m[1].str();
     }
     return "";
+}
+
+std::string ExpandDashTemplate(std::string tmpl, const std::string& rep_id, uint64_t number, uint64_t bandwidth) {
+    size_t pos = 0;
+    while ((pos = tmpl.find("$RepresentationID$", pos)) != std::string::npos) {
+        tmpl.replace(pos, 18, rep_id);
+        pos += rep_id.size();
+    }
+    pos = 0;
+    std::string bw_str = std::to_string(bandwidth);
+    while ((pos = tmpl.find("$Bandwidth$", pos)) != std::string::npos) {
+        tmpl.replace(pos, 11, bw_str);
+        pos += bw_str.size();
+    }
+    static const std::regex kNumRe(R"(\$Number(?:%0?(\d+)d)?\$)");
+    std::smatch m;
+    while (std::regex_search(tmpl, m, kNumRe)) {
+        int width = 1;
+        if (m[1].matched) {
+            try { width = std::stoi(m[1].str()); } catch (...) {}
+        }
+        std::ostringstream ss;
+        ss << std::setw(width) << std::setfill('0') << number;
+        tmpl.replace(m.position(), m.length(), ss.str());
+    }
+    return tmpl;
 }
 
 std::string ExtractBalancedJsonObject(const std::string& s, size_t start_pos) {
@@ -769,7 +866,7 @@ bool ParseYouTubeJsonIntoMeta(const openidm::json::Value& root, const WorkerOpti
 bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
     std::vector<uint8_t> raw_bytes;
     std::string resolved_url;
-    if (!FetchBytes(opts.input, opts.headers, raw_bytes, resolved_url)) {
+    if (!FetchBytes(opts.input, opts.headers, raw_bytes, resolved_url, opts.allow_loopback, true)) {
         return false;
     }
     std::string base_url = opts.base_url.empty() ? resolved_url : opts.base_url;
@@ -806,7 +903,7 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                     std::string sub_url = ResolveUrl(base_url, uri);
                     std::vector<uint8_t> sub_bytes;
                     std::string sub_res_url;
-                    if (!FetchBytes(sub_url, opts.headers, sub_bytes, sub_res_url)) continue;
+                    if (!FetchBytes(sub_url, opts.headers, sub_bytes, sub_res_url, opts.allow_loopback, false)) continue;
                     TrackItem tr;
                     tr.id = (mtype == "AUDIO") ? ("aud_" + std::to_string(aud_idx++)) : ("sub_" + std::to_string(sub_idx++));
                     tr.media_type = (mtype == "AUDIO") ? "AUDIO" : "SUBTITLES";
@@ -826,7 +923,7 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                         std::string var_url = ResolveUrl(base_url, lines[i + 1]);
                         std::vector<uint8_t> var_bytes;
                         std::string var_res_url;
-                        if (!FetchBytes(var_url, opts.headers, var_bytes, var_res_url)) continue;
+                        if (!FetchBytes(var_url, opts.headers, var_bytes, var_res_url, opts.allow_loopback, false)) continue;
                         TrackItem tr;
                         tr.id = "vid_" + std::to_string(vid_idx++);
                         tr.media_type = "VIDEO";
@@ -879,10 +976,14 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
         }
         meta.is_live = (ToLower(ExtractXmlAttr(text, "type")) == "dynamic");
 
+        std::string mpd_duration_str = ExtractXmlAttr(text, "mediaPresentationDuration");
+        double mpd_duration_sec = ParseIso8601DurationSec(mpd_duration_str);
+
         static const std::regex kAdaptRe(R"(<AdaptationSet\b([^>]*)>([\s\S]*?)</AdaptationSet>)");
         static const std::regex kRepRe(R"(<Representation\b([^>]*)>([\s\S]*?)</Representation>)");
         static const std::regex kBaseUrlRe(R"(<BaseURL>([^<]+)</BaseURL>)");
-        static const std::regex kSegTmplRe(R"(<SegmentTemplate\b([^>]*)/?>)");
+        static const std::regex kSegTmplRe(R"(<SegmentTemplate\b([^>]*)(?:/>|>([\s\S]*?)</SegmentTemplate>))");
+        static const std::regex kSTagRe(R"(<S\b([^>]*)/?>)");
 
         uint32_t vid_idx = 0, aud_idx = 0;
         auto abegin = std::sregex_iterator(text.begin(), text.end(), kAdaptRe);
@@ -896,9 +997,11 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
             if (lang.empty()) lang = "und";
 
             std::string adapt_tmpl_attrs;
+            std::string adapt_tmpl_body;
             std::smatch tm_match;
             if (std::regex_search(adapt_body, tm_match, kSegTmplRe)) {
                 adapt_tmpl_attrs = tm_match[1].str();
+                if (tm_match.size() > 2) adapt_tmpl_body = tm_match[2].str();
             }
 
             auto rbegin = std::sregex_iterator(adapt_body.begin(), adapt_body.end(), kRepRe);
@@ -935,9 +1038,11 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                 tr.playlist_url = base_url;
 
                 std::string tmpl_attrs = adapt_tmpl_attrs;
+                std::string tmpl_body = adapt_tmpl_body;
                 std::smatch rtm;
                 if (std::regex_search(rep_body, rtm, kSegTmplRe)) {
                     tmpl_attrs = rtm[1].str();
+                    if (rtm.size() > 2) tmpl_body = rtm[2].str();
                 }
 
                 std::smatch bm;
@@ -945,7 +1050,7 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                     std::string init_pat = ExtractXmlAttr(tmpl_attrs, "initialization");
                     std::string media_pat = ExtractXmlAttr(tmpl_attrs, "media");
                     int start_num = 1;
-                    int count = 3;
+                    int count = 0;
                     try {
                         std::string sn = ExtractXmlAttr(tmpl_attrs, "startNumber");
                         if (!sn.empty()) start_num = std::stoi(sn);
@@ -953,17 +1058,50 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                         if (!sc.empty()) count = std::stoi(sc);
                     } catch (...) {}
 
+                    int timeline_count = 0;
+                    if (!tmpl_body.empty()) {
+                        for (auto sit = std::sregex_iterator(tmpl_body.begin(), tmpl_body.end(), kSTagRe); sit != std::sregex_iterator(); ++sit) {
+                            std::string s_attrs = (*sit)[1].str();
+                            int r = 0;
+                            std::string r_str = ExtractXmlAttr(s_attrs, "r");
+                            if (!r_str.empty()) {
+                                try { r = std::stoi(r_str); } catch (...) {}
+                            }
+                            timeline_count += 1 + (r > 0 ? r : 0);
+                        }
+                    }
+                    if (timeline_count > 0) {
+                        count = timeline_count;
+                    }
+
+                    if (count <= 0) {
+                        uint64_t timescale = 1;
+                        std::string ts_str = ExtractXmlAttr(tmpl_attrs, "timescale");
+                        if (!ts_str.empty()) {
+                            try { timescale = std::stoull(ts_str); } catch (...) {}
+                        }
+                        if (timescale == 0) timescale = 1;
+
+                        uint64_t seg_dur = 0;
+                        std::string dur_str = ExtractXmlAttr(tmpl_attrs, "duration");
+                        if (!dur_str.empty()) {
+                            try { seg_dur = std::stoull(dur_str); } catch (...) {}
+                        }
+
+                        if (mpd_duration_sec > 0.0 && seg_dur > 0) {
+                            double seg_duration_sec = static_cast<double>(seg_dur) / static_cast<double>(timescale);
+                            if (seg_duration_sec > 0.0) {
+                                count = static_cast<int>(std::ceil(mpd_duration_sec / seg_duration_sec));
+                            }
+                        }
+                    }
+                    if (count <= 0) count = 3;
+
                     if (!init_pat.empty()) {
-                        size_t pos = init_pat.find("$RepresentationID$");
-                        if (pos != std::string::npos) init_pat.replace(pos, 18, rep_id);
-                        tr.init_url = ResolveUrl(base_url, init_pat);
+                        tr.init_url = ResolveUrl(base_url, ExpandDashTemplate(init_pat, rep_id, start_num, bw));
                     }
                     for (int n = start_num; n < start_num + count; ++n) {
-                        std::string m_rel = media_pat;
-                        size_t pos = m_rel.find("$RepresentationID$");
-                        if (pos != std::string::npos) m_rel.replace(pos, 18, rep_id);
-                        size_t npos = m_rel.find("$Number$");
-                        if (npos != std::string::npos) m_rel.replace(npos, 8, std::to_string(n));
+                        std::string m_rel = ExpandDashTemplate(media_pat, rep_id, n, bw);
                         SegmentItem seg;
                         seg.index = static_cast<uint32_t>(tr.segments.size());
                         seg.url = ResolveUrl(base_url, m_rel);
@@ -981,7 +1119,7 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                     seg.method = meta.drm_protected ? "CENC" : "NONE";
                     tr.segments.push_back(std::move(seg));
                 }
-                tr.duration_sec = tr.segments.size() * 2.0;
+                tr.duration_sec = (mpd_duration_sec > 0.0) ? mpd_duration_sec : (tr.segments.size() * 2.0);
                 meta.tracks.push_back(std::move(tr));
             }
         }
@@ -1165,6 +1303,7 @@ bool DownloadAndAssembleTrack(
 
     uint32_t workers_count = std::clamp<uint32_t>(opts.thread_count, 1u, static_cast<uint32_t>(total_segs));
     std::vector<std::thread> workers;
+    auto start_time = std::chrono::steady_clock::now();
 
     for (uint32_t w = 0; w < workers_count; ++w) {
         workers.emplace_back([&]() {
@@ -1248,6 +1387,9 @@ bool DownloadAndAssembleTrack(
                     double pct = (static_cast<double>(done) * 100.0) / static_cast<double>(total_segs);
                     double dl_mb = static_cast<double>(tot_dl) / 1048576.0;
                     double est_tot_mb = dl_mb / std::max(0.01, pct / 100.0);
+                    auto now = std::chrono::steady_clock::now();
+                    double elapsed_sec = std::chrono::duration<double>(now - start_time).count();
+                    double speed_mbps = (elapsed_sec > 0.1) ? (dl_mb / elapsed_sec) : 0.0;
                     std::string prefix = "Vid";
                     if (track.media_type == "AUDIO") prefix = "Aud";
                     else if (track.media_type == "SUBTITLES") prefix = "Sub";
@@ -1255,7 +1397,8 @@ bool DownloadAndAssembleTrack(
                               << " | " << (track.bandwidth / 1000) << " Kbps | "
                               << done << "/" << total_segs << " "
                               << std::fixed << std::setprecision(2) << pct << "% | "
-                              << dl_mb << "MB/" << est_tot_mb << "MB | 5.00MBps\n" << std::flush;
+                              << dl_mb << "MB/" << est_tot_mb << "MB | "
+                              << speed_mbps << "MBps\n" << std::flush;
                 }
             }
         });
@@ -1398,8 +1541,12 @@ int main(int argc, char* argv[]) {
     auto sel_subs = SelectTracks(meta.tracks, "SUBTITLES", opts.select_subtitle);
 
     std::vector<TrackItem> chosen;
-    chosen.insert(chosen.end(), sel_video.begin(), sel_video.end());
-    chosen.insert(chosen.end(), sel_audio.begin(), sel_audio.end());
+    if (!opts.drop_video) {
+        chosen.insert(chosen.end(), sel_video.begin(), sel_video.end());
+    }
+    if (!opts.drop_audio) {
+        chosen.insert(chosen.end(), sel_audio.begin(), sel_audio.end());
+    }
     chosen.insert(chosen.end(), sel_subs.begin(), sel_subs.end());
 
     if (chosen.empty()) {
@@ -1432,7 +1579,11 @@ int main(int argc, char* argv[]) {
         ff_args.push_back(std::to_string(idx));
     }
 
-    if (opts.mux_format == "mp4") {
+    if (opts.mux_format == "m4a") {
+        ff_args.insert(ff_args.end(), {"-c:a", "copy", "-vn"});
+    } else if (opts.mux_format == "mp3") {
+        ff_args.insert(ff_args.end(), {"-c:a", "libmp3lame", "-q:a", "2", "-vn"});
+    } else if (opts.mux_format == "mp4") {
         bool has_subs = false;
         for (const auto& [tr, _] : assembled_inputs) {
             if (tr.media_type == "SUBTITLES") has_subs = true;

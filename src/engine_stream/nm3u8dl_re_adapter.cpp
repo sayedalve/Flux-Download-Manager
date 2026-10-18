@@ -18,6 +18,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <csignal>
 #include <fcntl.h>
@@ -393,14 +394,33 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::WriteRestrictedResponseFile(
     std::filesystem::path rsp_path = task_tmp_dir / filename;
 
 #ifdef _WIN32
+    SECURITY_ATTRIBUTES sa;
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = FALSE;
+    PSECURITY_DESCRIPTOR pSD = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;GA;;;SY)(A;;GA;;;OW)",
+            SDDL_REVISION_1,
+            &pSD,
+            nullptr)) {
+        sa.lpSecurityDescriptor = pSD;
+    } else {
+        sa.lpSecurityDescriptor = nullptr;
+    }
+
     HANDLE hFile = CreateFileW(
         rsp_path.wstring().c_str(),
         GENERIC_WRITE,
         0, // Exclusive access (no sharing while writing credentials)
-        nullptr,
+        &sa,
         CREATE_ALWAYS,
         FILE_ATTRIBUTE_TEMPORARY,
         nullptr);
+
+    if (pSD) {
+        LocalFree(pSD);
+    }
+
     if (hFile == INVALID_HANDLE_VALUE) {
         return Result<std::filesystem::path>::Err("ERR_STORAGE_RSP", "Cannot create restricted response file");
     }
@@ -1210,6 +1230,16 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     }
 
     std::string watch_url = task.url;
+    auto is_raw_googlevideo = [](std::string_view u) {
+        return u.find("googlevideo.com") != std::string_view::npos || u.find("videoplayback") != std::string_view::npos;
+    };
+    if (is_raw_googlevideo(watch_url) || watch_url.empty()) {
+        if (!task.page_url.empty() && !is_raw_googlevideo(task.page_url)) {
+            watch_url = task.page_url;
+        } else {
+            watch_url.clear();
+        }
+    }
     std::string video_url;
     std::string audio_url;
     std::string hls_manifest_url;
@@ -1255,7 +1285,14 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 }
                 if (video_url.empty()) video_url = StripGooglevideoRangeParams(root["videoUrl"].as_string());
                 if (audio_url.empty()) audio_url = StripGooglevideoRangeParams(root["audioUrl"].as_string());
-                if (watch_url.empty()) watch_url = root["watchUrl"].as_string();
+                if (watch_url.empty() || is_raw_googlevideo(watch_url)) {
+                    std::string w = root["watchUrl"].as_string();
+                    if (!w.empty() && !is_raw_googlevideo(w)) {
+                        watch_url = w;
+                    } else if (!root["videoId"].as_string().empty()) {
+                        watch_url = "https://www.youtube.com/watch?v=" + root["videoId"].as_string();
+                    }
+                }
                 hls_manifest_url = root["hlsManifestUrl"].as_string();
                 dash_manifest_url = root["dashManifestUrl"].as_string();
                 if (root["requiresCipherExtraction"].as_bool(false) && video_url.empty()) requires_cipher = true;
@@ -1266,6 +1303,17 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
 
     if (video_url.empty() && task.url.find("googlevideo.com") != std::string::npos) {
         video_url = StripGooglevideoRangeParams(task.url);
+    }
+
+    if (watch_url.empty() || is_raw_googlevideo(watch_url)) {
+        std::string src_for_id = (!task.url.empty() && is_raw_googlevideo(task.url)) ? task.url : video_url;
+        std::smatch id_m;
+        static const std::regex kYtIdParamRe(R"([?&](?:id|docid)=([a-zA-Z0-9_-]{11}))");
+        if (std::regex_search(src_for_id, id_m, kYtIdParamRe)) {
+            watch_url = "https://www.youtube.com/watch?v=" + id_m[1].str();
+        } else if (!task.page_url.empty() && !is_raw_googlevideo(task.page_url)) {
+            watch_url = task.page_url;
+        }
     }
 
     if (!video_url.empty() && (video_url == watch_url || PathSanitizer::IsWebpageWatchUrl(video_url))) {
@@ -1500,10 +1548,11 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         else if (task.headers.count("Cookie")) cookie_str = task.headers.at("Cookie");
         else if (task.headers.count("cookie")) cookie_str = task.headers.at("cookie");
         if (!cookie_str.empty()) {
-            std::ofstream cfs(yt_cfg_file, std::ios::trunc);
-            if (cfs) {
-                cfs << "--add-header\nCookie: " << cookie_str << "\n";
-            }
+            std::vector<std::string> cfg_lines = {
+                "--add-header",
+                "Cookie: " + cookie_str
+            };
+            WriteRestrictedResponseFile(task_tmp_dir, "yt_config.txt", cfg_lines);
         }
 
         std::string out_tmpl = (task_tmp_dir / ("output.%(ext)s")).string();
@@ -1512,9 +1561,9 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             ytdlp_fmt = "bestaudio[ext=m4a]/bestaudio/best";
         } else if (target_height > 0) {
             std::string hs = std::to_string(target_height);
-            ytdlp_fmt = "bestvideo[height=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height=" + hs + "]+bestaudio/"
-                        "bestvideo[height<=" + hs + "][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=" + hs + "]+bestaudio/"
-                        "best[height<=" + hs + "]/best";
+            ytdlp_fmt = "bestvideo[height=" + hs + "]+bestaudio/bestvideo[height<=" + hs + "]+bestaudio/best[height<=" + hs + "]/best";
+        } else if (!req_filter.empty() && req_filter != "best" && std::all_of(req_filter.begin(), req_filter.end(), ::isdigit)) {
+            ytdlp_fmt = req_filter + "+bestaudio/best";
         }
         std::vector<std::string> yt_args = {
             "--newline",
@@ -1542,7 +1591,13 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         auto parse_yt_line = [&](const std::string& line) {
             if (line.empty()) return;
             OPENIDM_LOG_INFO("YtDlpWorker", line);
-            if (line.find("ERROR:") != std::string::npos) {
+            if (line.find("ERROR:") != std::string::npos ||
+                line.find("error:") != std::string::npos ||
+                line.find("WARNING:") != std::string::npos ||
+                line.find("Sign in") != std::string::npos ||
+                line.find("bot") != std::string::npos ||
+                line.find("Private video") != std::string::npos ||
+                line.find("unavailable") != std::string::npos) {
                 last_yt_err = line;
             }
             if (line.find("[Merger]") != std::string::npos || line.find("Merging formats") != std::string::npos) {
@@ -1626,7 +1681,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             char rbuf[4096];
             ssize_t n = 0;
             while ((n = ::read(pipefd[0], rbuf, sizeof(rbuf))) > 0) {
-                if (cancel_requested.load()) {
+                if (cancel_requested.load() || pause_requested.load()) {
                     kill(pid, SIGTERM);
                     break;
                 }
@@ -1673,7 +1728,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 char rbuf[4096];
                 DWORD got = 0;
                 while (ReadFile(hReadPipe, rbuf, sizeof(rbuf), &got, nullptr) && got > 0) {
-                    if (cancel_requested.load()) {
+                    if (cancel_requested.load() || pause_requested.load()) {
                         TerminateProcess(pi.hProcess, 1);
                         break;
                     }
@@ -1684,10 +1739,13 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                         line_buf.erase(0, nl + 1);
                     }
                 }
-                if (!line_buf.empty()) parse_yt_line(line_buf);
-                WaitForSingleObject(pi.hProcess, 15000);
+                WaitForSingleObject(pi.hProcess, 300000);
                 DWORD wcode = 1;
                 GetExitCodeProcess(pi.hProcess, &wcode);
+                if (wcode == STILL_ACTIVE) {
+                    TerminateProcess(pi.hProcess, 1);
+                    wcode = 259;
+                }
                 yt_exit = static_cast<int>(wcode);
                 CloseHandle(pi.hThread);
                 CloseHandle(pi.hProcess);
@@ -1709,6 +1767,11 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             task.state = TaskState::kCanceled;
             task.status_detail = "Canceled";
             return Result<std::filesystem::path>::Err("ERR_CANCELED", "YouTube download canceled by user");
+        }
+        if (pause_requested.load()) {
+            task.state = TaskState::kPaused;
+            task.status_detail = "Paused";
+            return Result<std::filesystem::path>::Err("ERR_PAUSED", "YouTube download paused by user");
         }
 
         std::filesystem::path actual_output = task_tmp_dir / ("output." + fmt);
@@ -1753,6 +1816,15 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             if (last_yt_err.find("DRM") != std::string::npos || last_yt_err.find("protected") != std::string::npos) {
                 task.error_code = "ERR_STREAM_DRM_PROTECTED";
                 task.error_message = "Stream uses unsupported DRM protection. Flux does not circumvent DRM.";
+            } else if (last_yt_err.find("Sign in") != std::string::npos || last_yt_err.find("bot") != std::string::npos) {
+                task.error_code = "ERR_YOUTUBE_BOT_DETECTION";
+                task.error_message = "YouTube bot detection triggered. Try exporting cookies or signing in.";
+            } else if (last_yt_err.find("Private video") != std::string::npos || last_yt_err.find("members-only") != std::string::npos) {
+                task.error_code = "ERR_YOUTUBE_PRIVATE_VIDEO";
+                task.error_message = "This YouTube video is private or members-only.";
+            } else if (last_yt_err.find("403") != std::string::npos || last_yt_err.find("Forbidden") != std::string::npos) {
+                task.error_code = "ERR_YOUTUBE_EXTRACTION_FAILED";
+                task.error_message = "YouTube extraction failed: 403 Forbidden. " + last_yt_err;
             } else if (is_youtube_host) {
                 task.error_code = "ERR_YOUTUBE_EXTRACTION_FAILED";
                 task.error_message = last_yt_err.empty() ? ("yt-dlp exited with code " + std::to_string(yt_exit)) : last_yt_err;
@@ -1863,8 +1935,17 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 return true;
             });
         ofs.close();
+        if (cancel_requested.load()) {
+            return Result<void>::Err("ERR_CANCELED", "Download canceled");
+        }
+        if (pause_requested.load()) {
+            return Result<void>::Err("ERR_PAUSED", "Download paused");
+        }
         if (!res.ok()) {
             return Result<void>::Err(res.error->code, "Failed to download YouTube " + label + ": " + res.error->message);
+        }
+        if (track_total > 0 && track_dl != track_total) {
+            return Result<void>::Err("ERR_YOUTUBE_TRUNCATED_TRACK", "Downloaded YouTube " + label + " is truncated");
         }
         if (std::filesystem::file_size(dest_path, ec) == 0) {
             return Result<void>::Err("ERR_YOUTUBE_EMPTY_TRACK", "Downloaded YouTube " + label + " is empty (0 bytes)");

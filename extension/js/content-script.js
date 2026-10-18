@@ -220,9 +220,16 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
   let activeOverlays = scanAndAttachVideoOverlays(doc, onDownloadClick);
 
   const refreshPositions = () => {
-    for (const item of activeOverlays) {
+    activeOverlays = activeOverlays.filter(item => {
+      if (item.video && item.video.isConnected === false) {
+        if (item.hostEl && typeof item.hostEl.remove === "function") {
+          item.hostEl.remove();
+        }
+        return false;
+      }
       item.reposition();
-    }
+      return true;
+    });
   };
 
   const rescanAndRefresh = () => {
@@ -340,7 +347,7 @@ function handleLinkClick(ev) {
       // IDM Alt-key bypass behavior: user explicitly requested browser-native download
       console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: isBlobOrData ? (href.slice(0, 48) + "...") : href, reason: "ALT_KEY_BYPASS", mechanism });
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({ action: "bypassNextDownload", correlationId });
+        chrome.runtime.sendMessage({ action: "bypassNextDownload", url: href, correlationId });
       }
       return;
     }
@@ -356,7 +363,7 @@ function handleLinkClick(ev) {
       return;
     }
 
-    if (ev.button !== undefined && ev.button !== 0 && ev.button !== 1) {
+    if (ev.button !== undefined && ev.button !== 0) {
       console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "UNSUPPORTED_BUTTON", mechanism });
       return;
     }
@@ -420,7 +427,7 @@ function handleLinkClick(ev) {
       return;
     }
     anchor.__fluxClickInFlight = true;
-    setTimeout(() => { delete anchor.__fluxClickInFlight; }, 4000);
+    setTimeout(() => { delete anchor.__fluxClickInFlight; }, 10000);
 
     // Record link click metadata for correlation in chrome.downloads.onDeterminingFilename
     if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
@@ -452,6 +459,7 @@ function handleLinkClick(ev) {
           isFrame,
           correlationId
         }, (response) => {
+          delete anchor.__fluxClickInFlight;
           if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError) {
             triggerBrowserFallback(anchor, href);
             return;
@@ -561,11 +569,8 @@ function injectDeepSearchScript() {
 function initContentScript() {
   if (typeof document === "undefined" || typeof window === "undefined") return;
 
-  // 1. Intercept link clicks with capture phase at both window and document level
+  // 1. Intercept link clicks with capture phase at window level
   window.addEventListener("click", handleLinkClick, { capture: true, passive: false });
-  window.addEventListener("auxclick", handleLinkClick, { capture: true, passive: false });
-  document.addEventListener("click", handleLinkClick, { capture: true, passive: false });
-  document.addEventListener("auxclick", handleLinkClick, { capture: true, passive: false });
 
   // 2. Listen to media playback events with capture phase
   document.addEventListener("play", handleMediaPlaybackEvent, true);

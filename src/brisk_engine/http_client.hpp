@@ -66,8 +66,21 @@ public:
     bool HasError() const { return state == State::kError; }
 };
 
+struct HttpNetworkOptions {
+    std::string proxy_mode{"system"};                 // "direct", "system", "manual"
+    std::string proxy_server;                         // e.g. "http://127.0.0.1:8080"
+    std::string proxy_bypass;                         // e.g. "<local>;*.internal"
+    std::string proxy_username;
+    std::string proxy_password;                       // Decrypted plaintext for WinHTTP API
+    std::string server_auth_username;
+    std::string server_auth_password;                 // Decrypted plaintext for WinHTTP API
+    bool enable_integrated_auth{true};                // Windows Negotiate / NTLM autologon
+};
+
 class HttpClient {
 public:
+    using HttpNetworkOptions = openidm::brisk::HttpNetworkOptions;
+
     static Result<ParsedUrl> ParseUrl(std::string_view url);
     static std::string ResolveRedirectTarget(const ParsedUrl& base, const std::string& loc);
 
@@ -82,17 +95,6 @@ public:
     // Performs DNS resolution on the hostname and returns true if any resolved address
     // belongs to a private, loopback, or internal address space.
     static bool CheckHostResolvesToPrivate(const std::string& host);
-
-    struct HttpNetworkOptions {
-        std::string proxy_mode{"system"};                 // "direct", "system", "manual"
-        std::string proxy_server;                         // e.g. "http://127.0.0.1:8080"
-        std::string proxy_bypass;                         // e.g. "<local>;*.internal"
-        std::string proxy_username;
-        std::string proxy_password;                       // Decrypted plaintext for WinHTTP API
-        std::string server_auth_username;
-        std::string server_auth_password;                 // Decrypted plaintext for WinHTTP API
-        bool enable_integrated_auth{true};                // Windows Negotiate / NTLM autologon
-    };
 
     // Executes an HTTP/HTTPS GET request with optional byte range [range_start, range_end].
     // Calls on_headers once response headers arrive; if on_headers returns false, aborts before reading body.

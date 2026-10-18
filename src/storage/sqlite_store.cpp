@@ -65,6 +65,7 @@ Result<void> SqliteStore::Open(const std::filesystem::path& db_path) {
             task_id                 TEXT PRIMARY KEY,
             task_type               TEXT NOT NULL,
             state                   TEXT NOT NULL,
+            pause_reason            TEXT NOT NULL DEFAULT 'NONE',
             queue_id                TEXT NOT NULL DEFAULT 'main' REFERENCES queues(queue_id),
             queue_order             INTEGER NOT NULL DEFAULT 0,
             category                TEXT NOT NULL DEFAULT 'General',
@@ -73,10 +74,15 @@ Result<void> SqliteStore::Open(const std::filesystem::path& db_path) {
             file_name               TEXT NOT NULL,
             save_dir                TEXT NOT NULL,
             part_path               TEXT,
+            correlation_id          TEXT,
             total_bytes             INTEGER NOT NULL DEFAULT 0,
             downloaded_bytes        INTEGER NOT NULL DEFAULT 0,
+            uploaded_bytes          INTEGER NOT NULL DEFAULT 0,
             range_supported         INTEGER NOT NULL DEFAULT 0,
             max_connections         INTEGER NOT NULL DEFAULT 8,
+            conflict_policy         TEXT NOT NULL DEFAULT 'auto_rename',
+            scheduled               INTEGER NOT NULL DEFAULT 0,
+            schedule_time_local     TEXT,
             speed_limit_bps         INTEGER NOT NULL DEFAULT 0,
             etag                    TEXT,
             last_modified           TEXT,
@@ -125,6 +131,12 @@ Result<void> SqliteStore::Open(const std::filesystem::path& db_path) {
     try_add_col("ALTER TABLE tasks ADD COLUMN speed_limit_bps INTEGER NOT NULL DEFAULT 0;");
     try_add_col("ALTER TABLE tasks ADD COLUMN alternate_urls_json TEXT NOT NULL DEFAULT '[]';");
     try_add_col("ALTER TABLE tasks ADD COLUMN schedule_stop_time_local TEXT;");
+    try_add_col("ALTER TABLE tasks ADD COLUMN pause_reason TEXT NOT NULL DEFAULT 'NONE';");
+    try_add_col("ALTER TABLE tasks ADD COLUMN correlation_id TEXT;");
+    try_add_col("ALTER TABLE tasks ADD COLUMN uploaded_bytes INTEGER NOT NULL DEFAULT 0;");
+    try_add_col("ALTER TABLE tasks ADD COLUMN conflict_policy TEXT NOT NULL DEFAULT 'auto_rename';");
+    try_add_col("ALTER TABLE tasks ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;");
+    try_add_col("ALTER TABLE tasks ADD COLUMN schedule_time_local TEXT;");
 
     return Result<void>::Ok();
 }
@@ -176,16 +188,18 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
 
     const char* sql = R"SQL(
         INSERT INTO tasks (
-            task_id, task_type, state, queue_id, queue_order, category,
-            url, page_url, file_name, save_dir, part_path,
-            total_bytes, downloaded_bytes, range_supported, max_connections, speed_limit_bps,
+            task_id, task_type, state, pause_reason, queue_id, queue_order, category,
+            url, page_url, file_name, save_dir, part_path, correlation_id,
+            total_bytes, downloaded_bytes, uploaded_bytes, range_supported, max_connections,
+            conflict_policy, scheduled, schedule_time_local, speed_limit_bps,
             etag, last_modified, headers_json, encrypted_auth_blob, stream_options_json,
             expected_sha256, error_code, error_message, alternate_urls_json, schedule_stop_time_local,
             created_at_ms, updated_at_ms, completed_at_ms
         ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?
@@ -193,6 +207,7 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
         ON CONFLICT(task_id) DO UPDATE SET
             task_type=excluded.task_type,
             state=excluded.state,
+            pause_reason=excluded.pause_reason,
             queue_id=excluded.queue_id,
             queue_order=excluded.queue_order,
             category=excluded.category,
@@ -201,10 +216,15 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
             file_name=excluded.file_name,
             save_dir=excluded.save_dir,
             part_path=excluded.part_path,
+            correlation_id=excluded.correlation_id,
             total_bytes=excluded.total_bytes,
             downloaded_bytes=excluded.downloaded_bytes,
+            uploaded_bytes=excluded.uploaded_bytes,
             range_supported=excluded.range_supported,
             max_connections=excluded.max_connections,
+            conflict_policy=excluded.conflict_policy,
+            scheduled=excluded.scheduled,
+            schedule_time_local=excluded.schedule_time_local,
             speed_limit_bps=excluded.speed_limit_bps,
             etag=excluded.etag,
             last_modified=excluded.last_modified,
@@ -227,6 +247,8 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
 
     std::string type_s = TaskTypeToString(task.task_type);
     std::string state_s = TaskStateToString(task.state);
+    std::string pause_s = PauseReasonToString(task.pause_reason);
+    std::string conflict_s = ConflictPolicyToString(task.conflict_policy);
     std::string headers_s = headers_obj.dump();
     std::string stream_s = stream_obj.dump();
     json::Array alt_arr;
@@ -240,40 +262,46 @@ Result<void> SqliteStore::UpsertTask(const TaskModel& task) {
     sqlite3_bind_text(stmt, 1, task.task_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, type_s.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, state_s.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 4, task.queue_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 5, task.queue_order);
-    sqlite3_bind_text(stmt, 6, task.category.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 7, task.url.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 8, task.page_url.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 9, task.file_name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 10, task.save_dir.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 11, task.part_path.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 12, static_cast<int64_t>(task.total_bytes));
-    sqlite3_bind_int64(stmt, 13, static_cast<int64_t>(task.downloaded_bytes));
-    sqlite3_bind_int(stmt, 14, task.range_supported ? 1 : 0);
-    sqlite3_bind_int(stmt, 15, static_cast<int>(task.max_connections));
-    sqlite3_bind_int64(stmt, 16, static_cast<int64_t>(task.speed_limit_bps));
-    sqlite3_bind_text(stmt, 17, task.etag.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 18, task.last_modified.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 19, headers_s.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, pause_s.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, task.queue_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 6, task.queue_order);
+    sqlite3_bind_text(stmt, 7, task.category.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 8, task.url.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 9, task.page_url.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 10, task.file_name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 11, task.save_dir.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 12, task.part_path.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 13, task.correlation_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 14, static_cast<int64_t>(task.total_bytes));
+    sqlite3_bind_int64(stmt, 15, static_cast<int64_t>(task.downloaded_bytes));
+    sqlite3_bind_int64(stmt, 16, static_cast<int64_t>(task.uploaded_bytes));
+    sqlite3_bind_int(stmt, 17, task.range_supported ? 1 : 0);
+    sqlite3_bind_int(stmt, 18, static_cast<int>(task.max_connections));
+    sqlite3_bind_text(stmt, 19, conflict_s.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 20, task.scheduled ? 1 : 0);
+    sqlite3_bind_text(stmt, 21, task.schedule_time_local.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 22, static_cast<int64_t>(task.speed_limit_bps));
+    sqlite3_bind_text(stmt, 23, task.etag.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 24, task.last_modified.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 25, headers_s.c_str(), -1, SQLITE_TRANSIENT);
     if (encrypted_auth.empty()) {
-        sqlite3_bind_null(stmt, 20);
-    } else {
-        sqlite3_bind_blob(stmt, 20, encrypted_auth.data(), static_cast<int>(encrypted_auth.size()), SQLITE_TRANSIENT);
-    }
-    sqlite3_bind_text(stmt, 21, stream_s.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 22, task.expected_sha256.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 23, task.error_code.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 24, task.error_message.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 25, alt_s.c_str(), -1, SQLITE_TRANSIENT);
-    if (task.schedule_stop_time_local.empty()) {
         sqlite3_bind_null(stmt, 26);
     } else {
-        sqlite3_bind_text(stmt, 26, task.schedule_stop_time_local.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_blob(stmt, 26, encrypted_auth.data(), static_cast<int>(encrypted_auth.size()), SQLITE_TRANSIENT);
     }
-    sqlite3_bind_int64(stmt, 27, created_ms);
-    sqlite3_bind_int64(stmt, 28, now_ms);
-    sqlite3_bind_int64(stmt, 29, task.completed_at_ms);
+    sqlite3_bind_text(stmt, 27, stream_s.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 28, task.expected_sha256.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 29, task.error_code.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 30, task.error_message.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 31, alt_s.c_str(), -1, SQLITE_TRANSIENT);
+    if (task.schedule_stop_time_local.empty()) {
+        sqlite3_bind_null(stmt, 32);
+    } else {
+        sqlite3_bind_text(stmt, 32, task.schedule_stop_time_local.c_str(), -1, SQLITE_TRANSIENT);
+    }
+    sqlite3_bind_int64(stmt, 33, created_ms);
+    sqlite3_bind_int64(stmt, 34, now_ms);
+    sqlite3_bind_int64(stmt, 35, task.completed_at_ms);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -424,13 +452,131 @@ Result<std::vector<Segment>> SqliteStore::LoadSegmentsLocked(const std::string& 
     return Result<std::vector<Segment>>::Ok(std::move(out));
 }
 
-Result<std::optional<TaskModel>> SqliteStore::GetTask(const std::string& task_id) {
-    auto all = ListTasks();
-    if (!all.ok()) return Result<std::optional<TaskModel>>::Err(all.error->code, all.error->message);
-    for (auto& t : *all.value) {
-        if (t.task_id == task_id) return Result<std::optional<TaskModel>>::Ok(std::move(t));
+static TaskModel ParseTaskRow(sqlite3_stmt* stmt) {
+    TaskModel t;
+    t.task_id = ColText(stmt, 0);
+    t.task_type = TaskTypeFromString(ColText(stmt, 1));
+    t.state = TaskStateFromString(ColText(stmt, 2));
+    t.pause_reason = PauseReasonFromString(ColText(stmt, 3));
+    t.queue_id = ColText(stmt, 4);
+    t.queue_order = sqlite3_column_int(stmt, 5);
+    t.category = ColText(stmt, 6);
+    t.url = ColText(stmt, 7);
+    t.page_url = ColText(stmt, 8);
+    t.file_name = ColText(stmt, 9);
+    t.save_dir = ColText(stmt, 10);
+    t.part_path = ColText(stmt, 11);
+    t.correlation_id = ColText(stmt, 12);
+    t.total_bytes = static_cast<uint64_t>(sqlite3_column_int64(stmt, 13));
+    t.downloaded_bytes = static_cast<uint64_t>(sqlite3_column_int64(stmt, 14));
+    t.uploaded_bytes = static_cast<uint64_t>(sqlite3_column_int64(stmt, 15));
+    t.range_supported = sqlite3_column_int(stmt, 16) != 0;
+    t.max_connections = static_cast<uint32_t>(sqlite3_column_int(stmt, 17));
+    t.conflict_policy = ConflictPolicyFromString(ColText(stmt, 18));
+    t.scheduled = sqlite3_column_int(stmt, 19) != 0;
+    t.schedule_time_local = ColText(stmt, 20);
+    t.speed_limit_bps = static_cast<uint64_t>(sqlite3_column_int64(stmt, 21));
+    t.etag = ColText(stmt, 22);
+    t.last_modified = ColText(stmt, 23);
+
+    try {
+        auto h_val = json::Parse(ColText(stmt, 24));
+        for (const auto& [k, v] : h_val.as_object()) {
+            t.headers[k] = v.as_string();
+        }
+    } catch (...) {}
+
+    const void* blob_ptr = sqlite3_column_blob(stmt, 25);
+    int blob_len = sqlite3_column_bytes(stmt, 25);
+    if (blob_ptr && blob_len > 0) {
+        std::vector<uint8_t> cipher(
+            static_cast<const uint8_t*>(blob_ptr),
+            static_cast<const uint8_t*>(blob_ptr) + blob_len);
+        auto plain = CryptoUtils::UnprotectSecret(cipher);
+        if (plain.ok() && !plain.value->empty()) {
+            try {
+                auto a_val = json::Parse(*plain.value);
+                for (const auto& [k, v] : a_val.as_object()) {
+                    t.auth_headers[k] = v.as_string();
+                }
+            } catch (...) {}
+        }
     }
-    return Result<std::optional<TaskModel>>::Ok(std::nullopt);
+
+    try {
+        std::string s_json = ColText(stmt, 26);
+        if (!s_json.empty()) {
+            auto s_val = json::Parse(s_json);
+            t.stream_options.video_filter = s_val["video_filter"].as_string("best");
+            t.stream_options.audio_filter = s_val["audio_filter"].as_string("all");
+            t.stream_options.subtitle_filter = s_val["subtitle_filter"].as_string("all");
+            t.stream_options.output_format = s_val["output_format"].as_string("mp4");
+            t.stream_options.thread_count = static_cast<uint32_t>(s_val["thread_count"].as_int64(8));
+            t.stream_options.concurrent_download = s_val["concurrent_download"].as_bool(true);
+            t.stream_options.custom_hls_key_hex = s_val["custom_hls_key_hex"].as_string("");
+            t.stream_options.cached_manifest_body = s_val["cached_manifest_body"].as_string("");
+        }
+    } catch (...) {}
+
+    t.expected_sha256 = ColText(stmt, 27);
+    t.error_code = ColText(stmt, 28);
+    t.error_message = ColText(stmt, 29);
+
+    try {
+        std::string alt_json = ColText(stmt, 30);
+        if (!alt_json.empty()) {
+            auto alt_val = json::Parse(alt_json);
+            if (alt_val.is_array()) {
+                for (const auto& elem : alt_val.as_array()) {
+                    std::string u = elem.as_string();
+                    if (!u.empty()) t.alternate_urls.push_back(u);
+                }
+            }
+        }
+    } catch (...) {}
+
+    t.schedule_stop_time_local = ColText(stmt, 31);
+    t.created_at_ms = sqlite3_column_int64(stmt, 32);
+    t.updated_at_ms = sqlite3_column_int64(stmt, 33);
+    t.completed_at_ms = sqlite3_column_int64(stmt, 34);
+    return t;
+}
+
+Result<std::optional<TaskModel>> SqliteStore::GetTask(const std::string& task_id) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_db) return Result<std::optional<TaskModel>>::Err("ERR_SQLITE_CLOSED", "Database not open");
+
+    const char* sql = R"SQL(
+        SELECT task_id, task_type, state, pause_reason, queue_id, queue_order, category,
+               url, page_url, file_name, save_dir, part_path, correlation_id,
+               total_bytes, downloaded_bytes, uploaded_bytes, range_supported, max_connections,
+               conflict_policy, scheduled, schedule_time_local, speed_limit_bps,
+               etag, last_modified, headers_json, encrypted_auth_blob, stream_options_json,
+               expected_sha256, error_code, error_message, alternate_urls_json, schedule_stop_time_local,
+               created_at_ms, updated_at_ms, completed_at_ms
+        FROM tasks
+        WHERE task_id = ?;
+    )SQL";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return Result<std::optional<TaskModel>>::Err("ERR_SQLITE_PREPARE", sqlite3_errmsg(m_db));
+    }
+    sqlite3_bind_text(stmt, 1, task_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::optional<TaskModel> out;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        out = ParseTaskRow(stmt);
+    }
+    sqlite3_finalize(stmt);
+
+    if (out) {
+        auto seg_res = LoadSegmentsLocked(task_id);
+        if (seg_res.ok()) {
+            out->segments = std::move(*seg_res.value);
+        }
+    }
+    return Result<std::optional<TaskModel>>::Ok(std::move(out));
 }
 
 Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
@@ -439,9 +585,10 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
 
     std::vector<TaskModel> tasks;
     const char* sql = R"SQL(
-        SELECT task_id, task_type, state, queue_id, queue_order, category,
-               url, page_url, file_name, save_dir, part_path,
-               total_bytes, downloaded_bytes, range_supported, max_connections, speed_limit_bps,
+        SELECT task_id, task_type, state, pause_reason, queue_id, queue_order, category,
+               url, page_url, file_name, save_dir, part_path, correlation_id,
+               total_bytes, downloaded_bytes, uploaded_bytes, range_supported, max_connections,
+               conflict_policy, scheduled, schedule_time_local, speed_limit_bps,
                etag, last_modified, headers_json, encrypted_auth_blob, stream_options_json,
                expected_sha256, error_code, error_message, alternate_urls_json, schedule_stop_time_local,
                created_at_ms, updated_at_ms, completed_at_ms
@@ -454,88 +601,7 @@ Result<std::vector<TaskModel>> SqliteStore::ListTasks() {
         return Result<std::vector<TaskModel>>::Err("ERR_SQLITE_PREPARE", sqlite3_errmsg(m_db));
     }
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        TaskModel t;
-        t.task_id = ColText(stmt, 0);
-        t.task_type = TaskTypeFromString(ColText(stmt, 1));
-        t.state = TaskStateFromString(ColText(stmt, 2));
-        t.queue_id = ColText(stmt, 3);
-        t.queue_order = sqlite3_column_int(stmt, 4);
-        t.category = ColText(stmt, 5);
-        t.url = ColText(stmt, 6);
-        t.page_url = ColText(stmt, 7);
-        t.file_name = ColText(stmt, 8);
-        t.save_dir = ColText(stmt, 9);
-        t.part_path = ColText(stmt, 10);
-        t.total_bytes = static_cast<uint64_t>(sqlite3_column_int64(stmt, 11));
-        t.downloaded_bytes = static_cast<uint64_t>(sqlite3_column_int64(stmt, 12));
-        t.range_supported = sqlite3_column_int(stmt, 13) != 0;
-        t.max_connections = static_cast<uint32_t>(sqlite3_column_int(stmt, 14));
-        t.speed_limit_bps = static_cast<uint64_t>(sqlite3_column_int64(stmt, 15));
-        t.etag = ColText(stmt, 16);
-        t.last_modified = ColText(stmt, 17);
-
-        try {
-            auto h_val = json::Parse(ColText(stmt, 18));
-            for (const auto& [k, v] : h_val.as_object()) {
-                t.headers[k] = v.as_string();
-            }
-        } catch (...) {}
-
-        const void* blob_ptr = sqlite3_column_blob(stmt, 19);
-        int blob_len = sqlite3_column_bytes(stmt, 19);
-        if (blob_ptr && blob_len > 0) {
-            std::vector<uint8_t> cipher(
-                static_cast<const uint8_t*>(blob_ptr),
-                static_cast<const uint8_t*>(blob_ptr) + blob_len);
-            auto plain = CryptoUtils::UnprotectSecret(cipher);
-            if (plain.ok() && !plain.value->empty()) {
-                try {
-                    auto a_val = json::Parse(*plain.value);
-                    for (const auto& [k, v] : a_val.as_object()) {
-                        t.auth_headers[k] = v.as_string();
-                    }
-                } catch (...) {}
-            }
-        }
-
-        try {
-            std::string s_json = ColText(stmt, 20);
-            if (!s_json.empty()) {
-                auto s_val = json::Parse(s_json);
-                t.stream_options.video_filter = s_val["video_filter"].as_string("best");
-                t.stream_options.audio_filter = s_val["audio_filter"].as_string("all");
-                t.stream_options.subtitle_filter = s_val["subtitle_filter"].as_string("all");
-                t.stream_options.output_format = s_val["output_format"].as_string("mp4");
-                t.stream_options.thread_count = static_cast<uint32_t>(s_val["thread_count"].as_int64(8));
-                t.stream_options.concurrent_download = s_val["concurrent_download"].as_bool(true);
-                t.stream_options.custom_hls_key_hex = s_val["custom_hls_key_hex"].as_string("");
-                t.stream_options.cached_manifest_body = s_val["cached_manifest_body"].as_string("");
-            }
-        } catch (...) {}
-
-        t.expected_sha256 = ColText(stmt, 21);
-        t.error_code = ColText(stmt, 22);
-        t.error_message = ColText(stmt, 23);
-
-        try {
-            std::string alt_json = ColText(stmt, 24);
-            if (!alt_json.empty()) {
-                auto alt_val = json::Parse(alt_json);
-                if (alt_val.is_array()) {
-                    for (const auto& elem : alt_val.as_array()) {
-                        std::string u = elem.as_string();
-                        if (!u.empty()) t.alternate_urls.push_back(u);
-                    }
-                }
-            }
-        } catch (...) {}
-
-        t.schedule_stop_time_local = ColText(stmt, 25);
-        t.created_at_ms = sqlite3_column_int64(stmt, 26);
-        t.updated_at_ms = sqlite3_column_int64(stmt, 27);
-        t.completed_at_ms = sqlite3_column_int64(stmt, 28);
-
-        tasks.push_back(std::move(t));
+        tasks.push_back(ParseTaskRow(stmt));
     }
     sqlite3_finalize(stmt);
 

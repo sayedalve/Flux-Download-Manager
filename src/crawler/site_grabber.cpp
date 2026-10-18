@@ -221,15 +221,31 @@ Result<std::vector<GrabbedItem>> SiteGrabber::Crawl(
             current.url,
             headers,
             0,
-            1048576, // First 1MB of page
+            4194304, // First 4MB of page
             cfg.timeout_ms,
             cfg.allow_loopback,
             req_cancel,
-            nullptr,
+            [&](const brisk::HttpResponseMeta& meta) -> bool {
+                if (cancel_requested.load()) return false;
+                if (meta.status_code >= 400) return false;
+                std::string ct = ToLower(meta.content_type);
+                if (!ct.empty() && ct.find("text/html") == std::string::npos &&
+                    ct.find("application/xhtml+xml") == std::string::npos) {
+                    return false; // Skip non-HTML files early
+                }
+                return true;
+            },
             [&](const uint8_t* data, size_t len) -> bool {
                 if (cancel_requested.load()) return false;
+                if (html_body.size() + len > 4194304) {
+                    size_t allowed = 4194304 - html_body.size();
+                    if (allowed > 0) {
+                        html_body.append(reinterpret_cast<const char*>(data), allowed);
+                    }
+                    return false; // Cap at 4MB per HTML page
+                }
                 html_body.append(reinterpret_cast<const char*>(data), len);
-                return html_body.size() < 1048576; // Cap at 1MB per HTML page
+                return true;
             });
 
         if (!res.ok()) continue;

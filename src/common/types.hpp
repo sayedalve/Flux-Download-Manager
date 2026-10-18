@@ -126,8 +126,27 @@ enum class PauseReason {
     kNone,
     kUser,
     kSystemSuspend,
-    kError
+    kError,
+    kQueueSchedule
 };
+
+inline std::string PauseReasonToString(PauseReason r) {
+    switch (r) {
+        case PauseReason::kUser: return "USER";
+        case PauseReason::kSystemSuspend: return "SYSTEM_SUSPEND";
+        case PauseReason::kError: return "ERROR";
+        case PauseReason::kQueueSchedule: return "QUEUE_SCHEDULE";
+        default: return "NONE";
+    }
+}
+
+inline PauseReason PauseReasonFromString(const std::string& s) {
+    if (s == "USER") return PauseReason::kUser;
+    if (s == "SYSTEM_SUSPEND") return PauseReason::kSystemSuspend;
+    if (s == "ERROR") return PauseReason::kError;
+    if (s == "QUEUE_SCHEDULE") return PauseReason::kQueueSchedule;
+    return PauseReason::kNone;
+}
 
 struct TaskModel {
     std::string task_id;

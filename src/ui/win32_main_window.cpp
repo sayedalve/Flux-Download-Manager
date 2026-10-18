@@ -20,10 +20,12 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -346,8 +348,14 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
         }
         if (geom.task_rows[i].row_rect.Contains(x, y)) {
             std::string tip;
-            if (i < rows.size() && rows[i].is_filename_truncated && geom.task_rows[i].filename_rect.Contains(x, y)) {
-                tip = rows[i].full_filename_tooltip;
+            if (i < rows.size()) {
+                if (geom.task_rows[i].filename_rect.Contains(x, y)) {
+                    tip = rows[i].full_filename_tooltip;
+                } else if (!rows[i].full_status_tooltip.empty()) {
+                    tip = rows[i].full_status_tooltip;
+                } else {
+                    tip = rows[i].full_filename_tooltip;
+                }
             }
             return {HitTargetType::kTaskRow, static_cast<int>(i), geom.task_rows[i].task_id, tip};
         }
@@ -476,7 +484,7 @@ bool DesktopView::HandleMouseClick(int x, int y, bool double_click, size_t scrol
         case HitTargetType::kTaskRow: {
             SelectTask(hit.task_id);
             if (double_click) {
-                ActionOpenCompletedFile(true);
+                ActionOpenCompletedFile(false);
             }
             return true;
         }
@@ -1070,8 +1078,21 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
             row.progress_text = FormatBytes(t.downloaded_bytes) + " (Size Unknown)";
         }
 
-        uint64_t effective_size = (t.total_bytes > 0) ? t.total_bytes : t.downloaded_bytes;
-        row.size_text = (effective_size > 0) ? FormatSizePretty(effective_size) : "Unknown";
+        if (t.state == TaskState::kCompleted) {
+            row.size_text = (t.total_bytes > 0) ? FormatSizePretty(t.total_bytes) : (t.downloaded_bytes > 0 ? FormatSizePretty(t.downloaded_bytes) : "Unknown");
+        } else if (t.total_bytes > 0) {
+            if (t.downloaded_bytes > 0) {
+                row.size_text = FormatSizePretty(t.downloaded_bytes) + " / " + FormatSizePretty(t.total_bytes);
+            } else {
+                row.size_text = FormatSizePretty(t.total_bytes);
+            }
+        } else {
+            if (t.downloaded_bytes > 0) {
+                row.size_text = FormatSizePretty(t.downloaded_bytes) + " / Unknown";
+            } else {
+                row.size_text = "Unknown";
+            }
+        }
         row.added_time_text = FormatFriendlyTime(t.created_at_ms);
         row.upload_speed_text = (t.upload_speed_bps > 0) ? FormatSpeed(t.upload_speed_bps) : "0 KB/s";
         row.checked = (m_checked_task_ids.count(t.task_id) > 0);
@@ -1116,6 +1137,14 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
         } else if (t.state == TaskState::kCanceled) {
             row.status_text = "Canceled";
             row.status_indicator_color = {0xEF, 0x44, 0x44, 255};
+        }
+
+        if (!t.error_code.empty()) {
+            row.full_status_tooltip = t.error_code + (!t.error_message.empty() ? (": " + t.error_message) : "");
+        } else if (!t.status_detail.empty()) {
+            row.full_status_tooltip = t.status_detail;
+        } else {
+            row.full_status_tooltip = row.status_text;
         }
 
         row.speed_text = (t.state == TaskState::kDownloading) ? FormatSpeedKbps(t.speed_bps) : "0 KB/s";
@@ -2083,10 +2112,16 @@ SettingsCenterViewModel DesktopView::BuildSettingsCenterView() const {
 // -----------------------------------------------------------------------------
 
 Result<TaskModel> DesktopView::SubmitAddDownloadDialog(const AddDownloadDialogInput& input) {
-    auto parsed = brisk::HttpClient::ParseUrl(input.url);
-    if (!parsed.ok()) {
-        m_last_feedback_message = "Invalid URL: " + parsed.error->message;
-        return Result<TaskModel>::Err(parsed.error->code, parsed.error->message);
+    bool is_ftp = (input.url.find("ftp://") == 0);
+    bool is_torrent = (input.url.find("magnet:?") == 0 || input.url.rfind(".torrent") != std::string::npos);
+    bool is_rtsp_mms = (input.url.find("rtsp://") == 0 || input.url.find("mms://") == 0);
+
+    if (!is_ftp && !is_torrent && !is_rtsp_mms) {
+        auto parsed = brisk::HttpClient::ParseUrl(input.url);
+        if (!parsed.ok()) {
+            m_last_feedback_message = "Invalid URL: " + parsed.error->message;
+            return Result<TaskModel>::Err(parsed.error->code, parsed.error->message);
+        }
     }
 
     TaskModel t;
@@ -2098,7 +2133,14 @@ Result<TaskModel> DesktopView::SubmitAddDownloadDialog(const AddDownloadDialogIn
     t.schedule_time_local = input.schedule_time_local;
 
     bool is_youtube = (input.url.find("youtube.com") != std::string::npos || input.url.find("youtu.be") != std::string::npos);
-    if (input.is_stream || is_youtube || input.url.find(".m3u8") != std::string::npos) {
+    if (is_ftp) {
+        t.task_type = TaskType::kFtp;
+    } else if (is_torrent) {
+        t.task_type = TaskType::kTorrent;
+    } else if (is_rtsp_mms) {
+        t.task_type = TaskType::kRtsp;
+        t.category = "Video";
+    } else if (input.is_stream || is_youtube || input.url.find(".m3u8") != std::string::npos) {
         t.task_type = TaskType::kStreamHls;
         t.category = "Video";
         t.stream_options.video_filter = input.video_filter.empty() ? "best" : input.video_filter;
@@ -2119,6 +2161,10 @@ Result<TaskModel> DesktopView::SubmitAddDownloadDialog(const AddDownloadDialogIn
     if (t.file_name.empty()) {
         if (is_youtube) {
             t.file_name = "youtube_video.mp4";
+        } else if (is_torrent && input.url.rfind(".torrent") != std::string::npos) {
+            t.file_name = std::filesystem::path(input.url).filename().string();
+        } else if (is_torrent) {
+            t.file_name = "torrent_download";
         } else {
             auto derived = PathSanitizer::ExtractFromUrl(t.url);
             t.file_name = derived.empty() ? "download" : derived;
@@ -2189,14 +2235,21 @@ Result<void> DesktopView::TriggerToolbarAction(ToolbarActionId action_id) {
         case ToolbarActionId::kPause:        return ActionPauseSelected();
         case ToolbarActionId::kResume:       return ActionResumeSelected();
         case ToolbarActionId::kRetry:        return ActionRetrySelected();
-        case ToolbarActionId::kCancel:       return ActionCancelSelected();
-        case ToolbarActionId::kRemove:       return ActionRemoveSelectedFromList();
+        case ToolbarActionId::kRemove: {
+#ifdef _WIN32
+            if (m_hwnd) {
+                ShowDeleteConfirmationDialogWin32(m_hwnd, *this, m_controller);
+                return Result<void>::Ok();
+            }
+#endif
+            return ActionRemoveSelectedFromList();
+        }
         case ToolbarActionId::kClearHistory: {
             auto r = ActionClearCompletedHistory();
             return r.ok() ? Result<void>::Ok() : Result<void>::Err(r.error->code, r.error->message);
         }
         case ToolbarActionId::kOpenFolder: {
-            auto r = ActionOpenDestinationFolder(true);
+            auto r = ActionOpenDestinationFolder(false);
             return r.ok() ? Result<void>::Ok() : Result<void>::Err(r.error->code, r.error->message);
         }
         case ToolbarActionId::kAddUrl:
@@ -2224,7 +2277,7 @@ Result<void> DesktopView::TriggerRowPrimaryAction(const std::string& task_id) {
         case TaskState::kCanceled:
             return ActionRetrySelected();
         case TaskState::kCompleted: {
-            auto r = ActionOpenCompletedFile(true);
+            auto r = ActionOpenCompletedFile(false);
             return r.ok() ? Result<void>::Ok() : Result<void>::Err(r.error->code, r.error->message);
         }
         default:
@@ -2571,6 +2624,12 @@ bool DesktopView::HandleKeyShortcut(const std::string& key_chord) {
         return true;
     }
     if (key_chord == "Delete" || key_chord == "VK_DELETE") {
+#ifdef _WIN32
+        if (m_hwnd) {
+            ShowDeleteConfirmationDialogWin32(m_hwnd, *this, m_controller);
+            return true;
+        }
+#endif
         ActionRemoveSelectedFromList();
         return true;
     }
@@ -3342,13 +3401,20 @@ void ShowNewDownloadDialogWin32(
                 break;
             } else if (msg.wParam == VK_RETURN && GetFocus() != ctx.hBrowseBtn && GetFocus() != ctx.hCancelBtn) {
                 SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(5008, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hDownloadBtn));
-                break;
+                if (!IsWindow(hDlg)) break;
             }
         }
         if (!IsDialogMessageW(hDlg, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+
+    if (msg.message == WM_QUIT) {
+        PostQuitMessage(static_cast<int>(msg.wParam));
+    }
+    if (IsWindow(hDlg)) {
+        DestroyWindow(hDlg);
     }
 
     EnableWindow(hwnd_parent, TRUE);
@@ -3564,13 +3630,20 @@ bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, con
                 break;
             } else if (msg.wParam == VK_RETURN) {
                 SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(7002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hOkBtn));
-                break;
+                if (!IsWindow(hDlg)) break;
             }
         }
         if (!IsDialogMessageW(hDlg, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+
+    if (msg.message == WM_QUIT) {
+        PostQuitMessage(static_cast<int>(msg.wParam));
+    }
+    if (IsWindow(hDlg)) {
+        DestroyWindow(hDlg);
     }
 
     EnableWindow(hwnd_parent, TRUE);
@@ -3844,13 +3917,20 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
                     // Default enter action: Permanently Delete
                     SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6001, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hPermanentBtn));
                 }
-                break;
+                if (!IsWindow(hDlg)) break;
             }
         }
         if (!IsDialogMessageW(hDlg, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+
+    if (msg.message == WM_QUIT) {
+        PostQuitMessage(static_cast<int>(msg.wParam));
+    }
+    if (IsWindow(hDlg)) {
+        DestroyWindow(hDlg);
     }
 
     EnableWindow(hwnd_parent, TRUE);
@@ -3871,6 +3951,8 @@ void PaintCosmicBackgroundStars(HDC hdc, const DesktopView& view) {
         }
     }
 }
+
+void DrawCaretGlyphGdi(HDC hdc, int cx, int cy, ColorRgba col, bool up = false);
 
 void PaintSettingsCenterOverlayWin32(HDC hdc, DesktopView& view, HFONT hFontBody, HFONT hFontBold) {
     const auto& pal = view.GetPalette();
@@ -3951,7 +4033,15 @@ void PaintSettingsCenterOverlayWin32(HDC hdc, DesktopView& view, HFONT hFontBody
         FrameRectBorder(hdc, ctrl_rc, pal.border_subtle, 1);
         SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
         std::wstring wval = Utf8ToW(item.value_text);
-        DrawTextW(hdc, wval.c_str(), -1, &ctrl_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (item.control_type == SettingControlType::kDropdown) {
+            RECT txt_rc = ctrl_rc;
+            txt_rc.right -= 18;
+            txt_rc.left += 8;
+            DrawTextW(hdc, wval.c_str(), -1, &txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawCaretGlyphGdi(hdc, ctrl_rc.right - 12, ctrl_rc.top + (ctrl_rc.bottom - ctrl_rc.top) / 2, pal.text_muted, false);
+        } else {
+            DrawTextW(hdc, wval.c_str(), -1, &ctrl_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
     }
 
     // Footer bar with status banner and Reset / Cancel / Apply buttons
@@ -4272,7 +4362,7 @@ void DrawSlidersGlyphGdi(HDC hdc, const RECT& rc, ColorRgba col) {
     DrawGearGlyphGdi(hdc, rc, col);
 }
 
-void DrawCaretGlyphGdi(HDC hdc, int cx, int cy, ColorRgba col, bool up = false) {
+void DrawCaretGlyphGdi(HDC hdc, int cx, int cy, ColorRgba col, bool up) {
     int w = 3;
     POINT pts[3];
     if (up) {
@@ -4343,6 +4433,8 @@ void DrawTimerClockGdi(HDC hdc, int x, int y, int radius, ColorRgba col) {
 }
 
 HICON CreateFluxAppIcon() {
+    static HICON s_cached_icon = nullptr;
+    if (s_cached_icon) return s_cached_icon;
     int size = 32;
     HDC hdcScreen = GetDC(nullptr);
     HDC hdc = CreateCompatibleDC(hdcScreen);
@@ -4392,10 +4484,10 @@ HICON CreateFluxAppIcon() {
     ii.fIcon = TRUE;
     ii.hbmMask = hbmMask;
     ii.hbmColor = hbmColor;
-    HICON hIcon = CreateIconIndirect(&ii);
+    s_cached_icon = CreateIconIndirect(&ii);
     DeleteObject(hbmColor);
     DeleteObject(hbmMask);
-    return hIcon;
+    return s_cached_icon;
 }
 
 void PaintMainWindow(HWND hwnd, DesktopView& view) {
@@ -4460,37 +4552,7 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     DrawHamburgerGlyphGdi(hdc, sort_rc.left + 14, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2 - 5, 12, 10, pal.text_muted);
     RECT sort_txt_rc{sort_rc.left + 32, sort_rc.top, sort_rc.right - 18, sort_rc.bottom};
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
-    SelectObject(hdc, hFontBody);
-    std::wstring sort_label = L"Newest";
-    switch (view.GetSortColumn()) {
-        case SortColumn::kCreatedAt:
-            sort_label = view.IsSortAscending() ? L"Oldest" : L"Newest";
-            break;
-        case SortColumn::kFileName:
-            sort_label = view.IsSortAscending() ? L"Name (A-Z)" : L"Name (Z-A)";
-            break;
-        case SortColumn::kSize:
-            sort_label = view.IsSortAscending() ? L"Size (Small)" : L"Size (Large)";
-            break;
-        case SortColumn::kStatus:
-            sort_label = view.IsSortAscending() ? L"Status (Asc)" : L"Status (Desc)";
-            break;
-        case SortColumn::kSpeed:
-            sort_label = view.IsSortAscending() ? L"Speed (Slow)" : L"Speed (Fast)";
-            break;
-        case SortColumn::kDownloadType:
-            sort_label = view.IsSortAscending() ? L"Upload (Low)" : L"Upload (High)";
-            break;
-        case SortColumn::kProgress:
-            sort_label = view.IsSortAscending() ? L"Progress (Low)" : L"Progress (High)";
-            break;
-        case SortColumn::kEta:
-            sort_label = view.IsSortAscending() ? L"ETA (Short)" : L"ETA (Long)";
-            break;
-        default:
-            sort_label = L"Newest";
-            break;
-    }
+    std::wstring sort_label = L"Sort";
     DrawTextW(hdc, sort_label.c_str(), -1, &sort_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawCaretGlyphGdi(hdc, sort_rc.right - 12, sort_rc.top + (sort_rc.bottom - sort_rc.top) / 2, pal.text_muted, false);
 
@@ -5089,13 +5151,131 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto hit = ctx->view->HitTestPoint(x, y, scroll_offset);
 
             if (ctx->view->IsSettingsCenterOpen()) {
-                if (hit.type == HitTargetType::kSettingsItemControl && hit.task_id == "default_download_dir") {
-                    std::string chosen_dir = ctx->view->GetDraftSettings().default_download_dir;
-                    if (SelectFolderWithDialogWin32(hwnd, chosen_dir)) {
-                        ctx->view->SetDraftSettingByKey("default_download_dir", chosen_dir);
+                if (hit.type == HitTargetType::kSettingsItemControl) {
+                    if (hit.task_id == "default_download_dir") {
+                        std::string chosen_dir = ctx->view->GetDraftSettings().default_download_dir;
+                        if (SelectFolderWithDialogWin32(hwnd, chosen_dir)) {
+                            ctx->view->SetDraftSettingByKey("default_download_dir", chosen_dir);
+                        }
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
                     }
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
+                    auto sv = ctx->view->BuildSettingsCenterView();
+                    const SettingItemView* clicked_itm = nullptr;
+                    for (const auto& itm : sv.visible_items) {
+                        if (itm.key == hit.task_id) {
+                            clicked_itm = &itm;
+                            break;
+                        }
+                    }
+                    if (clicked_itm && clicked_itm->control_type == SettingControlType::kDropdown) {
+                        RECT ctrl_rc = ToWinRect(clicked_itm->control_rect);
+                        POINT pt{ctrl_rc.left, ctrl_rc.bottom + 2};
+                        ClientToScreen(hwnd, &pt);
+                        HMENU hMenu = CreatePopupMenu();
+                        if (hit.task_id == "conflict_policy") {
+                            auto pol = ctx->view->GetDraftSettings().conflict_policy;
+                            AppendMenuW(hMenu, MF_STRING | (pol == ConflictPolicy::kAutoRename ? MF_CHECKED : 0), 1, L"Auto-Rename (Numbered Copy)");
+                            AppendMenuW(hMenu, MF_STRING | (pol == ConflictPolicy::kOverwrite ? MF_CHECKED : 0), 2, L"Overwrite Existing File");
+                            AppendMenuW(hMenu, MF_STRING | (pol == ConflictPolicy::kFailIfExists ? MF_CHECKED : 0), 3, L"Prompt / Fail if Exists");
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c == 1) ctx->view->SetDraftSettingByKey("conflict_policy", "auto_rename");
+                            else if (c == 2) ctx->view->SetDraftSettingByKey("conflict_policy", "overwrite");
+                            else if (c == 3) ctx->view->SetDraftSettingByKey("conflict_policy", "fail_if_exists");
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "proxy_mode") {
+                            auto pm = ctx->view->GetDraftSettings().proxy_mode;
+                            AppendMenuW(hMenu, MF_STRING | (pm == "direct" ? MF_CHECKED : 0), 1, L"Direct (No Proxy)");
+                            AppendMenuW(hMenu, MF_STRING | (pm == "system" ? MF_CHECKED : 0), 2, L"Use Windows System Proxy");
+                            AppendMenuW(hMenu, MF_STRING | (pm == "manual" ? MF_CHECKED : 0), 3, L"Manual HTTP/SOCKS Proxy");
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c == 1) ctx->view->SetDraftSettingByKey("proxy_mode", "direct");
+                            else if (c == 2) ctx->view->SetDraftSettingByKey("proxy_mode", "system");
+                            else if (c == 3) ctx->view->SetDraftSettingByKey("proxy_mode", "manual");
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "default_connections_per_task") {
+                            auto conns = ctx->view->GetDraftSettings().default_connections_per_task;
+                            const uint32_t presets[] = {1, 2, 4, 8, 16, 24, 32};
+                            for (size_t i = 0; i < 7; ++i) {
+                                std::wstring lbl = std::to_wstring(presets[i]) + L" Connections" + (presets[i] == 8 ? L" (Recommended)" : L"");
+                                AppendMenuW(hMenu, MF_STRING | (conns == presets[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(10 + i), lbl.c_str());
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 10 && c < 17) {
+                                ctx->view->SetDraftSettingByKey("default_connections_per_task", std::to_string(presets[c - 10]));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "max_concurrent_tasks") {
+                            auto mc = ctx->view->GetDraftSettings().max_concurrent_tasks;
+                            const uint32_t presets[] = {1, 2, 3, 5, 8, 10, 16};
+                            for (size_t i = 0; i < 7; ++i) {
+                                std::wstring lbl = std::to_wstring(presets[i]) + L" Tasks" + (presets[i] == 3 ? L" (Default)" : L"");
+                                AppendMenuW(hMenu, MF_STRING | (mc == presets[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(20 + i), lbl.c_str());
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 20 && c < 27) {
+                                ctx->view->SetDraftSettingByKey("max_concurrent_tasks", std::to_string(presets[c - 20]));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "speed_limit_bps") {
+                            auto sp = ctx->view->GetDraftSettings().speed_limit_bps;
+                            struct SpDef { uint64_t bps; const wchar_t* lbl; };
+                            const SpDef sp_presets[] = {
+                                {0ULL, L"Unlimited"},
+                                {1048576ULL, L"1 MB/s (8 Mbps)"},
+                                {5242880ULL, L"5 MB/s (40 Mbps)"},
+                                {10485760ULL, L"10 MB/s (80 Mbps)"},
+                                {26214400ULL, L"25 MB/s (200 Mbps)"},
+                                {52428800ULL, L"50 MB/s (400 Mbps)"}
+                            };
+                            for (size_t i = 0; i < 6; ++i) {
+                                AppendMenuW(hMenu, MF_STRING | (sp == sp_presets[i].bps ? MF_CHECKED : 0), static_cast<UINT_PTR>(30 + i), sp_presets[i].lbl);
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 30 && c < 36) {
+                                ctx->view->SetDraftSettingByKey("speed_limit_bps", std::to_string(sp_presets[c - 30].bps));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "stall_timeout_ms") {
+                            auto st = ctx->view->GetDraftSettings().stall_timeout_ms;
+                            const int timeouts[] = {1500, 3000, 5000, 10000, 15000};
+                            for (size_t i = 0; i < 5; ++i) {
+                                std::wstring lbl = std::to_wstring(timeouts[i] / 1000) + L" Seconds" + (timeouts[i] == 3000 ? L" (Default)" : L"");
+                                AppendMenuW(hMenu, MF_STRING | (st == timeouts[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(40 + i), lbl.c_str());
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 40 && c < 45) {
+                                ctx->view->SetDraftSettingByKey("stall_timeout_ms", std::to_string(timeouts[c - 40]));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "queue_completion_action") {
+                            auto qa = ctx->view->GetDraftSettings().queue_completion_action;
+                            AppendMenuW(hMenu, MF_STRING | (qa == "NONE" ? MF_CHECKED : 0), 51, L"None (Do Nothing)");
+                            AppendMenuW(hMenu, MF_STRING | (qa == "SLEEP" ? MF_CHECKED : 0), 52, L"Put PC to Sleep");
+                            AppendMenuW(hMenu, MF_STRING | (qa == "SHUTDOWN" ? MF_CHECKED : 0), 53, L"Shutdown PC");
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c == 51) ctx->view->SetDraftSettingByKey("queue_completion_action", "NONE");
+                            else if (c == 52) ctx->view->SetDraftSettingByKey("queue_completion_action", "SLEEP");
+                            else if (c == 53) ctx->view->SetDraftSettingByKey("queue_completion_action", "SHUTDOWN");
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else {
+                            DestroyMenu(hMenu);
+                        }
+                    }
                 }
                 if (hit.type == HitTargetType::kSettingsRestoreDefaultsButton) {
                     if (MessageBoxW(hwnd, L"Restore all Flux settings to their factory defaults?", L"Confirm Restore Defaults", MB_YESNO | MB_ICONQUESTION) == IDYES) {
@@ -5370,9 +5550,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         }
                     }
                 }
-            } else if (cmd == IDM_CTX_REMOVE_LIST) {
-                ctx->view->ActionRemoveSelectedFromList();
-            } else if (cmd == IDM_CTX_DELETE_DISK) {
+            } else if (cmd == IDM_CTX_REMOVE_LIST || cmd == IDM_CTX_DELETE_DISK) {
                 ShowDeleteConfirmationDialogWin32(hwnd, *ctx->view, *ctx->controller);
             } else if (cmd == IDM_CTX_ANTIVIRUS) {
                 if (!sel.empty()) {
@@ -5433,6 +5611,32 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                         ofs << exp_str.value.value();
                         std::wstring export_info = L"Tasks successfully exported to:\n" + exp_path.wstring();
                         MessageBoxW(hwnd, export_info.c_str(), L"Export Tasks", MB_OK | MB_ICONINFORMATION);
+                    }
+                }
+            } else if (cmd == IDM_CTX_IMPORT_TASKS) {
+                wchar_t szFile[MAX_PATH] = L"";
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = hwnd;
+                ofn.lpstrFile = szFile;
+                ofn.nMaxFile = sizeof(szFile) / sizeof(szFile[0]);
+                ofn.lpstrFilter = L"Task Files (*.json;*.csv;*.txt)\0*.json;*.csv;*.txt\0JSON Files (*.json)\0*.json\0CSV / Text Files (*.csv;*.txt)\0*.csv;*.txt\0All Files (*.*)\0*.*\0";
+                ofn.nFilterIndex = 1;
+                ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+                if (GetOpenFileNameW(&ofn)) {
+                    std::filesystem::path imp_path(szFile);
+                    std::ifstream ifs(imp_path, std::ios::binary);
+                    if (ifs) {
+                        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                        storage::ExportFormat fmt = (imp_path.extension() == ".json") ? storage::ExportFormat::kJson : storage::ExportFormat::kCsv;
+                        auto imp_res = ctx->controller->ImportTasksData(content, fmt);
+                        if (imp_res.ok()) {
+                            std::wstring ok_msg = L"Successfully imported " + std::to_wstring(*imp_res.value) + L" task(s).";
+                            MessageBoxW(hwnd, ok_msg.c_str(), L"Import Tasks", MB_OK | MB_ICONINFORMATION);
+                        } else {
+                            std::wstring err = L"Failed to import tasks: " + Utf8ToW(imp_res.error->message);
+                            MessageBoxW(hwnd, err.c_str(), L"Import Error", MB_OK | MB_ICONERROR);
+                        }
                     }
                 }
             } else if (cmd == IDM_CTX_SETTINGS) ctx->view->OpenSettingsCenter(SettingsCategory::kGeneral);

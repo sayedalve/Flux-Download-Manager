@@ -150,9 +150,10 @@
       if (bestAudioMp4) bestAudio = bestAudioMp4;
 
       // Build complete multi-quality list across all available adaptive and progressive resolutions
-      const qualityMap = new Map();
+      const durSec = parseFloat(videoDetails.lengthSeconds || "0") || 0;
       const audioByteLen = bestAudio ? parseInt(bestAudio.contentLength || "0", 10) : 0;
       const cleanBestAudioUrl = (bestAudio && bestAudio.url) ? normalizeGooglevideoUrl(bestAudio.url) : "";
+      const qualityMap = new Map();
 
       const addVideoFormatToQualities = (f, isAdaptiveFmt) => {
         if (!f || f.drmFamilies) return;
@@ -170,7 +171,10 @@
         const unpairedAdaptive = Boolean(isAdaptiveFmt && hasDirectUrl && !cleanBestAudioUrl);
         const requiresCipher = Boolean(!hasDirectUrl || unpairedAdaptive);
         const vSize = parseInt(f.contentLength || "0", 10);
-        const totalSize = vSize > 0 ? (vSize + (needsMux ? audioByteLen : 0)) : 0;
+        const estVBytes = (vSize === 0 && bw > 0 && durSec > 0) ? Math.round((bw / 8) * durSec) : 0;
+        const estABytes = (needsMux && audioByteLen === 0 && durSec > 0) ? Math.round((128000 / 8) * durSec) : 0;
+        const totalSize = vSize > 0 ? (vSize + (needsMux ? audioByteLen : 0)) : (estVBytes + (needsMux ? (audioByteLen > 0 ? audioByteLen : estABytes) : 0));
+        const isSizeEstimated = (vSize === 0 && totalSize > 0);
         const isMp4 = mime.includes("mp4");
 
         const entry = {
@@ -183,6 +187,7 @@
           itag: f.itag || 0,
           bandwidth: bw,
           size: totalSize,
+          sizeEstimated: isSizeEstimated,
           ext: "mp4",
           mime: mime.split(";")[0] || "video/mp4",
           videoUrl: unpairedAdaptive ? "" : cleanVUrl,

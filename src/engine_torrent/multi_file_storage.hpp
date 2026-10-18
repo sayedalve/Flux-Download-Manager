@@ -181,9 +181,9 @@ public:
         return Result<void>::Ok();
     }
 
-    const std::vector<TorrentFileEntry>& GetFileEntries() const {
-        static std::vector<TorrentFileEntry> entries;
-        entries.clear();
+    std::vector<TorrentFileEntry> GetFileEntries() const {
+        std::vector<TorrentFileEntry> entries;
+        entries.reserve(m_files.size());
         for (const auto& fm : m_files) entries.push_back(fm.entry);
         return entries;
     }

@@ -571,11 +571,14 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
-        bool auto_start = m_offer_cb ? false : m_controller.GetSettings().auto_start_downloads;
+        bool auto_start = params.contains("autoStart")
+            ? params["autoStart"].as_bool(true)
+            : m_controller.GetSettings().auto_start_downloads;
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             json::Value res = json::Object{};
             res["accepted"] = false;
+            res["started"] = false;
             res["reason"] = add_res.error->code + ": " + add_res.error->message;
             return MakeRpcResult(id, std::move(res)).dump();
         }
@@ -584,6 +587,8 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         json::Value res = json::Object{};
         res["accepted"] = true;
+        res["started"] = auto_start;
+        res["status"] = auto_start ? "started" : "queued";
         res["taskId"] = add_res.value->task_id;
         res["fileName"] = add_res.value->file_name;
         return MakeRpcResult(id, std::move(res)).dump();
@@ -935,10 +940,23 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             t.category = "Video";
         } else {
             t.task_type = TaskType::kHttpFile;
-            t.category = "Video";
         }
         t.url = manifest_url;
         t.page_url = params["tabUrl"].as_string();
+
+        if (is_youtube_watch) {
+            bool is_raw_googlevideo = (manifest_url.find("googlevideo.com") != std::string::npos ||
+                                       manifest_url.find("videoplayback") != std::string::npos);
+            if (is_raw_googlevideo) {
+                if (!t.page_url.empty() && t.page_url.find("googlevideo.com") == std::string::npos) {
+                    t.url = t.page_url;
+                } else if (params.contains("watchUrl") && !params["watchUrl"].as_string().empty()) {
+                    t.url = params["watchUrl"].as_string();
+                } else if (params.contains("videoId") && !params["videoId"].as_string().empty()) {
+                    t.url = "https://www.youtube.com/watch?v=" + params["videoId"].as_string();
+                }
+            }
+        }
 
         std::string title = params["pageTitle"].as_string();
         auto yt_suffix = title.rfind(" - YouTube");

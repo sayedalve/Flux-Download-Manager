@@ -44,11 +44,28 @@ bool RtspMmsAdapter::IsStreamUrl(std::string_view url) {
     return false;
 }
 
+bool RtspMmsAdapter::ValidateStreamUrl(std::string_view url) {
+    if (!IsStreamUrl(url)) return false;
+    for (char c : url) {
+        if (static_cast<unsigned char>(c) <= 32 || c == '"' || c == '\\' || c == '\'' || c == '`') {
+            return false;
+        }
+    }
+    return true;
+}
+
 Result<std::filesystem::path> RtspMmsAdapter::ExecuteStreamCapture(
     TaskModel& task,
     std::atomic<bool>& pause_requested,
     std::atomic<bool>& cancel_requested,
     RtspProgressCallback on_progress) {
+
+    if (!ValidateStreamUrl(task.url)) {
+        task.state = TaskState::kFailed;
+        task.error_code = "ERR_INVALID_URL";
+        task.error_message = "Invalid or dangerous stream URL";
+        return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
+    }
 
     std::error_code ec;
     if (!std::filesystem::exists(m_ffmpeg_path, ec)) {
@@ -203,7 +220,7 @@ Result<std::filesystem::path> RtspMmsAdapter::ExecuteStreamCapture(
     if (pause_requested.load()) {
         task.state = TaskState::kPaused;
         task.status_detail = "Paused";
-        return Result<std::filesystem::path>::Ok(temp_part);
+        return Result<std::filesystem::path>::Err("ERR_PAUSED", "Stream capture paused");
     }
 
     if (std::filesystem::exists(temp_part, ec) && std::filesystem::file_size(temp_part, ec) > 0) {

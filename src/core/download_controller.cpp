@@ -371,10 +371,23 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
         if (!ftp_res.ok()) return Result<TaskModel>::Err(ftp_res.error->code, ftp_res.error->message);
         if (task.file_name.empty()) task.file_name = ftp_res.value->file_name;
     } else if (task.url.find("magnet:?") == 0) {
+        return Result<TaskModel>::Err(
+            "ERR_TORRENT_MAGNET_METADATA",
+            "Magnet links require BEP 9 metadata exchange; please provide a .torrent file"
+        );
+    } else if (task.task_type == TaskType::kTorrent || task.url.ends_with(".torrent") ||
+               (std::filesystem::exists(task.url) && std::filesystem::path(task.url).extension() == ".torrent")) {
         task.task_type = TaskType::kTorrent;
-        auto mag_res = torrent::TorrentParser::ParseMagnetUri(task.url);
-        if (!mag_res.ok()) return Result<TaskModel>::Err(mag_res.error->code, mag_res.error->message);
-        if (task.file_name.empty()) task.file_name = mag_res.value->name;
+        std::error_code ec;
+        if (std::filesystem::exists(task.url, ec)) {
+            auto tor_res = torrent::TorrentParser::ParseTorrentFile(task.url);
+            if (!tor_res.ok()) return Result<TaskModel>::Err(tor_res.error->code, tor_res.error->message);
+            if (task.file_name.empty()) task.file_name = tor_res.value->name;
+            task.total_bytes = tor_res.value->total_length;
+        } else {
+            auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
+            if (!parsed_u.ok()) return Result<TaskModel>::Err(parsed_u.error->code, parsed_u.error->message);
+        }
     } else if (stream::RtspMmsAdapter::IsStreamUrl(task.url)) {
         task.task_type = TaskType::kRtsp;
         if (task.file_name.empty()) task.file_name = "stream_" + GenerateUuidV4().substr(0, 8) + ".mp4";
@@ -442,7 +455,7 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
         task.created_at_ms = NowEpochMs();
     }
     task.updated_at_ms = task.created_at_ms;
-    if (task.state != TaskState::kCompleted) {
+    if (task.state != TaskState::kCompleted && task.state != TaskState::kFailed && task.state != TaskState::kDownloading) {
         task.state = (start_immediately && !task.scheduled) ? TaskState::kQueued : TaskState::kPaused;
         if (task.state == TaskState::kPaused) {
             task.pause_reason = PauseReason::kUser;
@@ -546,6 +559,8 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
             auto scan_res = security::AntivirusScanner::ScanWithDefender(dest_path);
             if (scan_res.ok()) {
                 if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
+                    task.state = TaskState::kFailed;
+                    std::filesystem::remove(dest_path, ec);
                     task.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
                     task.error_code = "ERR_THREAT_DETECTED";
                     task.error_message = "A security threat was detected in the downloaded file.";
@@ -732,13 +747,22 @@ void DownloadController::ScheduleLoop() {
         for (auto& [id, t] : m_tasks) {
             if (t.state == TaskState::kFailed && t.retry_count < m_settings.max_auto_retries) {
                 bool is_transient = (t.error_code == "ERR_NETWORK_TIMEOUT" ||
+                                     t.error_code == "ERR_NET_TIMEOUT" ||
+                                     t.error_code == "ERR_TIMEOUT" ||
                                      t.error_code == "ERR_CONNECTION_RESET" ||
+                                     t.error_code == "ERR_NET_CONNECTION_RESET" ||
+                                     t.error_code == "ERR_NET_CONNECT" ||
+                                     t.error_code == "ERR_NET_DNS" ||
                                      t.error_code == "ERR_HTTP_TIMEOUT" ||
+                                     t.error_code == "ERR_HTTP_5XX_TRANSIENT" ||
+                                     t.error_code == "ERR_HTTP_429_RATE_LIMITED" ||
                                      t.error_code == "ERR_HTTP_503" ||
                                      t.error_code == "ERR_HTTP_502" ||
                                      t.error_code == "ERR_HTTP_504" ||
                                      t.error_code == "ERR_HTTP_429" ||
                                      t.error_code == "ERR_FTP_TIMEOUT" ||
+                                     t.error_code == "ERR_FTP_DISCONNECTED" ||
+                                     t.error_code == "ERR_FTP_CONNECT" ||
                                      t.error_code == "ERR_STREAM_WORKER_CRASH");
                 if (is_transient) {
                     auto rit = retry_schedule.find(id);
@@ -767,7 +791,9 @@ void DownloadController::ScheduleLoop() {
         if (m_active.empty() && had_active) {
             bool has_pending = false;
             for (const auto& [id, t] : m_tasks) {
-                if (t.state == TaskState::kQueued || t.state == TaskState::kProbing || t.state == TaskState::kDownloading) {
+                if (t.state == TaskState::kQueued || t.state == TaskState::kProbing ||
+                    t.state == TaskState::kDownloading || t.state == TaskState::kMuxing ||
+                    t.state == TaskState::kVerifying) {
                     has_pending = true;
                     break;
                 }
@@ -809,8 +835,7 @@ void DownloadController::ScheduleLoop() {
             m_tasks[next_id].state = TaskState::kProbing;
             m_tasks[next_id].status_detail = "Starting transfer...";
             auto ctrl = std::make_shared<ActiveTaskControl>();
-            ctrl->task_speed_limit_bps.store(
-                m_tasks[next_id].speed_limit_bps > 0 ? m_tasks[next_id].speed_limit_bps : m_global_speed_limit_bps.load());
+            ctrl->task_speed_limit_bps.store(m_tasks[next_id].speed_limit_bps);
             m_active[next_id] = ctrl;
             ctrl->worker_thread = std::thread(&DownloadController::RunTaskWorker, this, next_id, ctrl);
         }
@@ -853,6 +878,13 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             std::filesystem::path part_p = std::filesystem::path(local_task.save_dir) / (local_task.file_name + "." + local_task.task_id + ".part");
             local_task.part_path = part_p.string();
             local_task.state = TaskState::kDownloading;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_tasks.find(task_id);
+                if (it != m_tasks.end()) {
+                    it->second.part_path = part_p.string();
+                }
+            }
 
             auto dl_res = ftp::FtpClient::DownloadFile(
                 ftp_url_res.value.value(),
@@ -882,13 +914,43 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 m_cfg.allow_loopback);
 
             if (dl_res.ok()) {
-                std::error_code ec;
-                std::filesystem::path final_p = std::filesystem::path(local_task.save_dir) / local_task.file_name;
-                std::filesystem::rename(part_p, final_p, ec);
-                local_task.state = TaskState::kCompleted;
-                local_task.downloaded_bytes = dl_res.value.value();
-                local_task.total_bytes = dl_res.value.value();
-                local_task.status_detail = "Completed (FTP)";
+                uint64_t final_size = dl_res.value.value();
+                bool checksum_ok = true;
+                if (!local_task.expected_sha256.empty()) {
+                    auto calc_sha = CryptoUtils::ComputeFileSha256Hex(part_p);
+                    auto to_low = [](std::string s) {
+                        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        return s;
+                    };
+                    if (!calc_sha.ok() || to_low(calc_sha.value.value()) != to_low(local_task.expected_sha256)) {
+                        checksum_ok = false;
+                        local_task.state = TaskState::kFailed;
+                        local_task.error_code = "ERR_CHECKSUM_MISMATCH";
+                        local_task.error_message = "Downloaded FTP file SHA-256 did not match expected checksum";
+                        local_task.status_detail = "Failed: SHA-256 mismatch";
+                    }
+                }
+                if (checksum_ok) {
+                    auto commit_res = PathSanitizer::CommitPartFile(
+                        part_p,
+                        local_task.save_dir,
+                        local_task.file_name,
+                        local_task.conflict_policy);
+                    if (commit_res.ok()) {
+                        local_task.file_name = commit_res.value->filename().string();
+                        local_task.part_path.clear();
+                        local_task.state = TaskState::kCompleted;
+                        local_task.downloaded_bytes = final_size;
+                        local_task.total_bytes = final_size;
+                        local_task.completed_at_ms = NowEpochMs();
+                        local_task.status_detail = "Completed (FTP)";
+                    } else {
+                        local_task.state = TaskState::kFailed;
+                        local_task.error_code = commit_res.error->code;
+                        local_task.error_message = commit_res.error->message;
+                        local_task.status_detail = "Failed to commit: " + commit_res.error->message;
+                    }
+                }
             } else {
                 if (ctrl->cancel_requested.load()) {
                     local_task.state = TaskState::kCanceled;
@@ -1182,6 +1244,43 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
         local_task.status_detail = "Paused";
     }
 
+    if (local_task.state == TaskState::kCompleted) {
+        // Post-Download Antivirus Scan (outside m_mutex to avoid locking controller for up to 30s)
+        if (security::AntivirusScanner::IsWindowsDefenderAvailable()) {
+            std::filesystem::path final_p = std::filesystem::path(local_task.save_dir) / local_task.file_name;
+            std::error_code ec;
+            if (std::filesystem::exists(final_p, ec)) {
+                auto scan_res = security::AntivirusScanner::ScanWithDefender(final_p);
+                if (scan_res.ok()) {
+                    if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
+                        local_task.state = TaskState::kFailed;
+                        local_task.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
+                        local_task.error_code = "ERR_THREAT_DETECTED";
+                        local_task.error_message = "A security threat was detected in the downloaded file.";
+                        OPENIDM_LOG_WARN("Controller", "Antivirus threat detected: " + final_p.string());
+                        std::error_code rm_ec;
+                        std::filesystem::remove(final_p, rm_ec);
+                    } else if (scan_res.value->status == security::ScanStatus::kClean) {
+                        local_task.status_detail = "Completed (Antivirus Clean)";
+                    } else if (scan_res.value->status == security::ScanStatus::kScannerError) {
+                        local_task.status_detail = "Completed (Antivirus Scan Failed)";
+                    } else {
+                        local_task.status_detail = "Completed (Antivirus Skipped)";
+                    }
+                } else {
+                    local_task.status_detail = "Completed (Antivirus Scan Error: " + scan_res.error->message + ")";
+                }
+            }
+        } else {
+            local_task.status_detail = "Completed (Not Scanned - Scanner Unavailable)";
+        }
+#ifdef _WIN32
+        if (m_settings.show_completion_notification && local_task.state == TaskState::kCompleted) {
+            MessageBeep(MB_ICONASTERISK);
+        }
+#endif
+    }
+
     // BUG-007 Fix: Granular merge under m_mutex without resurrecting deleted tasks
     bool should_persist = false;
     TaskModel to_save;
@@ -1220,39 +1319,6 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 if (t.state == TaskState::kCompleted || t.state == TaskState::kCanceled) {
                     t.auth_headers.clear();
                 }
-                if (t.state == TaskState::kCompleted) {
-                    // Post-Download Antivirus Scan
-                    if (security::AntivirusScanner::IsWindowsDefenderAvailable()) {
-                        std::filesystem::path final_p = std::filesystem::path(t.save_dir) / t.file_name;
-                        std::error_code ec;
-                        if (std::filesystem::exists(final_p, ec)) {
-                            auto scan_res = security::AntivirusScanner::ScanWithDefender(final_p);
-                            if (scan_res.ok()) {
-                                if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
-                                    t.status_detail = "Threat detected by Antivirus (" + scan_res.value->scanner_name + ")";
-                                    t.error_code = "ERR_THREAT_DETECTED";
-                                    t.error_message = "A security threat was detected in the downloaded file.";
-                                    OPENIDM_LOG_WARN("Controller", "Antivirus threat detected: " + final_p.string());
-                                } else if (scan_res.value->status == security::ScanStatus::kClean) {
-                                    t.status_detail = "Completed (Antivirus Clean)";
-                                } else if (scan_res.value->status == security::ScanStatus::kScannerError) {
-                                    t.status_detail = "Completed (Antivirus Scan Failed)";
-                                } else {
-                                    t.status_detail = "Completed (Antivirus Skipped)";
-                                }
-                            } else {
-                                t.status_detail = "Completed (Antivirus Scan Error: " + scan_res.error->message + ")";
-                            }
-                        }
-                    } else {
-                        t.status_detail = "Completed (Not Scanned - Scanner Unavailable)";
-                    }
-#ifdef _WIN32
-                    if (m_settings.show_completion_notification) {
-                        MessageBeep(MB_ICONASTERISK);
-                    }
-#endif
-                }
                 to_save = t;
                 should_persist = true;
             }
@@ -1273,6 +1339,9 @@ Result<void> DownloadController::StartTask(const std::string& task_id) {
     if (it->second.state == TaskState::kPaused || it->second.state == TaskState::kFailed ||
         it->second.state == TaskState::kQueued) {
         it->second.scheduled = false;
+        it->second.schedule_time_local.clear();
+        it->second.schedule_stop_time_local.clear();
+        it->second.pause_reason = PauseReason::kNone;
         it->second.state = TaskState::kQueued;
         it->second.status_detail = "Queued";
         it->second.error_code.clear();
@@ -1621,9 +1690,6 @@ void DownloadController::SetGlobalSpeedLimit(uint64_t bps) {
     m_global_speed_limit_bps.store(bps);
     std::lock_guard<std::mutex> lock(m_mutex);
     m_settings.speed_limit_bps = bps;
-    for (auto& [id, ctrl] : m_active) {
-        ctrl->task_speed_limit_bps.store(bps);
-    }
     SaveSettingsLocked();
 }
 
@@ -1639,8 +1705,8 @@ Result<void> DownloadController::SetTaskSpeedLimit(const std::string& task_id, u
     }
     it->second.speed_limit_bps = bps;
     auto ait = m_active.find(task_id);
-    if (ait != m_active.end()) {
-        ait->second->task_speed_limit_bps.store(bps > 0 ? bps : m_global_speed_limit_bps.load());
+    if (ait != m_active.end() && ait->second) {
+        ait->second->task_speed_limit_bps.store(bps);
     }
     m_store.UpsertTask(it->second);
     return Result<void>::Ok();
@@ -1689,9 +1755,12 @@ Result<void> DownloadController::SetTaskSchedule(
     it->second.scheduled = !start_time_local.empty();
     it->second.schedule_time_local = start_time_local;
     it->second.schedule_stop_time_local = stop_time_local;
-    if (it->second.scheduled && it->second.state == TaskState::kQueued) {
-        it->second.state = TaskState::kPaused;
-        it->second.status_detail = "Scheduled (" + start_time_local + ")";
+    if (it->second.scheduled) {
+        it->second.pause_reason = PauseReason::kQueueSchedule;
+        if (it->second.state == TaskState::kQueued) {
+            it->second.state = TaskState::kPaused;
+            it->second.status_detail = "Scheduled (" + start_time_local + ")";
+        }
     }
     m_store.UpsertTask(it->second);
     m_cv.notify_all();
@@ -1726,12 +1795,6 @@ Result<void> DownloadController::UpdateSettings(const AppSettings& settings) {
         m_cfg.min_split_bytes = m_settings.min_split_bytes;
         m_max_concurrent.store(m_settings.max_concurrent_tasks);
         m_global_speed_limit_bps.store(m_settings.speed_limit_bps);
-        for (auto& [id, ctrl] : m_active) {
-            uint64_t task_limit = 0;
-            auto tit = m_tasks.find(id);
-            if (tit != m_tasks.end()) task_limit = tit->second.speed_limit_bps;
-            ctrl->task_speed_limit_bps.store(task_limit > 0 ? task_limit : m_settings.speed_limit_bps);
-        }
         auto sres = SaveSettingsLocked();
         if (!sres.ok()) return sres;
     }

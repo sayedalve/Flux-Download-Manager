@@ -63,19 +63,36 @@ Result<std::pair<int, std::string>> RunProcessCaptureOutput(
     std::string output;
     char buffer[1024];
     DWORD bytesRead = 0;
+    auto start_time = std::chrono::steady_clock::now();
 
-    DWORD wait_res = WaitForSingleObject(pi.hProcess, static_cast<DWORD>(timeout_ms));
-    if (wait_res == WAIT_TIMEOUT) {
-        TerminateProcess(pi.hProcess, 99);
-        CloseHandle(hStdOutRead);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return Result<std::pair<int, std::string>>::Err("ERR_TIMEOUT", "Antivirus scan timed out");
-    }
+    while (true) {
+        DWORD bytes_avail = 0;
+        if (PeekNamedPipe(hStdOutRead, nullptr, 0, nullptr, &bytes_avail, nullptr) && bytes_avail > 0) {
+            DWORD to_read = (std::min)(bytes_avail, static_cast<DWORD>(sizeof(buffer) - 1));
+            if (ReadFile(hStdOutRead, buffer, to_read, &bytesRead, nullptr) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                output += buffer;
+            }
+        }
 
-    while (ReadFile(hStdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
-        buffer[bytesRead] = '\0';
-        output += buffer;
+        DWORD wait_res = WaitForSingleObject(pi.hProcess, 50);
+        if (wait_res == WAIT_OBJECT_0) {
+            while (ReadFile(hStdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, nullptr) && bytesRead > 0) {
+                buffer[bytesRead] = '\0';
+                output += buffer;
+            }
+            break;
+        }
+
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        if (elapsed > timeout_ms) {
+            TerminateProcess(pi.hProcess, 99);
+            CloseHandle(hStdOutRead);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return Result<std::pair<int, std::string>>::Err("ERR_TIMEOUT", "Antivirus scan timed out");
+        }
     }
 
     DWORD exit_code = 0;

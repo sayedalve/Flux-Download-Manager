@@ -158,10 +158,11 @@ std::shared_ptr<LiveSegment> SegmentScheduler::AcquireNextOrStealSegment(bool al
     uint64_t raw_mid = curr + (rem / 2);
     // Align split point to 4096-byte page boundary if possible
     uint64_t split_start = (raw_mid + 4095ULL) & ~4095ULL;
-    if (split_start <= curr + m_min_split_bytes || split_start >= old_end) {
+    uint64_t min_separation = (std::max<uint64_t>)(m_min_split_bytes, 262144ULL);
+    if (split_start <= curr + min_separation || split_start >= old_end) {
         split_start = raw_mid;
     }
-    if (split_start <= curr + 4096 || split_start >= old_end) {
+    if (split_start <= curr + min_separation || split_start >= old_end) {
         return nullptr;
     }
 
@@ -257,6 +258,19 @@ size_t SegmentScheduler::ActiveWorkerCount() const {
         }
     }
     return count;
+}
+
+bool SegmentScheduler::CanSplitAnySegment() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto& s : m_segments) {
+        if (s->completed.load(std::memory_order_relaxed)) continue;
+        uint64_t curr = s->current_offset.load(std::memory_order_relaxed);
+        uint64_t end = s->end_offset.load(std::memory_order_relaxed);
+        if (end > curr && (end - curr + 1) >= 2 * m_min_split_bytes) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace openidm::brisk

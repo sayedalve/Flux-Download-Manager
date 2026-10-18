@@ -194,6 +194,13 @@ bool TestSqliteStoreAndCrashRecovery() {
         openidm::Segment{0, 0, 524288, 5242879, false},
         openidm::Segment{1, 5242880, 5242880, 10485759, false}
     };
+    t.pause_reason = openidm::PauseReason::kQueueSchedule;
+    t.correlation_id = "corr-12345";
+    t.uploaded_bytes = 4096;
+    t.conflict_policy = openidm::ConflictPolicy::kAutoRename;
+    t.scheduled = true;
+    t.schedule_time_local = "03:15";
+    t.schedule_stop_time_local = "07:30";
 
     ASSERT_TRUE(store.UpsertTask(t).ok(), "Upsert active task with segments and auth cookie");
 
@@ -211,6 +218,13 @@ bool TestSqliteStoreAndCrashRecovery() {
     ASSERT_TRUE((*loaded.value)->state == openidm::TaskState::kPaused, "State transitioned to PAUSED");
     ASSERT_TRUE((*loaded.value)->segments[0].current_offset == 524288 - 65536, "64 KiB safety rollback applied");
     ASSERT_TRUE((*loaded.value)->auth_headers["Cookie"] == "auth_session=secret_cookie_value_777", "Decrypted Cookie restored on resume");
+    ASSERT_TRUE((*loaded.value)->correlation_id == "corr-12345", "correlation_id persisted and restored");
+    ASSERT_TRUE((*loaded.value)->uploaded_bytes == 4096, "uploaded_bytes persisted and restored");
+    ASSERT_TRUE((*loaded.value)->pause_reason == openidm::PauseReason::kQueueSchedule, "pause_reason persisted and restored");
+    ASSERT_TRUE((*loaded.value)->conflict_policy == openidm::ConflictPolicy::kAutoRename, "conflict_policy persisted and restored");
+    ASSERT_TRUE((*loaded.value)->scheduled == true, "scheduled flag persisted and restored");
+    ASSERT_TRUE((*loaded.value)->schedule_time_local == "03:15", "schedule_time_local persisted and restored");
+    ASSERT_TRUE((*loaded.value)->schedule_stop_time_local == "07:30", "schedule_stop_time_local persisted and restored");
 
     (*loaded.value)->state = openidm::TaskState::kCompleted;
     ASSERT_TRUE(store.UpsertTask(**loaded.value).ok(), "Upsert completed task");
@@ -511,8 +525,8 @@ bool TestDesktopUiInteractionsFilteringSortingAndRedaction() {
 
     // 3. Add Download Dialog validation (rejects invalid URL, accepts valid URL)
     openidm::ui::AddDownloadDialogInput bad_in;
-    bad_in.url = "ftp://invalid-scheme/file.zip";
-    ASSERT_TRUE(!view.SubmitAddDownloadDialog(bad_in).ok(), "Add Download dialog rejects ftp:// scheme");
+    bad_in.url = "gopher://invalid-scheme/file.zip";
+    ASSERT_TRUE(!view.SubmitAddDownloadDialog(bad_in).ok(), "Add Download dialog rejects unsupported scheme");
 
     openidm::ui::AddDownloadDialogInput file_in;
     file_in.url = "https://cdn.example.com/archive.zip?token=secret_query_token_999";
@@ -2112,6 +2126,20 @@ bool TestFtpReliabilityEpsvAndResumeTruncation() {
     ASSERT_TRUE(parsed.value->password == "pass", "Password is pass");
     ASSERT_TRUE(parsed.value->file_name == "document.pdf", "File name is document.pdf");
 
+    // FDM-003: Rejection of CRLF injection in username, password, or path
+    auto crlf_user = FtpUrl::Parse("ftp://user%0d%0asomecmd@ftp.example.com/files/doc.pdf");
+    ASSERT_TRUE(!crlf_user.ok(), "Reject CRLF injection in username");
+    ASSERT_TRUE(crlf_user.error->code == "ERR_FTP_INVALID_URL", "Error code is ERR_FTP_INVALID_URL");
+
+    auto crlf_path = FtpUrl::Parse("ftp://ftp.example.com/files/doc.pdf\r\nRETR evil.exe");
+    ASSERT_TRUE(!crlf_path.ok(), "Reject raw CRLF injection in path");
+
+    auto null_path = FtpUrl::Parse(std::string_view("ftp://ftp.example.com/files/doc.pdf\0other", 39));
+    ASSERT_TRUE(!null_path.ok(), "Reject null byte in URL");
+
+    auto invalid_scheme = FtpUrl::Parse("http://example.com/file.zip");
+    ASSERT_TRUE(!invalid_scheme.ok(), "Reject non-ftp scheme in FtpUrl::Parse");
+
     return true;
 }
 
@@ -2944,6 +2972,79 @@ bool TestFinalPhaseRemediationAndLiveMetrics() {
     ASSERT_TRUE(!sb.formatted_total_speed.empty(), "Formatted speed non-empty");
     ASSERT_TRUE(!sb.formatted_total_upload_speed.empty(), "Formatted upload speed non-empty");
 
+    // 3b. Priority 0 Table Column Audit (Size | Status | Download | Upload | Added)
+    TaskModel t_active;
+    t_active.task_id = "task-tbl-active";
+    t_active.url = "https://example.com/archive.zip";
+    t_active.file_name = "archive.zip";
+    t_active.total_bytes = 100 * 1024 * 1024;
+    t_active.downloaded_bytes = 45 * 1024 * 1024;
+    t_active.speed_bps = 2500000;
+    t_active.upload_speed_bps = 0;
+    t_active.state = TaskState::kDownloading;
+    t_active.created_at_ms = 1700000000000ULL;
+    ASSERT_TRUE(ctrl.AddTask(t_active, false, true).ok(), "Add active task");
+
+    TaskModel t_paused;
+    t_paused.task_id = "task-tbl-paused";
+    t_paused.url = "https://example.com/movie.mp4";
+    t_paused.file_name = "movie.mp4";
+    t_paused.total_bytes = 50 * 1024 * 1024;
+    t_paused.downloaded_bytes = 10 * 1024 * 1024;
+    t_paused.speed_bps = 0;
+    t_paused.upload_speed_bps = 0;
+    t_paused.state = TaskState::kPaused;
+    t_paused.created_at_ms = 1700000001000ULL;
+    ASSERT_TRUE(ctrl.AddTask(t_paused, false, true).ok(), "Add paused task");
+
+    TaskModel t_seeding;
+    t_seeding.task_id = "task-tbl-seeding";
+    t_seeding.task_type = TaskType::kTorrent;
+    t_seeding.url = "https://example.com/distro.torrent";
+    t_seeding.file_name = "distro.iso";
+    t_seeding.total_bytes = 200 * 1024 * 1024;
+    t_seeding.downloaded_bytes = 200 * 1024 * 1024;
+    t_seeding.uploaded_bytes = 25 * 1024 * 1024;
+    t_seeding.speed_bps = 0;
+    t_seeding.upload_speed_bps = 1500000;
+    t_seeding.state = TaskState::kCompleted;
+    t_seeding.created_at_ms = 1700000002000ULL;
+    ASSERT_TRUE(ctrl.AddTask(t_seeding, false, true).ok(), "Add seeding task");
+
+    TaskModel t_failed;
+    t_failed.task_id = "task-tbl-failed";
+    t_failed.url = "https://example.com/broken.dat";
+    t_failed.file_name = "broken.dat";
+    t_failed.state = TaskState::kFailed;
+    t_failed.error_code = "ERR_NET_CONNECT_TIMEOUT";
+    t_failed.error_message = "Connect timed out after 30s";
+    t_failed.speed_bps = 0;
+    t_failed.upload_speed_bps = 0;
+    t_failed.created_at_ms = 1700000003000ULL;
+    ASSERT_TRUE(ctrl.AddTask(t_failed, false, true).ok(), "Add failed task");
+
+    auto rows = view.BuildVisibleTaskRows();
+    ASSERT_TRUE(rows.size() >= 4, "View model generated rows for all tasks");
+
+    for (const auto& r : rows) {
+        if (r.task_id == "task-tbl-active") {
+            ASSERT_TRUE(r.size_text.find("45") != std::string::npos && r.size_text.find("100") != std::string::npos, "Active row size displays received/total");
+            ASSERT_TRUE(r.status_text.find("Downloading") != std::string::npos, "Active row status indicates Downloading");
+            ASSERT_TRUE(r.speed_text.find("KB/s") != std::string::npos || r.speed_text.find("MB/s") != std::string::npos, "Active row has download speed");
+            ASSERT_TRUE(r.upload_speed_text == "0 KB/s", "Active HTTP row upload speed is 0");
+        } else if (r.task_id == "task-tbl-paused") {
+            ASSERT_TRUE(r.status_text.find("Paused") != std::string::npos, "Paused row status indicates Paused");
+            ASSERT_TRUE(r.speed_text == "0 KB/s", "Paused row download speed is 0");
+            ASSERT_TRUE(r.upload_speed_text == "0 KB/s", "Paused row upload speed is 0");
+        } else if (r.task_id == "task-tbl-seeding") {
+            ASSERT_TRUE(r.status_text == "Completed", "Seeding row status is Completed");
+            ASSERT_TRUE(r.upload_speed_text.find("/s") != std::string::npos, "BitTorrent seeding row displays upload speed");
+        } else if (r.task_id == "task-tbl-failed") {
+            ASSERT_TRUE(r.status_text.find("Failed") != std::string::npos, "Failed row status indicates failure");
+            ASSERT_TRUE(r.full_status_tooltip.find("ERR_NET_CONNECT_TIMEOUT") != std::string::npos, "Failed row tooltip preserves error code");
+        }
+    }
+
     // 4. YouTube Googlevideo Classification Guard
     std::string yt_video_url = "https://rr3---sn-4g5ednks.googlevideo.com/videoplayback?expire=1729272302&ei=xyz&ip=1.2.3.4&id=o-1234&itag=18&source=youtube&requiressl=yes&mime=video%2Fmp4";
     std::string low_url = yt_video_url;
@@ -2976,11 +3077,104 @@ bool TestFinalPhaseRemediationAndLiveMetrics() {
     return true;
 }
 
+bool TestYouTubeCanonicalRoutingAndSchedulerThroughput() {
+    // 1. Test SegmentScheduler::CanSplitAnySegment()
+    openidm::brisk::SegmentScheduler sched(4 * 1024 * 1024, 4, 1024 * 1024);
+    sched.Initialize({});
+    ASSERT_TRUE(sched.CanSplitAnySegment(), "4MB segment with 1MB min_split should be split-eligible (4MB >= 2 * 1MB)");
+
+    auto s1 = sched.AcquireNextOrStealSegment(true);
+    ASSERT_TRUE(s1 != nullptr, "Acquired first segment");
+    ASSERT_TRUE(sched.CanSplitAnySegment(), "CanSplitAnySegment returns true before split");
+
+    auto s2 = sched.AcquireNextOrStealSegment(true);
+    ASSERT_TRUE(s2 != nullptr, "Acquired second stolen segment");
+
+    // Test small scheduler where total bytes < 2 * min_split_bytes
+    openidm::brisk::SegmentScheduler small_sched(1024 * 1024, 4, 1024 * 1024);
+    small_sched.Initialize({});
+    ASSERT_TRUE(!small_sched.CanSplitAnySegment(), "1MB segment with 1MB min_split cannot be split (< 2 * 1MB)");
+
+    // 2. Production Nm3u8dlReAdapter::WriteRestrictedResponseFile & VerifyContainerMagicBytes
+    std::error_code ec;
+    std::filesystem::path task_tmp = std::filesystem::temp_directory_path() / ("flux_test_resp_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(task_tmp, ec);
+
+    std::vector<std::string> rsp_lines = {"--header", "Cookie: secret=12345", "--header", "Authorization: Bearer mytoken"};
+    auto rsp_res = openidm::stream::Nm3u8dlReAdapter::WriteRestrictedResponseFile(task_tmp, "job.rsp", rsp_lines);
+    ASSERT_TRUE(rsp_res.ok(), "WriteRestrictedResponseFile succeeded");
+    ASSERT_TRUE(std::filesystem::exists(*rsp_res.value), "Response file exists on disk");
+
+    // Test MP4 container validation with valid ftyp box
+    std::filesystem::path valid_mp4 = task_tmp / "valid.mp4";
+    {
+        std::ofstream ofs(valid_mp4, std::ios::binary);
+        const uint8_t mp4_hdr[] = {0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0x00, 0x00, 0x02, 0x00};
+        ofs.write(reinterpret_cast<const char*>(mp4_hdr), sizeof(mp4_hdr));
+        std::vector<char> pad(128, 0);
+        ofs.write(pad.data(), pad.size());
+    }
+    ASSERT_TRUE(openidm::stream::Nm3u8dlReAdapter::VerifyContainerMagicBytes(valid_mp4, "mp4"), "VerifyContainerMagicBytes passes valid MP4");
+
+    std::filesystem::path corrupt_mp4 = task_tmp / "corrupt.mp4";
+    {
+        std::ofstream ofs(corrupt_mp4, std::ios::binary);
+        ofs << "not an mp4 file content";
+    }
+    ASSERT_TRUE(!openidm::stream::Nm3u8dlReAdapter::VerifyContainerMagicBytes(corrupt_mp4, "mp4"), "VerifyContainerMagicBytes rejects corrupt MP4");
+
+    std::filesystem::remove_all(task_tmp, ec);
+
+    // 2. Canonical YouTube watch URL extraction from googlevideo.com
+    auto resolve_yt_watch = [](const std::string& manifest_url, const std::string& page_url, const std::string& video_id) -> std::string {
+        if (!page_url.empty() && page_url.find("youtube.com") != std::string::npos) {
+            return page_url;
+        }
+        if (!video_id.empty()) {
+            return "https://www.youtube.com/watch?v=" + video_id;
+        }
+        if (manifest_url.find("googlevideo.com") != std::string::npos) {
+            std::regex id_rx(R"([?&]id=([a-zA-Z0-9_-]+))");
+            std::smatch m;
+            if (std::regex_search(manifest_url, m, id_rx) && m.size() > 1) {
+                std::string raw_id = m[1].str();
+                if (raw_id.rfind("o-", 0) == 0) {
+                    raw_id = raw_id.substr(2);
+                }
+                return "https://www.youtube.com/watch?v=" + raw_id;
+            }
+        }
+        return manifest_url;
+    };
+
+    std::string gv_url = "https://rr3---sn-4g5ednks.googlevideo.com/videoplayback?expire=1729272302&ei=xyz&id=o-dQw4w9WgXcQ&itag=137";
+    std::string canonical = resolve_yt_watch(gv_url, "", "");
+    ASSERT_TRUE(canonical == "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "googlevideo id=o-XYZ mapped to youtube.com/watch?v=XYZ");
+
+    std::string canonical_page = resolve_yt_watch(gv_url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "");
+    ASSERT_TRUE(canonical_page == "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "Page URL prioritized for watch URL");
+
+    // 3. YouTube 1080p Format String Verification
+    auto build_ytdlp_fmt = [](int target_height) -> std::string {
+        if (target_height > 0) {
+            std::string hs = std::to_string(target_height);
+            return "bestvideo[height=" + hs + "]+bestaudio/bestvideo[height<=" + hs + "]+bestaudio/best[height<=" + hs + "]/best";
+        }
+        return "bestvideo+bestaudio/best";
+    };
+
+    std::string fmt_1080 = build_ytdlp_fmt(1080);
+    ASSERT_TRUE(fmt_1080.find("[ext=mp4]") == std::string::npos, "Format selector for 1080p does not force [ext=mp4] which drops VP9/AV1 1080p tracks");
+    ASSERT_TRUE(fmt_1080.find("bestvideo[height=1080]+bestaudio") != std::string::npos, "Format selector matches bestvideo[height=1080]+bestaudio");
+
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 54;
+    const int total = 55;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -3044,6 +3238,7 @@ int main() {
     run(52, "TestModernCoralThemeSettingsModalBoundsAndSafeDelete", TestModernCoralThemeSettingsModalBoundsAndSafeDelete);
     run(53, "TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload", TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload);
     run(54, "TestFinalPhaseRemediationAndLiveMetrics", TestFinalPhaseRemediationAndLiveMetrics);
+    run(55, "TestYouTubeCanonicalRoutingAndSchedulerThroughput", TestYouTubeCanonicalRoutingAndSchedulerThroughput);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

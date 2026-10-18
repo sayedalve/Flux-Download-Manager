@@ -61,6 +61,7 @@ public:
     uint64_t TotalDownloadedBytes() const;
     bool AllCompleted() const;
     size_t ActiveWorkerCount() const;
+    bool CanSplitAnySegment() const;
 
 private:
     mutable std::mutex m_mutex;

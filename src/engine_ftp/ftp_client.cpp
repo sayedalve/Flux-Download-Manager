@@ -172,6 +172,11 @@ Result<std::pair<int, std::string>> ReadFtpResponse(SocketType s) {
 }
 
 Result<std::pair<int, std::string>> SendFtpCommand(SocketType s, const std::string& cmd) {
+    for (char c : cmd) {
+        if (c == '\r' || c == '\n' || c == '\0') {
+            return Result<std::pair<int, std::string>>::Err("ERR_FTP_COMMAND_INJECTION", "CRLF or null character in FTP command");
+        }
+    }
     std::string wire = cmd + "\r\n";
     size_t total_sent = 0;
     while (total_sent < wire.size()) {
@@ -187,8 +192,19 @@ Result<std::pair<int, std::string>> SendFtpCommand(SocketType s, const std::stri
 } // namespace
 
 Result<FtpUrl> FtpUrl::Parse(std::string_view url_str) {
+    for (char c : url_str) {
+        if (c == '\r' || c == '\n' || c == '\0') {
+            return Result<FtpUrl>::Err("ERR_INVALID_FTP_URL", "CRLF or null character in FTP URL");
+        }
+    }
     FtpUrl out;
     std::string s(url_str);
+
+    for (char c : url_str) {
+        if (c == '\r' || c == '\n' || c == '\0') {
+            return Result<FtpUrl>::Err("ERR_FTP_INVALID_URL", "CRLF or null injection detected in FTP URL");
+        }
+    }
 
     std::string prefix_ftp = "ftp://";
     std::string prefix_ftps = "ftps://";
@@ -199,7 +215,7 @@ Result<FtpUrl> FtpUrl::Parse(std::string_view url_str) {
     } else if (s.compare(0, prefix_ftps.size(), prefix_ftps) == 0) {
         return Result<FtpUrl>::Err("ERR_FTPS_UNSUPPORTED", "FTPS (FTP over TLS/SSL) is not supported. Plaintext transmission over ftps:// is prohibited.");
     } else {
-        return Result<FtpUrl>::Err("ERR_INVALID_FTP_URL", "URL must begin with ftp://");
+        return Result<FtpUrl>::Err("ERR_FTP_INVALID_URL", "URL must begin with ftp://");
     }
 
     size_t path_pos = s.find('/', offset);
@@ -223,6 +239,10 @@ Result<FtpUrl> FtpUrl::Parse(std::string_view url_str) {
             out.password = PathSanitizer::UrlDecode(userinfo.substr(colon + 1));
         } else {
             out.user = PathSanitizer::UrlDecode(userinfo);
+        }
+        if (out.user.find('\r') != std::string::npos || out.user.find('\n') != std::string::npos || out.user.find('\0') != std::string::npos ||
+            out.password.find('\r') != std::string::npos || out.password.find('\n') != std::string::npos || out.password.find('\0') != std::string::npos) {
+            return Result<FtpUrl>::Err("ERR_FTP_INVALID_URL", "CRLF or null injection detected in FTP userinfo");
         }
         out.username = out.user;
     }
@@ -395,17 +415,8 @@ Result<uint64_t> FtpClient::DownloadFile(
         }
 
         data_port = static_cast<uint16_t>((p1 << 8) | p2);
-        char data_ip[32];
-        snprintf(data_ip, sizeof(data_ip), "%d.%d.%d.%d", h1, h2, h3, h4);
-        uint32_t ip_val = ((h1 & 0xFF) << 24) | ((h2 & 0xFF) << 16) | ((h3 & 0xFF) << 8) | (h4 & 0xFF);
-
-        // Standard FTP NAT workaround: if the server advertises a private/loopback IP address,
-        // use the control connection's host address to prevent NAT traversal drop.
-        if (!allow_loopback && brisk::HttpClient::IsPrivateOrLoopbackIp(ip_val)) {
-            data_host = url.host;
-        } else {
-            data_host = std::string(data_ip);
-        }
+        // Eliminate PASV third-party bounce SSRF by always pinning data host to control host
+        data_host = url.host;
     }
 
     // Connect Data Socket
@@ -505,13 +516,13 @@ Result<uint64_t> FtpClient::DownloadFile(
     }
     if (pause_requested.load()) {
         SendFtpCommand(ctrl.Get(), "QUIT");
-        return Result<uint64_t>::Ok(total_written);
+        return Result<uint64_t>::Err("ERR_PAUSED", "FTP download paused by user");
     }
 
     auto comp_res = ReadFtpResponse(ctrl.Get());
     SendFtpCommand(ctrl.Get(), "QUIT");
-    if (comp_res.ok() && comp_res.value->first != 226 && comp_res.value->first != 250) {
-        return Result<uint64_t>::Err("ERR_FTP_TRANSFER", "FTP transfer did not complete cleanly: " + comp_res.value->second);
+    if (!comp_res.ok() || (comp_res.value->first != 226 && comp_res.value->first != 250)) {
+        return Result<uint64_t>::Err("ERR_FTP_TRANSFER", "FTP transfer did not complete cleanly: " + (comp_res.ok() ? comp_res.value->second : comp_res.error->message));
     }
     return Result<uint64_t>::Ok(total_written);
 }

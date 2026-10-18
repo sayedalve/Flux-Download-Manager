@@ -79,9 +79,13 @@ Name: "autostart"; Description: "Start Flux minimized in system tray on Windows 
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Components: core; Flags: ignoreversion
 Source: "{#SourceDir}\{#MyAppNmhName}"; DestDir: "{app}"; DestName: "{#MyAppNmhName}"; Components: core; Flags: ignoreversion
 
-; Stream extraction workers (N_m3u8DL-RE and FFmpeg)
+; Stream extraction workers (N_m3u8DL-RE, FFmpeg, and yt-dlp)
 Source: "..\tools\win-x64\N_m3u8DL-RE.exe"; DestDir: "{app}\tools"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tools\win-x64\N_m3u8DL-RE.exe"; DestDir: "{app}\tools\win-x64"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tools\win-x64\ffmpeg.exe"; DestDir: "{app}\tools"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tools\win-x64\ffmpeg.exe"; DestDir: "{app}\tools\win-x64"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tools\win-x64\yt-dlp.exe"; DestDir: "{app}\tools"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tools\win-x64\yt-dlp.exe"; DestDir: "{app}\tools\win-x64"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
 
 ; Browser extension, manifests, and documentation
 Source: "..\extension\*"; DestDir: "{app}\extension"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs

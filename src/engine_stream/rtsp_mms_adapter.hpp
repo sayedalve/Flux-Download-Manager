@@ -29,6 +29,7 @@ public:
     ~RtspMmsAdapter() = default;
 
     static bool IsStreamUrl(std::string_view url);
+    static bool ValidateStreamUrl(std::string_view url);
 
     Result<std::filesystem::path> ExecuteStreamCapture(
         TaskModel& task,

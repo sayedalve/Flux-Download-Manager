@@ -162,7 +162,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         probe_cancel,
         [&](const HttpResponseMeta& meta) -> bool {
             probe_meta = meta;
-            if (meta.status_code == 200) {
+            if (meta.status_code == 200 || meta.status_code == 416) {
                 probe_aborted_after_headers = true;
                 return false;
             }
@@ -173,6 +173,26 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         },
         m_cfg.net_opts);
 
+    // FDM-017: If server returned 416 Range Not Satisfiable during range probe (common for 0-byte files), retry un-ranged GET
+    if (probe_meta.status_code == 416) {
+        probe_cancel.store(false);
+        auto unrange_res = HttpClient::PerformGet(
+            task.url,
+            req_headers,
+            std::nullopt,
+            std::nullopt,
+            m_cfg.stall_timeout_ms,
+            m_cfg.allow_loopback_redirect,
+            probe_cancel,
+            [&](const HttpResponseMeta& meta) -> bool {
+                probe_meta = meta;
+                probe_aborted_after_headers = true;
+                return false;
+            },
+            [&](const uint8_t*, size_t) -> bool { return true; },
+            m_cfg.net_opts);
+    }
+
     if (!probe_res.ok() && !probe_aborted_after_headers) {
         task.state = probe_res.error->user_action_resumable ? TaskState::kPaused : TaskState::kFailed;
         task.error_code = probe_res.error->code;
@@ -182,7 +202,27 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             probe_res.error->code, probe_res.error->message, probe_res.error->retryable, probe_res.error->user_action_resumable);
     }
 
-    if (!probe_meta.final_url.empty()) {
+    // FDM-007: Cross-origin redirect credential scrubbing
+    if (!probe_meta.final_url.empty() && probe_meta.final_url != task.url) {
+        auto orig_u = HttpClient::ParseUrl(task.url);
+        auto final_u = HttpClient::ParseUrl(probe_meta.final_url);
+        if (orig_u.ok() && final_u.ok()) {
+            bool cross_origin = (orig_u.value->scheme != final_u.value->scheme ||
+                                 orig_u.value->host != final_u.value->host ||
+                                 orig_u.value->port != final_u.value->port);
+            if (cross_origin) {
+                OPENIDM_LOG_INFO("HttpEngine", "Cross-origin redirect detected (" + task.url + " -> " + probe_meta.final_url + "); scrubbing credentials and authorization headers");
+                static const char* kSensitiveHeaders[] = {
+                    "cookie", "cookie2", "authorization", "proxy-authorization",
+                    "Cookie", "Cookie2", "Authorization", "Proxy-Authorization"
+                };
+                for (const char* h : kSensitiveHeaders) {
+                    req_headers.erase(h);
+                    task.headers.erase(h);
+                    task.auth_headers.erase(h);
+                }
+            }
+        }
         task.url = probe_meta.final_url;
     }
 
@@ -359,6 +399,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         part_file.Truncate(0);
         uint64_t written_offset = 0;
         auto start_tp = std::chrono::steady_clock::now();
+        auto last_progress_tp = start_tp;
+        uint64_t last_progress_bytes = 0;
 
         std::atomic<bool> stop_flag{false};
         auto single_res = HttpClient::PerformGet(
@@ -382,15 +424,21 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                 }
                 written_offset += len;
                 task.downloaded_bytes = written_offset;
-                if (on_progress) {
-                    auto elapsed_ms = std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - start_tp).count());
+
+                auto now = std::chrono::steady_clock::now();
+                auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_tp).count();
+                if (diff_ms >= 50 && on_progress) {
+                    uint64_t interval_bytes = written_offset - last_progress_bytes;
+                    uint64_t speed = (interval_bytes * 1000ULL) / std::max<int64_t>(1, diff_ms);
+                    last_progress_bytes = written_offset;
+                    last_progress_tp = now;
+
                     EngineProgress ep;
                     ep.task_id = task.task_id;
                     ep.state = TaskState::kDownloading;
                     ep.downloaded_bytes = written_offset;
                     ep.total_bytes = total_bytes;
-                    ep.speed_bps = (written_offset * 1000ULL) / static_cast<uint64_t>(elapsed_ms);
+                    ep.speed_bps = speed;
                     ep.range_supported = false;
                     ep.resolved_filename = task.file_name;
                     on_progress(ep);
@@ -430,14 +478,36 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
 
         std::atomic<bool> fatal_abort{false};
         std::atomic<bool> disable_splitting{false};
+        std::atomic<uint32_t> running_workers{0};
         std::mutex err_mu;
         std::optional<Error> fatal_error;
 
         auto worker_fn = [&](uint32_t /*worker_idx*/) {
+            running_workers.fetch_add(1, std::memory_order_relaxed);
             while (!fatal_abort.load() && !pause_requested.load() && !cancel_requested.load()) {
                 auto seg = scheduler.AcquireNextOrStealSegment(!disable_splitting.load());
                 if (!seg) {
-                    break;
+                    if (scheduler.AllCompleted()) {
+                        break;
+                    }
+                    // Back off briefly in case a running segment becomes eligible for work-stealing soon
+                    bool acquired = false;
+                    for (int idle_retry = 0; idle_retry < 6; ++idle_retry) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        if (fatal_abort.load() || pause_requested.load() || cancel_requested.load() || scheduler.AllCompleted()) {
+                            break;
+                        }
+                        if (scheduler.CanSplitAnySegment()) {
+                            seg = scheduler.AcquireNextOrStealSegment(!disable_splitting.load());
+                            if (seg) {
+                                acquired = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!acquired && !seg) {
+                        break;
+                    }
                 }
 
                 int retries = 0;
@@ -464,6 +534,10 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         req_cancel,
                         [&](const HttpResponseMeta& meta) -> bool {
                             if (meta.status_code == 416) {
+                                if (curr == 0 && (total_bytes == 0 || meta.range_total == 0)) {
+                                    seg->completed.store(true);
+                                    return false;
+                                }
                                 std::lock_guard<std::mutex> lk(err_mu);
                                 fatal_error = Error{"ERR_HTTP_RANGE_NOT_SATISFIABLE", "HTTP 416 Range Not Satisfiable", false, true};
                                 fatal_abort.store(true);
@@ -517,8 +591,10 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                             }
 
                             seg->current_offset.fetch_add(to_write);
-                            if (seg->current_offset.load() > seg->end_offset.load()) {
-                                seg->completed.store(true);
+                            if (to_write < len || seg->current_offset.load() > seg->end_offset.load()) {
+                                if (seg->current_offset.load() > seg->end_offset.load()) {
+                                    seg->completed.store(true);
+                                }
                                 req_cancel.store(true);
                                 return false;
                             }
@@ -576,10 +652,14 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                     }
                 }
             }
+            running_workers.fetch_sub(1, std::memory_order_relaxed);
         };
 
         auto start_tp = std::chrono::steady_clock::now();
         uint64_t initial_bytes = scheduler.TotalDownloadedBytes();
+        auto last_sp_tp = start_tp;
+        uint64_t last_sp_bytes = initial_bytes;
+        uint64_t current_speed = 0;
 
         std::vector<std::thread> workers;
         workers.emplace_back(worker_fn, 0);
@@ -588,8 +668,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         while (!scheduler.AllCompleted() && !fatal_abort.load() && !pause_requested.load() && !cancel_requested.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
-            if (spawned < max_conns && !disable_splitting.load() &&
-                scheduler.TotalDownloadedBytes() > initial_bytes) {
+            if (running_workers.load() < max_conns && spawned < (max_conns * 8) && !disable_splitting.load() &&
+                scheduler.CanSplitAnySegment() && (scheduler.TotalDownloadedBytes() > initial_bytes || is_resume)) {
                 workers.emplace_back(worker_fn, spawned++);
             }
 
@@ -598,16 +678,22 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             task.segments = scheduler.GetSnapshots();
             task.status_detail = "Downloading (" + std::to_string(scheduler.ActiveWorkerCount()) + " active connections)";
 
+            auto now = std::chrono::steady_clock::now();
+            auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sp_tp).count();
+            if (diff_ms >= 100) {
+                uint64_t delta_bytes = (dl >= last_sp_bytes) ? (dl - last_sp_bytes) : 0;
+                current_speed = (delta_bytes * 1000ULL) / std::max<int64_t>(1, diff_ms);
+                last_sp_bytes = dl;
+                last_sp_tp = now;
+            }
+
             if (on_progress) {
-                auto elapsed_ms = std::max<int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - start_tp).count());
-                uint64_t delta_bytes = (dl >= initial_bytes) ? (dl - initial_bytes) : 0;
                 EngineProgress ep;
                 ep.task_id = task.task_id;
                 ep.state = TaskState::kDownloading;
                 ep.downloaded_bytes = dl;
                 ep.total_bytes = total_bytes;
-                ep.speed_bps = (delta_bytes * 1000ULL) / static_cast<uint64_t>(elapsed_ms);
+                ep.speed_bps = current_speed;
                 ep.range_supported = true;
                 ep.resolved_filename = task.file_name;
                 ep.etag = task.etag;

@@ -59,7 +59,8 @@ async function persistSessionState(storageArea = null) {
   if (G.clickedLinksByUrl) {
     const now = Date.now();
     for (const item of G.clickedLinksByUrl.values()) {
-      if (item && item.timestamp && (now - item.timestamp) < 1800000) {
+      const ts = item && (item.time || item.timestamp);
+      if (item && ts && (now - ts) < 1800000) {
         recentClicks.push(item);
         if (recentClicks.length >= 30) break;
       }
@@ -114,12 +115,18 @@ async function restoreSessionState(storageArea = null) {
   if (Array.isArray(clicksSource) && G.clickedLinksByUrl) {
     const now = Date.now();
     for (const item of clicksSource) {
-      if (item && item.timestamp && (now - item.timestamp) < 1800000) {
+      const ts = item && (item.time || item.timestamp);
+      if (item && ts && (now - ts) < 1800000) {
         if (item.url && !G.clickedLinksByUrl.has(item.url)) {
           G.clickedLinksByUrl.set(item.url, item);
         }
-        if (item.tabId && G.clickedLinksByTab && !G.clickedLinksByTab.has(item.tabId)) {
-          G.clickedLinksByTab.set(item.tabId, item);
+        if (item.tabId && G.clickedLinksByTab) {
+          const tabList = G.clickedLinksByTab.get(item.tabId);
+          if (Array.isArray(tabList)) {
+            tabList.push(item);
+          } else {
+            G.clickedLinksByTab.set(item.tabId, [item]);
+          }
         }
       }
     }
@@ -829,7 +836,8 @@ async function onDownloadCreatedHandler(
         tabUrl: pageReferrer,
         bypassModifier: false,
         correlationId,
-        headers
+        headers,
+        autoStart: true
       }, customTransport);
 
       if (result && result.accepted) {
@@ -1041,7 +1049,14 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     : ((sourceType === SourceType.DIRECT_PROGRESSIVE && candidate.ext) ? candidate.ext : "mp4");
 
   let targetManifestUrl = candidate.url;
-  if (sourceType === SourceType.DIRECT_PROGRESSIVE && effectiveVideoUrl) {
+  if (sourceType === SourceType.YOUTUBE_EXTRACTION) {
+    const isRawGoogleVideo = (candidate.url && (candidate.url.includes("googlevideo.com") || candidate.url.includes("videoplayback")));
+    targetManifestUrl = (!isRawGoogleVideo && candidate.url)
+      ? candidate.url
+      : ((candidate.tabUrl && !candidate.tabUrl.includes("googlevideo.com"))
+          ? candidate.tabUrl
+          : (candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : candidate.url));
+  } else if (sourceType === SourceType.DIRECT_PROGRESSIVE && effectiveVideoUrl) {
     targetManifestUrl = effectiveVideoUrl;
   }
 
@@ -1078,6 +1093,9 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     sourceType,
     manifestUrl: targetManifestUrl,
     url: targetManifestUrl,
+    watchUrl: (candidate.tabUrl && !candidate.tabUrl.includes("googlevideo.com"))
+      ? candidate.tabUrl
+      : (candidate.videoId ? `https://www.youtube.com/watch?v=${candidate.videoId}` : ""),
     videoUrl: effectiveVideoUrl,
     pairedAudioUrl: effectiveAudioUrl,
     videoId: candidate.videoId || "",
@@ -1958,6 +1976,7 @@ if (typeof chrome !== "undefined") {
         G.tabUrlMap.delete(tabId);
         if (G.playerErrors) G.playerErrors.delete(tabId);
         if (G.clickedLinksByTab) G.clickedLinksByTab.delete(tabId);
+        if (G.capturedKeys && typeof G.capturedKeys.delete === "function") G.capturedKeys.delete(tabId);
         if (G.bypassTabs) G.bypassTabs.delete(tabId);
         if (G.blobMediaMap) G.blobMediaMap.delete(tabId);
         persistSessionState().catch(() => {});

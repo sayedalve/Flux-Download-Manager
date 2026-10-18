@@ -70,6 +70,10 @@ function renderDetectedMediaList(candidates, options = {}) {
     return `<div class="error-banner" data-state="error">${escapeHtml(errorMessage)}</div>`;
   }
 
+  const connBanner = desktopConnected
+    ? ""
+    : '<div class="error-banner" data-state="disconnected">Flux Desktop is offline. Direct files will fall back to browser download.</div>';
+
   if (filterMode === "links") {
     const pageLinks = options.pageLinks || [];
     const q = (searchQuery || "").trim().toLowerCase();
@@ -106,10 +110,6 @@ function renderDetectedMediaList(candidates, options = {}) {
     return '<p class="empty" data-state="empty">No media detected on this tab yet. Play a video or start a download to capture streams.</p>';
   }
 
-  const connBanner = desktopConnected
-    ? ""
-    : '<div class="error-banner" data-state="disconnected">Flux Desktop is offline. Direct files will fall back to browser download.</div>';
-
   const itemsHtml = filtered.map(item => {
     const isStream = isStreamCandidate(item);
     const badge = isStream
@@ -119,9 +119,15 @@ function renderDetectedMediaList(candidates, options = {}) {
     const rawName = item.pageTitle || item.fileName || (item.url ? item.url.split("?")[0].split("/").pop() : "media");
     const safeName = escapeHtml(rawName);
     const sourceHost = escapeHtml(extractSourceHost(item.tabUrl || item.url));
+    const activeQuality = (Array.isArray(item.qualities) && item.qualities.length > 0)
+      ? (item.qualities.find(q => String(q.id || q.resolution).toLowerCase() === String(item.resolution || "").toLowerCase()) || item.qualities[0])
+      : null;
+    const effSize = activeQuality ? (activeQuality.size || item.size || 0) : (item.size || 0);
+    const effEstimated = activeQuality ? Boolean(activeQuality.sizeEstimated) : false;
+    const szPrefix = effEstimated ? " &middot; ~" : " &middot; ";
     const qualityTag = item.resolution
-      ? `<span class="meta-mono">${escapeHtml(item.resolution)}${item.size > 0 ? " &middot; " + formatMediaSize(item.size) : ""}</span>`
-      : `<span class="meta-mono">${formatMediaSize(item.size)}</span>`;
+      ? `<span class="meta-mono">${escapeHtml(item.resolution)}${effSize > 0 ? szPrefix + formatMediaSize(effSize) : ""}</span>`
+      : `<span class="meta-mono">${effSize > 0 ? (effEstimated ? "~" : "") + formatMediaSize(effSize) : ""}</span>`;
     const variantNote = (item.variants && item.variants.length > 0)
       ? `<span class="item-variants">(+${item.variants.length} sub-playlists grouped)</span>`
       : "";
@@ -136,7 +142,8 @@ function renderDetectedMediaList(candidates, options = {}) {
     if (Array.isArray(item.qualities) && item.qualities.length > 1) {
       const optsHtml = item.qualities.map(q => {
         const qid = escapeHtml(q.id || q.resolution || "");
-        const qlbl = escapeHtml(q.label || q.resolution || qid);
+        const szText = q.size > 0 ? (` · ${q.sizeEstimated ? "~" : ""}${formatMediaSize(q.size)}`) : "";
+        const qlbl = escapeHtml((q.label || q.resolution || qid) + szText);
         const isSelected = (String(q.id || "").toLowerCase() === String(item.resolution || "").toLowerCase() ||
                             String(q.resolution || "").toLowerCase() === String(item.resolution || "").toLowerCase());
         return `<option value="${qid}" ${isSelected ? "selected" : ""}>${qlbl}</option>`;
@@ -144,7 +151,8 @@ function renderDetectedMediaList(candidates, options = {}) {
       qualityDropdownHtml = `<select class="quality-select" data-id="${escapeHtml(item.candidateId)}" aria-label="Select stream quality">${optsHtml}</select>`;
     } else if (Array.isArray(item.qualities) && item.qualities.length === 1) {
       const singleQ = item.qualities[0];
-      const singleLbl = escapeHtml(singleQ.label || singleQ.resolution || item.resolution || "Single stream");
+      const singleSz = singleQ.size > 0 ? (` · ${singleQ.sizeEstimated ? "~" : ""}${formatMediaSize(singleQ.size)}`) : "";
+      const singleLbl = escapeHtml((singleQ.label || singleQ.resolution || item.resolution || "Single stream") + singleSz);
       qualityDropdownHtml = `<span class="meta-mono" style="margin-right:6px;" title="Detected quality">${singleLbl}</span>`;
     }
 
@@ -269,7 +277,9 @@ function initPopupUI() {
             const itemBox = selTarget.closest ? selTarget.closest(".media-item") : null;
             const metaMono = itemBox ? itemBox.querySelector(".meta-mono") : null;
             if (metaMono) {
-              metaMono.textContent = cand.resolution + (cand.size > 0 ? " · " + formatMediaSize(cand.size) : "");
+              const chosenSize = chosen.size || cand.size || 0;
+              const szPrefix = chosen.sizeEstimated ? " · ~" : " · ";
+              metaMono.textContent = cand.resolution + (chosenSize > 0 ? szPrefix + formatMediaSize(chosenSize) : "");
             }
           }
         }

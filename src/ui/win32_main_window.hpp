@@ -187,6 +187,7 @@ struct FormattedTaskRow {
     std::string category{"General"};
     std::string display_filename;
     std::string full_filename_tooltip;
+    std::string full_status_tooltip;
     bool is_filename_truncated{false};
     std::string file_type_badge;
     bool is_stream{false};

@@ -14,7 +14,9 @@ const {
   isSiteDisabled,
   setSiteDisabled,
   classifyNetworkResource,
-  addOrDeduplicateMediaCandidate
+  addOrDeduplicateMediaCandidate,
+  isDownloadEligible,
+  sanitizeFilename
 } = require("../extension/js/function.js");
 const {
   persistSessionState,
@@ -22,7 +24,9 @@ const {
   onBeforeSendHeadersHandler,
   onHeadersReceivedHandler,
   onDownloadCreatedHandler,
-  submitMediaCandidateToOpenIDM
+  submitMediaCandidateToOpenIDM,
+  handleRuntimeMessage,
+  downloadStateMachine
 } = require("../extension/js/background.js");
 const {
   positionOverlayHost,
@@ -263,7 +267,7 @@ async function runTests() {
   assert.strictEqual(browserFallbackTriggeredUrl, "https://cdn.example.com/media/lecture42.mp4");
   console.log("  -> PASS");
 
-  console.log("[9/11] Testing Link-Click Interception & Alt-Key Bypass Behavior...");
+  console.log("[9/11] Testing Link-Click Intent Recording & Alt-Key Bypass Behavior...");
   const { handleLinkClick } = require("../extension/js/content-script.js");
   let sentLinkMessages = [];
   globalThis.chrome = {
@@ -272,7 +276,8 @@ async function runTests() {
     }
   };
 
-  // Normal link click on .zip file
+  // Normal link click on .zip file: natural user gesture preserved, sends linkClicked for correlation
+  let preventDefaultCalled = false;
   const fakeZipAnchor = {
     pathname: "/downloads/archive.zip",
     href: "https://files.example.com/downloads/archive.zip",
@@ -281,42 +286,24 @@ async function runTests() {
   };
   const fakeZipEvent = {
     altKey: false,
+    preventDefault: () => { preventDefaultCalled = true; },
+    stopPropagation: () => {},
     target: { closest: (tag) => (tag === "a" ? fakeZipAnchor : null) }
   };
   handleLinkClick(fakeZipEvent);
-  assert.strictEqual(sentLinkMessages.length, 2);
+  assert.strictEqual(preventDefaultCalled, false, "Natural user click gesture is NEVER prevented");
+  assert.strictEqual(sentLinkMessages.length, 1);
   assert.strictEqual(sentLinkMessages[0].action, "linkClicked");
   assert.strictEqual(sentLinkMessages[0].url, "https://files.example.com/downloads/archive.zip");
   assert.strictEqual(sentLinkMessages[0].filename, "archive.zip");
-  assert.strictEqual(sentLinkMessages[1].action, "interceptDownloadClick");
-  assert.strictEqual(sentLinkMessages[1].url, "https://files.example.com/downloads/archive.zip");
-
-  // Fallback verification when Flux rejects or is offline
-  let fallbackClicked = false;
-  const fakeFallbackAnchor = {
-    pathname: "/downloads/archive.zip",
-    href: "https://files.example.com/downloads/archive.zip",
-    download: "archive.zip",
-    hasAttribute: (attr) => attr === "download",
-    dataset: {},
-    click: () => { fallbackClicked = true; }
-  };
-  globalThis.chrome.runtime.sendMessage = (msg, cb) => {
-    if (msg.action === "interceptDownloadClick" && typeof cb === "function") {
-      cb({ accepted: false, reason: "NMH_OFFLINE" });
-    }
-  };
-  handleLinkClick({
-    altKey: false,
-    target: { closest: () => fakeFallbackAnchor }
-  });
-  assert.strictEqual(fallbackClicked, true, "Safe browser fallback triggers anchor.click() when desktop rejects or is offline");
 
   // Alt-key bypass modifier click
   sentLinkMessages = [];
   globalThis.chrome.runtime.sendMessage = (msg) => { sentLinkMessages.push(msg); };
   const fakeAltEvent = {
     altKey: true,
+    preventDefault: () => {},
+    stopPropagation: () => {},
     target: { closest: () => fakeZipAnchor }
   };
   handleLinkClick(fakeAltEvent);
@@ -450,7 +437,357 @@ async function runTests() {
 
   console.log("  -> PASS");
 
-  console.log("\nBrowser Extension & Detection Suite: 13 / 13 suites PASSED.");
+  console.log("\n[14/14] Testing 22 Comprehensive Interception, Fallback & Edge Scenarios...");
+  const mockAcceptScenario = async (rpc) => {
+    return { accepted: true, taskId: "task-" + Math.random().toString(36).slice(2), fileName: rpc.params && rpc.params.filename };
+  };
+
+  // Scenario 1: Direct .zip or .exe link
+  let canceledId1 = null, suggestedName1 = null;
+  const res1 = await onDownloadCreatedHandler(
+    { id: 2001, url: "https://example.com/installer.exe", filename: "installer.exe", fileSize: 25000000 },
+    mockAcceptScenario,
+    async (id) => { canceledId1 = id; },
+    (sug) => { suggestedName1 = sug && sug.filename; }
+  );
+  assert.strictEqual(res1.intercepted, true, "Scenario 1: Direct .exe link intercepted");
+  assert.strictEqual(canceledId1, 2001, "Scenario 1: Download canceled after acceptance");
+  console.log("  [Scenario 1/22] Direct .zip/.exe link -> PASS");
+
+  // Scenario 2: URL without file extension returning Content-Disposition: attachment
+  onHeadersReceivedHandler({
+    requestId: "req-sc-2",
+    tabId: 50,
+    url: "https://example.com/api/get_file?id=555",
+    responseHeaders: [
+      { name: "Content-Disposition", value: 'attachment; filename="data_export.csv"' },
+      { name: "Content-Type", value: "text/csv" },
+      { name: "Content-Length", value: "204800" }
+    ]
+  });
+  let canceledId2 = null;
+  const res2 = await onDownloadCreatedHandler(
+    { id: 2002, tabId: 50, url: "https://example.com/api/get_file?id=555", filename: "" },
+    mockAcceptScenario,
+    async (id) => { canceledId2 = id; }
+  );
+  assert.strictEqual(res2.intercepted, true, "Scenario 2: URL without extension with Content-Disposition intercepted");
+  assert.strictEqual(canceledId2, 2002);
+  console.log("  [Scenario 2/22] URL without extension with Content-Disposition -> PASS");
+
+  // Scenario 3: Redirect to a signed download URL
+  onHeadersReceivedHandler({
+    requestId: "req-sc-3",
+    tabId: 51,
+    statusCode: 302,
+    url: "https://example.com/download/archive.tar.gz",
+    responseHeaders: [
+      { name: "Location", value: "https://storage.cdn.com/blobs/abc-123.tar.gz?auth=token99" }
+    ]
+  });
+  const res3 = await onDownloadCreatedHandler(
+    { id: 2003, tabId: 51, url: "https://storage.cdn.com/blobs/abc-123.tar.gz?auth=token99", filename: "abc-123.tar.gz", fileSize: 10485760 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res3.intercepted, true, "Scenario 3: Redirect to signed download URL intercepted");
+  const rec3 = downloadStateMachine.get(2003);
+  assert.strictEqual(rec3.originalUrl, "https://example.com/download/archive.tar.gz", "Scenario 3: Original redirect URL correlated");
+  console.log("  [Scenario 3/22] Redirect to signed download URL correlated -> PASS");
+
+  // Scenario 4: Final filename revealed only by response headers
+  onHeadersReceivedHandler({
+    requestId: "req-sc-4",
+    tabId: 52,
+    url: "https://example.com/api/generate_report",
+    responseHeaders: [
+      { name: "Content-Disposition", value: "attachment; filename*=UTF-8''final_report_2026.pdf" },
+      { name: "Content-Type", value: "application/pdf" },
+      { name: "Content-Length", value: "5242880" }
+    ]
+  });
+  let suggestedName4 = null;
+  const res4 = await onDownloadCreatedHandler(
+    { id: 2004, tabId: 52, url: "https://example.com/api/generate_report", filename: "" },
+    mockAcceptScenario,
+    async () => {},
+    (sug) => { suggestedName4 = sug && sug.filename; }
+  );
+  assert.strictEqual(res4.intercepted, true, "Scenario 4: Filename revealed only by headers intercepted");
+  const rec4 = downloadStateMachine.get(2004);
+  assert.strictEqual(rec4.suggestedFilename, "final_report_2026.pdf", "Scenario 4: Extracted UTF-8 filename");
+  console.log("  [Scenario 4/22] Filename from response headers -> PASS");
+
+  // Scenario 5: Download with no click record
+  const res5 = await onDownloadCreatedHandler(
+    { id: 2005, url: "https://dist.example.com/archlinux-2026.iso", filename: "archlinux-2026.iso", fileSize: 900000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res5.intercepted, true, "Scenario 5: Programmatic/direct download with no click record intercepted");
+  const rec5 = downloadStateMachine.get(2005);
+  assert.strictEqual(rec5.wasExplicitLinkClick, false, "Scenario 5: wasExplicitLinkClick is false");
+  console.log("  [Scenario 5/22] Download with no click record -> PASS");
+
+  // Scenario 6: Click record arriving before browser download event
+  handleRuntimeMessage({
+    action: "linkClicked",
+    url: "https://files.example.com/packages/tool-v2.zip",
+    filename: "tool-v2.zip"
+  }, { tab: { id: 60 } }, () => {});
+  const res6 = await onDownloadCreatedHandler(
+    { id: 2006, tabId: 60, url: "https://files.example.com/packages/tool-v2.zip", filename: "tool-v2.zip", fileSize: 5000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res6.intercepted, true, "Scenario 6: Click record arriving before browser event intercepted");
+  const rec6 = downloadStateMachine.get(2006);
+  assert.strictEqual(rec6.wasExplicitLinkClick, true, "Scenario 6: Correlated with preceding click record");
+  console.log("  [Scenario 6/22] Click record before browser event -> PASS");
+
+  // Scenario 7: Browser event arriving before click record
+  const res7 = await onDownloadCreatedHandler(
+    { id: 2007, tabId: 70, url: "https://files.example.com/packages/driver.msi", filename: "driver.msi", fileSize: 15000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res7.intercepted, true, "Scenario 7: Browser event handled gracefully even without prior click");
+  console.log("  [Scenario 7/22] Browser event arriving before click record -> PASS");
+
+  // Scenario 8: Simultaneous downloads from different tabs
+  const dlA = { id: 2008, tabId: 81, url: "https://tab1.com/fileA.zip", filename: "fileA.zip", fileSize: 2000000 };
+  const dlB = { id: 2009, tabId: 82, url: "https://tab2.com/fileB.msi", filename: "fileB.msi", fileSize: 3000000 };
+  const [res8a, res8b] = await Promise.all([
+    onDownloadCreatedHandler(dlA, mockAcceptScenario, async () => {}),
+    onDownloadCreatedHandler(dlB, mockAcceptScenario, async () => {})
+  ]);
+  assert.strictEqual(res8a.intercepted, true, "Scenario 8: Tab A download intercepted");
+  assert.strictEqual(res8b.intercepted, true, "Scenario 8: Tab B download intercepted");
+  assert.strictEqual(downloadStateMachine.get(2008).tabId, 81);
+  assert.strictEqual(downloadStateMachine.get(2009).tabId, 82);
+  console.log("  [Scenario 8/22] Simultaneous downloads from different tabs -> PASS");
+
+  // Scenario 9: Two downloads from the same URL or domain (verifying second is not dropped)
+  const res9a = await onDownloadCreatedHandler(
+    { id: 2010, url: "https://cdn.example.com/same_file.zip", filename: "same_file.zip", fileSize: 5000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  const res9b = await onDownloadCreatedHandler(
+    { id: 2011, url: "https://cdn.example.com/same_file.zip", filename: "same_file.zip", fileSize: 5000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res9a.intercepted, true, "Scenario 9: First download of same URL intercepted");
+  assert.strictEqual(res9b.intercepted, true, "Scenario 9: Second download of identical URL NOT dropped");
+  console.log("  [Scenario 9/22] Two downloads from same URL not dropped -> PASS");
+
+  // Scenario 10: Desktop acceptance response (accepted: true)
+  let cancelCalled10 = false, suggestCalled10 = false;
+  const res10 = await onDownloadCreatedHandler(
+    { id: 2012, url: "https://example.com/release.tar.gz", filename: "release.tar.gz", fileSize: 4000000 },
+    mockAcceptScenario,
+    async () => { cancelCalled10 = true; },
+    () => { suggestCalled10 = true; }
+  );
+  assert.strictEqual(res10.intercepted, true);
+  assert.strictEqual(suggestCalled10, true, "Scenario 10: Suggest called before cancel");
+  assert.strictEqual(cancelCalled10, true, "Scenario 10: Browser download canceled upon desktop acceptance");
+  console.log("  [Scenario 10/22] Desktop acceptance -> PASS");
+
+  // Scenario 11: Desktop rejection response (accepted: false)
+  let cancelCalled11 = false, suggestCalled11 = false;
+  const mockTransportReject = async () => ({ accepted: false, reason: "USER_DECLINED_DOWNLOAD" });
+  const res11 = await onDownloadCreatedHandler(
+    { id: 2013, url: "https://example.com/rejected.zip", filename: "rejected.zip", fileSize: 4000000 },
+    mockTransportReject,
+    async () => { cancelCalled11 = true; },
+    () => { suggestCalled11 = true; }
+  );
+  assert.strictEqual(res11.intercepted, false);
+  assert.strictEqual(res11.fallbackToBrowser, true, "Scenario 11: Safely falls back to browser");
+  assert.strictEqual(cancelCalled11, false, "Scenario 11: Browser download is NOT canceled");
+  assert.strictEqual(suggestCalled11, true, "Scenario 11: Suggest called so browser can determine filename natively");
+  console.log("  [Scenario 11/22] Desktop rejection -> PASS");
+
+  // Scenario 12: Native messaging host missing error
+  let cancelCalled12 = false;
+  const mockHostMissing = async () => { throw new Error("Specified native messaging host not found"); };
+  const res12 = await onDownloadCreatedHandler(
+    { id: 2014, url: "https://example.com/host_missing.zip", filename: "host_missing.zip", fileSize: 4000000 },
+    mockHostMissing,
+    async () => { cancelCalled12 = true; }
+  );
+  assert.strictEqual(res12.intercepted, false);
+  assert.strictEqual(res12.fallbackToBrowser, true, "Scenario 12: Fallback when NMH is missing");
+  assert.strictEqual(cancelCalled12, false, "Scenario 12: Browser download allowed to continue");
+  console.log("  [Scenario 12/22] Native messaging host missing error -> PASS");
+
+  // Scenario 13: Native messaging timeout (5000ms)
+  let cancelCalled13 = false;
+  const mockTransportTimeout = async () => {
+    return new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("RPC_TIMEOUT_AFTER_5000MS")), 20);
+    });
+  };
+  const res13 = await onDownloadCreatedHandler(
+    { id: 2015, url: "https://example.com/timeout.zip", filename: "timeout.zip", fileSize: 4000000 },
+    mockTransportTimeout,
+    async () => { cancelCalled13 = true; }
+  );
+  assert.strictEqual(res13.intercepted, false);
+  assert.strictEqual(res13.fallbackToBrowser, true, "Scenario 13: Safe browser fallback on RPC timeout");
+  assert.strictEqual(cancelCalled13, false);
+  console.log("  [Scenario 13/22] Native messaging timeout fallback -> PASS");
+
+  // Scenario 14: Malformed RPC responses
+  const mockTransportMalformed = async () => ({ unexpectedData: true });
+  const res14 = await onDownloadCreatedHandler(
+    { id: 2016, url: "https://example.com/malformed.zip", filename: "malformed.zip", fileSize: 4000000 },
+    mockTransportMalformed,
+    async () => {}
+  );
+  assert.strictEqual(res14.intercepted, false);
+  assert.strictEqual(res14.fallbackToBrowser, true, "Scenario 14: Malformed response safely triggers fallback");
+  console.log("  [Scenario 14/22] Malformed RPC response handled -> PASS");
+
+  // Scenario 15: Duplicate browser events for same download ID
+  let rpcOfferCount = 0;
+  const mockCountingTransport = async () => {
+    rpcOfferCount++;
+    return { accepted: true, taskId: "task-shared-offer" };
+  };
+  const dlItem15 = { id: 2017, url: "https://example.com/duplicate_event.zip", filename: "duplicate_event.zip", fileSize: 5000000 };
+  const [res15a, res15b] = await Promise.all([
+    onDownloadCreatedHandler(dlItem15, mockCountingTransport, async () => {}, null),
+    onDownloadCreatedHandler(dlItem15, mockCountingTransport, async () => {}, () => {})
+  ]);
+  assert.strictEqual(res15a.intercepted, true);
+  assert.strictEqual(res15b.intercepted, true);
+  assert.strictEqual(rpcOfferCount, 1, "Scenario 15: Shared offerPromise ensures exactly 1 RPC sent for duplicate events");
+  console.log("  [Scenario 15/22] Duplicate browser events for same download ID -> PASS");
+
+  // Scenario 16: Normal HTML page navigation (verifying no spurious capture)
+  let cancelCalled16 = false;
+  const res16 = await onDownloadCreatedHandler(
+    { id: 2018, url: "https://news.ycombinator.com/item?id=9999", filename: "", mime: "text/html", fileSize: 15000 },
+    mockAcceptScenario,
+    async () => { cancelCalled16 = true; }
+  );
+  assert.strictEqual(res16.intercepted, false, "Scenario 16: HTML page navigation not captured");
+  assert.strictEqual(cancelCalled16, false, "Scenario 16: Navigation download is never canceled");
+  console.log("  [Scenario 16/22] Normal HTML page navigation bypassed -> PASS");
+
+  // Scenario 17: blob: and data: downloads (staying in browser)
+  const eligBlob = isDownloadEligible({ url: "blob:https://app.example.com/uuid-1234", filename: "data.json" });
+  assert.strictEqual(eligBlob.eligible, false, "Scenario 17: blob: URLs not eligible");
+  assert.strictEqual(eligBlob.reason, "BROWSER_INTERNAL_OR_BLOB");
+  const eligData = isDownloadEligible({ url: "data:application/zip;base64,UEsDBBQAAAAIA...", filename: "sample.zip" });
+  assert.strictEqual(eligData.eligible, false, "Scenario 17: data: URLs not eligible");
+  assert.strictEqual(eligData.reason, "BROWSER_INTERNAL_OR_BLOB");
+  console.log("  [Scenario 17/22] blob: and data: downloads stay in browser -> PASS");
+
+  // Scenario 18: User bypass (Alt-key) and excluded websites
+  setSiteDisabled("https://company.internal.net", true);
+  const eligDisabled = isDownloadEligible({
+    url: "https://company.internal.net/secret.zip",
+    filename: "secret.zip",
+    tabUrl: "https://company.internal.net/dashboard"
+  });
+  assert.strictEqual(eligDisabled.eligible, false, "Scenario 18: Excluded website download ignored");
+  setSiteDisabled("https://company.internal.net", false);
+
+  handleRuntimeMessage({ action: "bypassNextDownload", url: "https://example.com/bypass_file.zip" }, {}, () => {});
+  const res18 = await onDownloadCreatedHandler(
+    { id: 2019, url: "https://example.com/bypass_file.zip", filename: "bypass_file.zip", fileSize: 5000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res18.intercepted, false, "Scenario 18: Alt-key bypassed download ignored");
+  console.log("  [Scenario 18/22] User bypass (Alt-key) & excluded sites -> PASS");
+
+  // Scenario 19: Cross-origin frames correlation
+  handleRuntimeMessage({
+    action: "linkClicked",
+    url: "https://sub.vendor.com/iframe_download.exe",
+    filename: "iframe_download.exe",
+    isFrame: true
+  }, { tab: { id: 95 } }, () => {});
+  const res19 = await onDownloadCreatedHandler(
+    { id: 2020, tabId: 95, url: "https://sub.vendor.com/iframe_download.exe", filename: "iframe_download.exe", fileSize: 8000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res19.intercepted, true, "Scenario 19: Cross-origin frame download correlated and intercepted");
+  assert.strictEqual(downloadStateMachine.get(2020).mechanism, "FRAME_ORIGINATED");
+  console.log("  [Scenario 19/22] Cross-origin frames correlation -> PASS");
+
+  // Scenario 20: Failed cancellation attempt recovery
+  const failingCancel = async () => { throw new Error("Download already finished"); };
+  const res20 = await onDownloadCreatedHandler(
+    { id: 2021, url: "https://example.com/fast.zip", filename: "fast.zip", fileSize: 5000000 },
+    mockAcceptScenario,
+    failingCancel
+  );
+  assert.strictEqual(res20.intercepted, true, "Scenario 20: Handoff succeeds even if cancel throws");
+  assert.strictEqual(downloadStateMachine.get(2021).state, "HANDED_OFF");
+  console.log("  [Scenario 20/22] Failed cancellation attempt recovery -> PASS");
+
+  // Scenario 21: Service worker restart between click and download (session restore)
+  handleRuntimeMessage({
+    action: "linkClicked",
+    url: "https://storage.cdn.com/persisted_pkg.tar.gz",
+    filename: "persisted_pkg.tar.gz"
+  }, { tab: { id: 88 } }, () => {});
+  onHeadersReceivedHandler({
+    requestId: "req-sc-21",
+    tabId: 88,
+    url: "https://storage.cdn.com/persisted_pkg.tar.gz",
+    responseHeaders: [
+      { name: "Content-Type", value: "application/gzip" },
+      { name: "Content-Length", value: "25000000" }
+    ]
+  });
+  const mockStore = {
+    _d: {},
+    set: async function(o) { Object.assign(this._d, o); },
+    get: async function(k) { const o = {}; for (const x of k) o[x] = this._d[x]; return o; }
+  };
+  await persistSessionState(mockStore);
+  G.recentDownloadResponses.clear();
+  G.clickedLinksByUrl.clear();
+  assert.strictEqual(G.recentDownloadResponses.size, 0);
+  await restoreSessionState(mockStore);
+  assert.strictEqual(G.recentDownloadResponses.size > 0, true, "Scenario 21: Download responses restored");
+  const res21 = await onDownloadCreatedHandler(
+    { id: 2022, tabId: 88, url: "https://storage.cdn.com/persisted_pkg.tar.gz", filename: "persisted_pkg.tar.gz", fileSize: 25000000 },
+    mockAcceptScenario,
+    async () => {}
+  );
+  assert.strictEqual(res21.intercepted, true, "Scenario 21: Intercepted post-restart using restored session metadata");
+  console.log("  [Scenario 21/22] Service worker restart session restore -> PASS");
+
+  // Scenario 22: Concurrent media detection while file download is starting
+  const [resHls, resDl] = await Promise.all([
+    onHeadersReceivedHandler({
+      requestId: "req-sc-22-media",
+      tabId: 99,
+      url: "https://stream.example.com/master.m3u8",
+      responseHeaders: [{ name: "Content-Type", value: "application/vnd.apple.mpegurl" }]
+    }),
+    onDownloadCreatedHandler(
+      { id: 2023, tabId: 100, url: "https://dl.example.com/concurrent.iso", filename: "concurrent.iso", fileSize: 700000000 },
+      mockAcceptScenario,
+      async () => {}
+    )
+  ]);
+  assert.strictEqual(resHls.added, true, "Scenario 22: Media sniffer detected HLS stream concurrently");
+  assert.strictEqual(resDl.intercepted, true, "Scenario 22: File download intercepted concurrently");
+  console.log("  [Scenario 22/22] Concurrent media detection & file download -> PASS");
+
+  console.log("\n=======================================================");
+  console.log("Browser Extension Suite: 14/14 suites (22/22 edge scenarios) PASSED.");
+  console.log("=======================================================");
 }
 
 runTests().catch((err) => {

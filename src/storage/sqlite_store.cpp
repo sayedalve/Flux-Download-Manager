@@ -649,20 +649,47 @@ Result<int> SqliteStore::RecoverInterruptedTasks(uint64_t rollback_margin_bytes)
         if (t.state == TaskState::kProbing || t.state == TaskState::kDownloading ||
             t.state == TaskState::kMuxing || t.state == TaskState::kVerifying) {
             t.state = TaskState::kPaused;
-            uint64_t recomputed_dl = 0;
-            for (auto& seg : t.segments) {
-                if (!seg.completed && seg.current_offset > seg.start_offset) {
-                    uint64_t delta = seg.current_offset - seg.start_offset;
-                    if (delta > rollback_margin_bytes) {
-                        seg.current_offset -= rollback_margin_bytes;
-                    } else {
-                        seg.current_offset = seg.start_offset;
+            t.speed_bps = 0;
+            t.status_detail = "Paused (Recovered after restart)";
+
+            std::error_code ec;
+            bool part_exists = !t.part_path.empty() && std::filesystem::exists(t.part_path, ec);
+
+            if (!t.segments.empty()) {
+                if (!part_exists) {
+                    t.segments.clear();
+                    t.downloaded_bytes = 0;
+                } else {
+                    uint64_t actual_part_sz = std::filesystem::file_size(t.part_path, ec);
+                    uint64_t recomputed_dl = 0;
+                    for (auto& seg : t.segments) {
+                        if (!seg.completed && seg.current_offset > seg.start_offset) {
+                            uint64_t delta = seg.current_offset - seg.start_offset;
+                            if (delta > rollback_margin_bytes) {
+                                seg.current_offset -= rollback_margin_bytes;
+                            } else {
+                                seg.current_offset = seg.start_offset;
+                            }
+                        }
+                        if (seg.current_offset > actual_part_sz && actual_part_sz >= seg.start_offset) {
+                            seg.current_offset = actual_part_sz;
+                        }
+                        recomputed_dl += seg.downloaded_bytes();
+                    }
+                    t.downloaded_bytes = recomputed_dl;
+                }
+            } else {
+                if (!part_exists) {
+                    t.downloaded_bytes = 0;
+                } else {
+                    uint64_t actual_part_sz = std::filesystem::file_size(t.part_path, ec);
+                    if (t.downloaded_bytes > actual_part_sz) {
+                        t.downloaded_bytes = actual_part_sz;
+                    }
+                    if (rollback_margin_bytes > 0 && t.downloaded_bytes > rollback_margin_bytes) {
+                        t.downloaded_bytes -= rollback_margin_bytes;
                     }
                 }
-                recomputed_dl += seg.downloaded_bytes();
-            }
-            if (!t.segments.empty()) {
-                t.downloaded_bytes = recomputed_dl;
             }
             UpsertTask(t);
             ++recovered_count;

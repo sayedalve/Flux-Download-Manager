@@ -125,9 +125,49 @@ To minimize security risk and pass Chrome Web Store / Firefox AMO review without
 
 4. **Manifest V3 Service Worker Lifecycle Persistence:**
    - Service worker state is persisted via `chrome.storage.session` (with automatic fallback to `chrome.storage.local`).
-   - Persisted state includes active tab media candidates, tab URL mappings (up to 50 tabs), and a ring buffer of recent link click correlations (up to 30 items with 30-minute expiration), ensuring click correlation succeeds even if the service worker suspended between link click and download creation.
+   - Persisted state includes active tab media candidates, tab URL mappings (up to 50 tabs), `recentDownloadResponses` (up to 500 items), `redirectChainMap`, `reverseRedirectMap`, and a ring buffer of recent link click correlations (up to 500 items), ensuring click correlation succeeds even if the service worker suspended between link click and download creation.
    - Tab closure (`tabs.onRemoved`) automatically commits storage pruning.
 
 5. **Named Pipe Concurrency and Native Messaging Reliability:**
    - In `src/nmh/main.cpp`, client connection attempts handle `ERROR_PIPE_BUSY` by waiting on `WaitNamedPipeW` (3000 ms), eliminating spurious daemon launch attempts under concurrent tab activity.
-   - Stdout frame serialization enforces a strict 1 MiB message limit, returning a standard JSON-RPC 2.0 error frame if exceeded to prevent browser native host termination.
+   - Stdout frame serialization enforces a strict 1 MiB message limit, returning a standard JSON-RPC 2.0 error frame matching the request's exact `id` if exceeded.
+   - Stdio and Named Pipe I/O enforce `ReadExact`, `WritePipeExact`, and `ReadPipeExact` to guarantee complete framing across chunked OS buffers.
+
+6. **Authoritative Per-Download State Machine (`DownloadStateMachine`):**
+   - Downloads are tracked by a strongly typed `DownloadCorrelationRecord` keyed strictly on Chromium `downloadId` (avoiding naive URL-keyed suppression that drops repeated downloads).
+   - Lifecycle Stages:
+     - `STAGE_INITIALIZATION` (`INIT`): Created upon first receipt of `onCreated` or `onDeterminingFilename`.
+     - `STAGE_ELIGIBILITY`: Validated via unified `isDownloadEligible()` against expanded extension/MIME matrices, `Content-Disposition: attachment`, size thresholds, and gesture intent.
+     - `STAGE_NATIVE_RPC` (`OFFERING`): Single shared `offerPromise` locked in `inFlightOffers` map, eliminating duplicate RPCs when both `onCreated` and `onDeterminingFilename` fire in parallel.
+     - `STAGE_DESKTOP_ACCEPTANCE` (`ACCEPTED` / `HANDED_OFF`): Desktop accepts (`download.offer -> { accepted: true, taskId: "..." }`).
+     - `STAGE_FAILURE_RECOVERY` (`FALLBACK` / `DECLINED`): Desktop offline, times out (5000 ms), returns malformed JSON, or user declines. `suggestCallback()` is resolved immediately and `chrome.downloads.resume()` called so native browser download continues without data loss.
+
+7. **Brave and Chromium `onDeterminingFilename` Contract:**
+   - Calling `chrome.downloads.cancel()` before resolving `suggest()` during filename determination causes Chromium and Brave to throw: `"Cannot cancel a download while determining filename"`, hanging the browser downloader until timeout and falling back to native download.
+   - Flux resolves `suggest({ filename })` **before** executing `chrome.downloads.cancel()`, ensuring atomic, error-free handoff.
+   - In-page click listeners in `content-script.js` never execute `preventDefault()` or `stopPropagation()`, preserving the browser's native cookies, session state, and HTTP redirect hops.
+
+8. **22-Scenario Comprehensive Verification Suite (`tests/test_extension_detection.js`):**
+   All 22 explicit edge scenarios required for production readiness pass in automated regression testing:
+   1. Direct `.zip` or `.exe` links.
+   2. URLs without file extension returning `Content-Disposition: attachment`.
+   3. Multi-hop HTTP redirects to signed download URLs (e.g. S3 / CloudFront).
+   4. Final filenames revealed only by response headers (`RFC 5987 / 6266`).
+   5. Programmatic/direct downloads without preceding click records.
+   6. Click records arriving before browser download event.
+   7. Browser download events arriving before click records.
+   8. Simultaneous downloads from different tabs without state collisions.
+   9. Repeated downloads of identical URLs without false duplicate suppression.
+   10. Desktop acceptance response handling (`accepted: true`).
+   11. Desktop rejection response handling (`accepted: false`).
+   12. Native messaging host missing error recovery.
+   13. Native messaging timeout (5000 ms) graceful fallback.
+   14. Malformed JSON-RPC responses fallback.
+   15. Duplicate browser events for identical download ID deduplication via shared promise.
+   16. Normal HTML page navigation guard (zero spurious capture).
+   17. `blob:` and `data:` in-memory downloads preservation.
+   18. User bypass modifier (Alt-key) and per-site exclusion handling.
+   19. Cross-origin iframe frame correlation (`FRAME_ORIGINATED`).
+   20. Failed browser cancellation attempt recovery (handoff preserved).
+   21. Service worker suspension and wake-up session state restore.
+   22. Concurrent media sniffer detection and file download handoff.

@@ -231,14 +231,20 @@ Result<TorrentInfo> TorrentParser::ParseTorrentBuffer(std::string_view data) {
     }
 
     if (info_dict.contains("piece length") && info_dict["piece length"].is_int()) {
-        info.piece_length = static_cast<uint64_t>(info_dict["piece length"].as_int());
+        int64_t pl = info_dict["piece length"].as_int();
+        if (pl <= 0 || pl > 134217728) {
+            return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "Invalid piece length in torrent metainfo");
+        }
+        info.piece_length = static_cast<uint64_t>(pl);
+    } else {
+        return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "Missing piece length in torrent metainfo");
     }
 
     // Pieces
     if (info_dict.contains("pieces") && info_dict["pieces"].is_string()) {
         const std::string& p_str = info_dict["pieces"].as_string();
-        if (p_str.size() % 20 != 0) {
-            return Result<TorrentInfo>::Err("ERR_TORRENT_PIECES", "Pieces string length not a multiple of 20");
+        if (p_str.empty() || p_str.size() % 20 != 0) {
+            return Result<TorrentInfo>::Err("ERR_TORRENT_PIECES", "Pieces string length not a non-zero multiple of 20");
         }
         size_t count = p_str.size() / 20;
         info.pieces.reserve(count);
@@ -246,6 +252,8 @@ Result<TorrentInfo> TorrentParser::ParseTorrentBuffer(std::string_view data) {
             const uint8_t* p = reinterpret_cast<const uint8_t*>(p_str.data() + (i * 20));
             info.pieces.emplace_back(p, p + 20);
         }
+    } else {
+        return Result<TorrentInfo>::Err("ERR_TORRENT_PIECES", "Missing pieces in torrent metainfo");
     }
 
     // Files: single file vs multi-file
@@ -253,8 +261,15 @@ Result<TorrentInfo> TorrentParser::ParseTorrentBuffer(std::string_view data) {
         // Multi-file
         uint64_t current_offset = 0;
         for (const auto& f : info_dict["files"].as_list()) {
-            if (!f.is_dict() || !f.contains("length") || !f.contains("path")) continue;
-            uint64_t len = static_cast<uint64_t>(f["length"].as_int());
+            if (!f.is_dict() || !f.contains("length") || !f.contains("path") || !f["length"].is_int()) continue;
+            int64_t flen = f["length"].as_int();
+            if (flen < 0) {
+                return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "Negative file length in multi-file torrent");
+            }
+            uint64_t len = static_cast<uint64_t>(flen);
+            if (len > UINT64_MAX - current_offset) {
+                return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "File offset integer overflow in multi-file torrent");
+            }
             std::filesystem::path rel_path;
             if (f["path"].is_list()) {
                 for (const auto& seg : f["path"].as_list()) {
@@ -276,13 +291,31 @@ Result<TorrentInfo> TorrentParser::ParseTorrentBuffer(std::string_view data) {
         info.total_length = current_offset;
     } else if (info_dict.contains("length") && info_dict["length"].is_int()) {
         // Single file
-        uint64_t len = static_cast<uint64_t>(info_dict["length"].as_int());
+        int64_t flen = info_dict["length"].as_int();
+        if (flen <= 0) {
+            return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "Invalid single file length in torrent metainfo");
+        }
+        uint64_t len = static_cast<uint64_t>(flen);
         TorrentFileEntry entry;
         entry.relative_path = info.name;
         entry.length = len;
         entry.offset_in_torrent = 0;
         info.files.push_back(std::move(entry));
         info.total_length = len;
+    } else {
+        return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "Missing file length in torrent metainfo");
+    }
+
+    if (info.total_length == 0 || info.files.empty()) {
+        return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "Total torrent length is 0 or no valid files found");
+    }
+
+    // Verify pieces count against total_length and piece_length
+    size_t expected_pieces = static_cast<size_t>((info.total_length + info.piece_length - 1) / info.piece_length);
+    if (info.pieces.size() != expected_pieces) {
+        return Result<TorrentInfo>::Err("ERR_TORRENT_PIECES",
+            "Piece count mismatch: expected " + std::to_string(expected_pieces) +
+            ", got " + std::to_string(info.pieces.size()));
     }
 
     return Result<TorrentInfo>::Ok(std::move(info));

@@ -217,6 +217,9 @@ bool ParseContentRange(std::string_view val, uint64_t& start, uint64_t& end, uin
         end = std::stoull(range_part.substr(dash + 1));
         if (total_part != "*") {
             total = std::stoull(total_part);
+            if (total == 0 || start >= total || end >= total) {
+                return false;
+            }
         } else {
             total = 0;
         }

@@ -42,7 +42,8 @@ public:
         std::atomic<bool>& cancel_requested,
         std::atomic<uint64_t>& speed_limit_bps,
         TorrentProgressCallback on_progress,
-        std::shared_ptr<brisk::TokenBucketLimiter> global_limiter = nullptr);
+        std::shared_ptr<brisk::TokenBucketLimiter> global_limiter = nullptr,
+        std::atomic<uint64_t>* global_speed_limit_bps = nullptr);
 };
 
 } // namespace openidm::torrent

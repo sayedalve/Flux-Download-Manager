@@ -429,7 +429,9 @@ function handleLinkClick(ev) {
     anchor.__fluxClickInFlight = true;
     setTimeout(() => { delete anchor.__fluxClickInFlight; }, 10000);
 
-    // Record link click metadata for correlation in chrome.downloads.onDeterminingFilename
+    // Record link click metadata for correlation in chrome.downloads.onDeterminingFilename.
+    // User gesture is strictly preserved: we NEVER call ev.preventDefault() or ev.stopPropagation()
+    // on natural anchor clicks, ensuring browser cookies, session state, and redirects proceed uninterrupted.
     if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
       chrome.runtime.sendMessage({
         action: "linkClicked",
@@ -443,32 +445,6 @@ function handleLinkClick(ev) {
         isFrame,
         correlationId
       });
-
-      if (!ev.ctrlKey && !ev.metaKey && !ev.shiftKey) {
-        if (typeof ev.preventDefault === "function") ev.preventDefault();
-        if (typeof ev.stopPropagation === "function") ev.stopPropagation();
-
-        chrome.runtime.sendMessage({
-          action: "interceptDownloadClick",
-          url: href,
-          filename: anchor.download || "",
-          hasDownloadAttr,
-          referrer,
-          pageTitle,
-          mechanism,
-          isFrame,
-          correlationId
-        }, (response) => {
-          delete anchor.__fluxClickInFlight;
-          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError) {
-            triggerBrowserFallback(anchor, href);
-            return;
-          }
-          if (!response || !response.accepted) {
-            triggerBrowserFallback(anchor, href);
-          }
-        });
-      }
     }
 
     console.log(`[Flux Trace] [CLICK_RECORDED] [${correlationId}]`, {

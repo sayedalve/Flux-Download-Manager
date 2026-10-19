@@ -1035,7 +1035,8 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                     local_task.uploaded_bytes = tp.uploaded_bytes;
                 }
             },
-            m_global_limiter);
+            m_global_limiter,
+            &m_global_speed_limit_bps);
         if (!tor_dl.ok()) {
             local_task.state = TaskState::kFailed;
             local_task.error_code = tor_dl.error->code;
@@ -1518,15 +1519,11 @@ Result<void> DownloadController::RetryTask(const std::string& task_id) {
     t.schedule_stop_time_local.clear();
     t.pause_reason = PauseReason::kNone;
 
-    // Clean up temporary files on Retry for failed/canceled stream tasks or validator mismatches
+    // Clean up temporary files on Retry only for canceled tasks or unrecoverable validator/corruption errors
     if (t.state == TaskState::kCanceled ||
-        t.task_type == TaskType::kStreamHls ||
-        t.task_type == TaskType::kStreamDash ||
         t.error_code == "ERR_HTTP_VALIDATOR_MISMATCH" ||
         t.error_code == "ERR_STORAGE_PART_CORRUPTED" ||
-        t.error_code == "ERR_YOUTUBE_EXTRACTION_FAILED" ||
-        t.error_code == "ERR_STREAM_WORKER_CRASH" ||
-        t.error_code == "ERR_YOUTUBE_EMPTY_TRACK") {
+        t.error_code == "ERR_STREAM_DRM_PROTECTED") {
         std::error_code ec;
         if (!t.part_path.empty()) {
             std::filesystem::remove_all(t.part_path, ec);

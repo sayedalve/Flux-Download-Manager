@@ -120,6 +120,105 @@ function isAttachmentContentDisposition(cdHeader) {
   return /^\s*attachment\b/i.test(cdHeader) || /;\s*filename\*?=/i.test(cdHeader);
 }
 
+function sanitizeFilename(filename, fallback = "download") {
+  if (!filename || typeof filename !== "string") return fallback;
+  let clean = filename.trim();
+  try { clean = decodeURIComponent(clean); } catch (_) {}
+  // Strip control chars (0x00 - 0x1F, 0x7F)
+  clean = clean.replace(/[\x00-\x1F\x7F]/g, "");
+  // Strip Windows invalid filename characters: \ / : * ? " < > |
+  clean = clean.replace(/[\\/:*?"<>|]/g, "_");
+  // Strip path traversal sequences
+  clean = clean.replace(/\.{2,}/g, ".");
+  // Strip leading/trailing dots and spaces
+  clean = clean.replace(/^[.\s]+|[.\s]+$/g, "");
+  // Check reserved Windows DOS device names: CON, PRN, AUX, NUL, COM1-9, LPT1-9
+  const baseName = clean.split(".")[0].toUpperCase();
+  const reserved = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+  if (reserved.test(baseName)) {
+    clean = "_" + clean;
+  }
+  return clean || fallback;
+}
+
+function isDownloadEligible(params = {}) {
+  const {
+    url = "",
+    finalUrl = "",
+    filename = "",
+    mime = "",
+    fileSize = 0,
+    isAttachment = false,
+    wasExplicitLinkClick = false,
+    tabUrl = ""
+  } = params;
+
+  const targetUrl = finalUrl || url;
+  if (!targetUrl) return { eligible: false, reason: "EMPTY_URL" };
+
+  // 1. Exclude blob:, data:, and browser extension/internal schemes
+  if (targetUrl.startsWith("blob:") || targetUrl.startsWith("data:") ||
+      targetUrl.startsWith("chrome:") || targetUrl.startsWith("chrome-extension:") ||
+      targetUrl.startsWith("brave:") || targetUrl.startsWith("about:") || targetUrl.startsWith("javascript:")) {
+    return { eligible: false, reason: "BROWSER_INTERNAL_OR_BLOB" };
+  }
+
+  // 2. Exclude disabled/blocked hostnames
+  if (isSiteDisabled(tabUrl || targetUrl)) {
+    return { eligible: false, reason: "SITE_EXCLUDED" };
+  }
+
+  // 3. Exclude webpage watch URLs (e.g. YouTube watch page)
+  if (isWebpageWatchUrl(targetUrl)) {
+    return { eligible: false, reason: "WEBPAGE_URL" };
+  }
+
+  const cleanMime = (mime || "").split(";")[0].trim().toLowerCase();
+  // Exclude plain HTML page navigations unless explicitly marked as attachment
+  if ((cleanMime === "text/html" || cleanMime === "application/xhtml+xml") && !isAttachment) {
+    return { eligible: false, reason: "HTML_PAGE_NAVIGATION" };
+  }
+
+  const cleanFilename = sanitizeFilename(filename, "");
+  const ext = (extractUrlExtension(cleanFilename) || extractUrlExtension(targetUrl) || extractUrlExtension(url)).toLowerCase();
+
+  // 4. Content-Disposition: attachment explicitly declares intent to download
+  if (isAttachment) {
+    return { eligible: true, reason: "CONTENT_DISPOSITION_ATTACHMENT", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  // 5. Recognized file extension in InterceptFileExts
+  if (ext && G.InterceptFileExts && G.InterceptFileExts.has(ext)) {
+    return { eligible: true, reason: "MATCHED_FILE_EXTENSION", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  // 6. Recognized MIME type in InterceptMimeTypes
+  if (cleanMime && G.InterceptMimeTypes && G.InterceptMimeTypes.has(cleanMime)) {
+    return { eligible: true, reason: "MATCHED_MIME_TYPE", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  // 7. General media MIME types
+  if (cleanMime.startsWith("video/") || cleanMime.startsWith("audio/")) {
+    return { eligible: true, reason: "MEDIA_MIME_TYPE", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  // 8. Explicit user link click (with download attribute or user-clicked anchor)
+  if (wasExplicitLinkClick) {
+    if (fileSize > 0 || ext || (cleanMime && cleanMime !== "text/html")) {
+      return { eligible: true, reason: "EXPLICIT_LINK_CLICK", ext, mime: cleanMime, filename: cleanFilename };
+    }
+  }
+
+  // 9. Size threshold fallback (>= 1 MiB and not HTML/CSS/JS)
+  const sizeNum = Number(fileSize) || 0;
+  if (sizeNum >= G.minFileSizeBytes &&
+      cleanMime !== "text/html" && cleanMime !== "text/css" && cleanMime !== "application/javascript") {
+    return { eligible: true, reason: "FILE_SIZE_THRESHOLD", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  return { eligible: false, reason: "BELOW_SIZE_OR_EXT_FILTER" };
+}
+
 function isYouTubeWatchOrShortsUrl(url) {
   if (!url || typeof url !== "string") return false;
   try {
@@ -1009,6 +1108,7 @@ function recordClickedLink(tabId, msg) {
     referrer: msg.referrer || "",
     pageTitle: msg.pageTitle || "",
     correlationId: msg.correlationId || generateCorrelationId("click"),
+    isFrame: Boolean(msg.isFrame),
     time: now
   };
 
@@ -1283,7 +1383,9 @@ var exportedFns = {
   resolveInitialUrlFromRedirects,
   findCorrelatedClick,
   isBlobOrDataUrl,
-  classifyDownloadMechanism
+  classifyDownloadMechanism,
+  sanitizeFilename,
+  isDownloadEligible
 };
 
 Object.assign(globalThis, exportedFns);

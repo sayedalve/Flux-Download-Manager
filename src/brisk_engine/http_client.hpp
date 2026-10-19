@@ -155,4 +155,8 @@ public:
     static bool IsLinkExpiredStatus(int status_code, std::string_view www_authenticate = "");
 };
 
+// Parses RFC 9110 / RFC 7233 Content-Range header value (e.g. "bytes 0-1023/2048")
+// Enforces range satisfaction validation (rejects start >= total || end >= total || total == 0).
+bool ParseContentRange(std::string_view val, uint64_t& start, uint64_t& end, uint64_t& total);
+
 } // namespace openidm::brisk

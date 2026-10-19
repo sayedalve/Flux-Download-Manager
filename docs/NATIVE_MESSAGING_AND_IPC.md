@@ -180,6 +180,23 @@ Registered at `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\org.openidm.native
 | `-32001` | `ERR_IPC_VERSION_MISMATCH` | Incompatible protocol major version; prompt user to update. |
 | `-32002` | `ERR_IPC_CAPTURE_DISABLED` | User paused automatic browser capture in OpenIDM tray menu; extension leaves download in browser. |
 | `-32003` | `ERR_IPC_DESKTOP_BUSY` | Desktop app is shutting down; extension falls back to browser download. |
+| `-32003` | `ERR_IPC_DESKTOP_UNAVAILABLE` | Named pipe not found or desktop not running; extension safely falls back to native browser download. |
+| `-32003` | `ERR_IPC_DISCONNECTED` | Named pipe disconnected mid-write; extension triggers safe fallback. |
+| `-32003` | `ERR_IPC_BAD_RESPONSE` | Pipe read failed or response frame corrupted; triggers safe fallback. |
+| `-32600` | `ERR_IPC_FRAME_SIZE` | Input frame length exceeds 1 MiB limit; NMH returns error frame. |
 
-- **Disconnection Recovery:** If the Native Messaging port disconnects (`port.onDisconnect`), `NativeHostClient.ts` does not loop reconnects blindly; it reconnects lazily on the next download interception or user popup interaction with exponential backoff (`500 ms`, `2 s`, `10 s`).
-- **Logging & Redaction:** The IPC layer never logs the `params.headers.Cookie` or `Authorization` fields (`NFR-009`).
+### 8. Native Messaging Host (`src/nmh/main.cpp`) Framing & Hardening
+
+1. **Exact I/O Framing Across OS Chunk Boundaries:**
+   - Standard input and output message length headers are strictly 32-bit little-endian integers (`uint32_t`).
+   - `ReadExact(FILE*, void*, size_t)` and `ReadPipeExact(HANDLE, void*, size_t)` loop until all bytes are transferred or EOF is hit, preventing partial frame truncation when OS buffers chunk large payloads.
+   - `WritePipeExact(HANDLE, const void*, size_t)` ensures complete delivery of payloads into the Windows Named Pipe.
+
+2. **JSON-RPC Request-ID Preservation in NMH Error Frames:**
+   - To ensure Chromium and Firefox MV3 promise-based RPC callers correctly match responses to in-flight requests, `ExtractJsonRpcId()` inspects incoming JSON payloads for `"id": <value>`.
+   - When the desktop app is offline (`ERR_IPC_DESKTOP_UNAVAILABLE`), disconnected (`ERR_IPC_DISCONNECTED`), or returns a bad frame (`ERR_IPC_BAD_RESPONSE`), the NMH echoes the exact incoming request `id` (e.g. `{"jsonrpc":"2.0","id":"ext-1","error":{...}}`) rather than returning a generic `null` id.
+
+3. **Disconnection Recovery & 5,000 ms Timeout:**
+   - If the Native Messaging port disconnects or `flux.exe` does not respond within 5,000 ms, the extension aborts the RPC wait, resolves `suggest({ filename })`, and resumes the native browser download without hanging the user's browser.
+   - Named Pipe reconnects wait on `WaitNamedPipeW` with 3,000 ms timeout upon `ERROR_PIPE_BUSY` to prevent thrashing under concurrent multi-tab downloads.
+   - **Logging & Redaction:** The IPC layer never logs `params.headers.Cookie`, `Authorization`, or sensitive query parameters matching token patterns (`NFR-009`).

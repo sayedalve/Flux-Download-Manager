@@ -717,6 +717,13 @@ Result<uint64_t> PathSanitizer::CheckAvailableDiskSpace(
     uint64_t reserve_bytes) {
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
+    if (!std::filesystem::exists(dir, ec)) {
+        return Result<uint64_t>::Err(
+            "ERR_DESTINATION_UNAVAILABLE",
+            "Destination directory is unavailable or cannot be created: " + dir.string(),
+            false,
+            true);
+    }
     auto sp = std::filesystem::space(dir, ec);
     if (ec || sp.available == static_cast<std::uintmax_t>(-1)) {
         // If filesystem does not report space, allow operation to proceed to write check

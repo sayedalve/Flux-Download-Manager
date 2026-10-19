@@ -1217,10 +1217,10 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     if (exit_code != 0 || !std::filesystem::exists(muxed_output, ec) ||
         std::filesystem::file_size(muxed_output, ec) == 0 ||
         !VerifyContainerMagicBytes(muxed_output, fmt)) {
-        std::filesystem::remove_all(task_tmp_dir, ec);
         std::filesystem::remove(muxed_output, ec);
         task.state = TaskState::kFailed;
         if (last_error_line.find("DRM") != std::string::npos) {
+            std::filesystem::remove_all(task_tmp_dir, ec);
             task.error_code = "ERR_STREAM_DRM_PROTECTED";
             task.error_message = last_error_line;
         } else if (last_error_line.find("403") != std::string::npos ||
@@ -2149,7 +2149,9 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
 
     auto v_res = download_track(video_url, video_tmp, 1, "video track");
     if (!v_res.ok()) {
-        std::filesystem::remove_all(task_tmp_dir, ec);
+        if (cancel_requested.load()) {
+            std::filesystem::remove_all(task_tmp_dir, ec);
+        }
         task.state = cancel_requested.load() ? TaskState::kCanceled : (pause_requested.load() ? TaskState::kPaused : TaskState::kFailed);
         task.error_code = v_res.error->code;
         task.error_message = v_res.error->message;
@@ -2160,7 +2162,9 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     if (has_separate_audio) {
         auto a_res = download_track(audio_url, audio_tmp, 2, "audio track");
         if (!a_res.ok()) {
-            std::filesystem::remove_all(task_tmp_dir, ec);
+            if (cancel_requested.load()) {
+                std::filesystem::remove_all(task_tmp_dir, ec);
+            }
             task.state = cancel_requested.load() ? TaskState::kCanceled : (pause_requested.load() ? TaskState::kPaused : TaskState::kFailed);
             task.error_code = a_res.error->code;
             task.error_message = a_res.error->message;

@@ -29,21 +29,92 @@
 
 namespace {
 
+bool ReadExact(void* buf, size_t count, FILE* stream) {
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    size_t total = 0;
+    while (total < count) {
+        size_t n = std::fread(p + total, 1, count - total, stream);
+        if (n == 0) {
+            if (std::feof(stream) || std::ferror(stream)) return false;
+        }
+        total += n;
+    }
+    return true;
+}
+
+bool WriteExact(const void* buf, size_t count, FILE* stream) {
+    const uint8_t* p = static_cast<const uint8_t*>(buf);
+    size_t total = 0;
+    while (total < count) {
+        size_t n = std::fwrite(p + total, 1, count - total, stream);
+        if (n == 0) return false;
+        total += n;
+    }
+    std::fflush(stream);
+    return true;
+}
+
+std::string ExtractJsonRpcId(const std::string& payload) {
+    auto pos = payload.find("\"id\"");
+    if (pos == std::string::npos) return "null";
+    pos += 4;
+    while (pos < payload.size() && (payload[pos] == ' ' || payload[pos] == ':')) ++pos;
+    if (pos >= payload.size()) return "null";
+    if (payload[pos] == '"') {
+        auto end_pos = payload.find('"', pos + 1);
+        if (end_pos != std::string::npos) {
+            return payload.substr(pos, end_pos - pos + 1);
+        }
+    } else {
+        auto end_pos = payload.find_first_of(",}\r\n \t", pos);
+        if (end_pos != std::string::npos) {
+            return payload.substr(pos, end_pos - pos);
+        }
+    }
+    return "null";
+}
+
 void WriteStdoutFrame(const std::string& json_str) {
     if (json_str.size() > 1024 * 1024) {
         // Native messaging frame limit is 1 MiB (1,048,576 bytes). Send an RPC error frame instead of triggering browser host termination.
         std::string err_frame = "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Response exceeds 1MB limit\"}}";
         uint32_t err_len = static_cast<uint32_t>(err_frame.size());
-        std::fwrite(&err_len, sizeof(err_len), 1, stdout);
-        std::fwrite(err_frame.data(), 1, err_frame.size(), stdout);
-        std::fflush(stdout);
+        WriteExact(&err_len, sizeof(err_len), stdout);
+        WriteExact(err_frame.data(), err_frame.size(), stdout);
         return;
     }
     uint32_t len = static_cast<uint32_t>(json_str.size());
-    std::fwrite(&len, sizeof(len), 1, stdout);
-    std::fwrite(json_str.data(), 1, json_str.size(), stdout);
-    std::fflush(stdout);
+    WriteExact(&len, sizeof(len), stdout);
+    WriteExact(json_str.data(), json_str.size(), stdout);
 }
+
+#ifdef _WIN32
+bool WritePipeExact(HANDLE hPipe, const void* buf, DWORD count) {
+    const uint8_t* p = static_cast<const uint8_t*>(buf);
+    DWORD total = 0;
+    while (total < count) {
+        DWORD written = 0;
+        if (!WriteFile(hPipe, p + total, count - total, &written, nullptr) || written == 0) {
+            return false;
+        }
+        total += written;
+    }
+    return true;
+}
+
+bool ReadPipeExact(HANDLE hPipe, void* buf, DWORD count) {
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    DWORD total = 0;
+    while (total < count) {
+        DWORD chunk = 0;
+        if (!ReadFile(hPipe, p + total, count - total, &chunk, nullptr) || chunk == 0) {
+            return false;
+        }
+        total += chunk;
+    }
+    return true;
+}
+#endif
 
 #ifdef _WIN32
 HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem::path& daemon_bin_path) {
@@ -193,13 +264,15 @@ int main(int argc, char* argv[]) {
 
     while (true) {
         uint32_t in_len = 0;
-        if (std::fread(&in_len, sizeof(in_len), 1, stdin) != 1) break;
+        if (!ReadExact(stdin, &in_len, sizeof(in_len))) break;
         if (in_len == 0 || in_len > 1048576) {
             WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"ERR_IPC_FRAME_SIZE"}})");
             break;
         }
         std::string payload(in_len, '\0');
-        if (std::fread(payload.data(), 1, in_len, stdin) != in_len) break;
+        if (!ReadExact(stdin, payload.data(), in_len)) break;
+
+        std::string json_id = ExtractJsonRpcId(payload);
 
         if (hPipe == INVALID_HANDLE_VALUE) {
             auto now = std::chrono::steady_clock::now();
@@ -216,39 +289,35 @@ int main(int argc, char* argv[]) {
             }
         }
         if (hPipe == INVALID_HANDLE_VALUE) {
-            WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_DESKTOP_UNAVAILABLE"}})");
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_DESKTOP_UNAVAILABLE"}})";
+            WriteStdoutFrame(err);
             continue;
         }
 
-        DWORD written = 0;
-        if (!WriteFile(hPipe, &in_len, sizeof(in_len), &written, nullptr) ||
-            !WriteFile(hPipe, payload.data(), in_len, &written, nullptr)) {
+        if (!WritePipeExact(hPipe, &in_len, sizeof(in_len)) ||
+            !WritePipeExact(hPipe, payload.data(), in_len)) {
             CloseHandle(hPipe);
             hPipe = INVALID_HANDLE_VALUE;
-            WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_DISCONNECTED"}})");
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_DISCONNECTED"}})";
+            WriteStdoutFrame(err);
             continue;
         }
 
         uint32_t out_len = 0;
-        DWORD got = 0;
-        if (!ReadFile(hPipe, &out_len, sizeof(out_len), &got, nullptr) || got != sizeof(out_len) ||
-            out_len == 0 || out_len > 1048576) {
+        if (!ReadPipeExact(hPipe, &out_len, sizeof(out_len)) || out_len == 0 || out_len > 1048576) {
             CloseHandle(hPipe);
             hPipe = INVALID_HANDLE_VALUE;
-            WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_BAD_RESPONSE"}})");
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_BAD_RESPONSE"}})";
+            WriteStdoutFrame(err);
             continue;
         }
         std::string resp(out_len, '\0');
-        DWORD total_read = 0;
-        while (total_read < out_len) {
-            DWORD chunk = 0;
-            if (!ReadFile(hPipe, resp.data() + total_read, out_len - total_read, &chunk, nullptr) || chunk == 0) break;
-            total_read += chunk;
-        }
-        if (total_read != out_len) {
+        if (!ReadPipeExact(hPipe, resp.data(), out_len)) {
             CloseHandle(hPipe);
             hPipe = INVALID_HANDLE_VALUE;
-            break;
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_BAD_RESPONSE"}})";
+            WriteStdoutFrame(err);
+            continue;
         }
         WriteStdoutFrame(resp);
     }
@@ -257,7 +326,7 @@ int main(int argc, char* argv[]) {
     int ipc_fd = -1;
     while (true) {
         uint32_t in_len = 0;
-        if (std::fread(&in_len, sizeof(in_len), 1, stdin) != 1) {
+        if (!ReadExact(stdin, &in_len, sizeof(in_len))) {
             break;
         }
         if (in_len == 0 || in_len > 1048576) {
@@ -265,15 +334,18 @@ int main(int argc, char* argv[]) {
             break;
         }
         std::string payload(in_len, '\0');
-        if (std::fread(payload.data(), 1, in_len, stdin) != in_len) {
+        if (!ReadExact(stdin, payload.data(), in_len)) {
             break;
         }
+
+        std::string json_id = ExtractJsonRpcId(payload);
 
         if (ipc_fd < 0) {
             ipc_fd = ConnectToDesktopIpc(sock_path, daemon_bin.string());
         }
         if (ipc_fd < 0) {
-            WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_DESKTOP_UNAVAILABLE"}})");
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_DESKTOP_UNAVAILABLE"}})";
+            WriteStdoutFrame(err);
             continue;
         }
 
@@ -286,7 +358,8 @@ int main(int argc, char* argv[]) {
             ::send(ipc_fd, payload.data(), in_len, send_flags) != static_cast<ssize_t>(in_len)) {
             ::close(ipc_fd);
             ipc_fd = -1;
-            WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_DISCONNECTED"}})");
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_DISCONNECTED"}})";
+            WriteStdoutFrame(err);
             continue;
         }
 
@@ -295,7 +368,8 @@ int main(int argc, char* argv[]) {
             out_len == 0 || out_len > 1048576) {
             ::close(ipc_fd);
             ipc_fd = -1;
-            WriteStdoutFrame(R"({"jsonrpc":"2.0","id":null,"error":{"code":-32003,"message":"ERR_IPC_BAD_RESPONSE"}})");
+            std::string err = R"({"jsonrpc":"2.0","id":)" + json_id + R"(,"error":{"code":-32003,"message":"ERR_IPC_BAD_RESPONSE"}})";
+            WriteStdoutFrame(err);
             continue;
         }
 

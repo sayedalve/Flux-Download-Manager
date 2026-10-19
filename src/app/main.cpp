@@ -189,10 +189,13 @@ int main(int argc, char* argv[]) {
         }
         std::cout << "Probed " << pres.value->tracks.size() << " tracks from " << pres.value->manifest_url << "\n";
         for (const auto& tr : pres.value->tracks) {
-            std::cout << "  [" << tr.media_type << "] id=" << tr.id
+            std::string upper_type = tr.media_type;
+            for (char& c : upper_type) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            std::cout << "  [" << upper_type << "] id=" << tr.id
                       << " res=" << tr.resolution << " bw=" << tr.bandwidth
                       << " lang=" << tr.language << " segs=" << tr.segments_count << "\n";
         }
+        std::cout.flush();
         controller.Shutdown();
         return 0;
     }

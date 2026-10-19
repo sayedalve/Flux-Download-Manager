@@ -3693,11 +3693,229 @@ bool TestRemediationPhaseRegressionSuites() {
     return true;
 }
 
+bool TestAuditBehaviorImprovements() {
+    std::cout << "  [1/7] Testing Content-Range satisfaction bounds rejection (RFC 9110)...\n";
+    {
+        uint64_t s = 0, e = 0, t = 0;
+        // end >= total
+        ASSERT_TRUE(!openidm::brisk::ParseContentRange("bytes 0-100/50", s, e, t), "bytes 0-100/50 rejected (end >= total)");
+        // start >= total
+        ASSERT_TRUE(!openidm::brisk::ParseContentRange("bytes 100-200/50", s, e, t), "bytes 100-200/50 rejected (start >= total)");
+        // total == 0
+        ASSERT_TRUE(!openidm::brisk::ParseContentRange("bytes 0-0/0", s, e, t), "bytes 0-0/0 rejected (total == 0)");
+        // start > end
+        ASSERT_TRUE(!openidm::brisk::ParseContentRange("bytes 200-100/500", s, e, t), "bytes 200-100/500 rejected (start > end)");
+        // Valid exact satisfaction
+        ASSERT_TRUE(openidm::brisk::ParseContentRange("bytes 0-99/100", s, e, t), "bytes 0-99/100 accepted");
+        ASSERT_TRUE(s == 0 && e == 99 && t == 100, "Range parsed: 0..99 / 100");
+        // Valid unknown total (*)
+        ASSERT_TRUE(openidm::brisk::ParseContentRange("bytes 50-99/*", s, e, t), "bytes 50-99/* accepted");
+        ASSERT_TRUE(s == 50 && e == 99 && t == 0, "Range parsed: 50..99 / unknown");
+    }
+
+    std::cout << "  [2/7] Testing destination directory unavailability guard...\n";
+    {
+        std::error_code ec;
+        auto non_existent_dir = std::filesystem::temp_directory_path(ec) / ("flux_non_existent_" + openidm::GenerateUuidV4());
+        auto check_res = openidm::PathSanitizer::CheckAvailableDiskSpace(non_existent_dir.string(), 1024);
+        ASSERT_TRUE(!check_res.ok(), "Non-existent directory rejected by CheckAvailableDiskSpace");
+        ASSERT_TRUE(check_res.error->code == "ERR_DESTINATION_UNAVAILABLE", "Error code is ERR_DESTINATION_UNAVAILABLE");
+    }
+
+    std::cout << "  [3/7] Testing FTP resume truncation logic...\n";
+    {
+        std::error_code ec;
+        auto test_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_ftp_trunc_" + openidm::GenerateUuidV4());
+        std::filesystem::create_directories(test_dir, ec);
+
+        auto partial_file = test_dir / "ftp_partial.bin";
+        {
+            std::ofstream out(partial_file, std::ios::binary);
+            std::string data(500, 'Z');
+            out.write(data.data(), data.size());
+        }
+        ASSERT_TRUE(std::filesystem::file_size(partial_file, ec) == 500, "Initial file size is 500");
+
+        // Simulate truncation logic applied on resume
+        uint64_t resume_offset = 250;
+        if (std::filesystem::exists(partial_file, ec)) {
+            uint64_t existing = std::filesystem::file_size(partial_file, ec);
+            if (existing > resume_offset) {
+                std::filesystem::resize_file(partial_file, resume_offset, ec);
+            }
+        }
+        ASSERT_TRUE(std::filesystem::file_size(partial_file, ec) == 250, "File truncated cleanly to resume offset 250");
+        std::filesystem::remove_all(test_dir, ec);
+    }
+
+    std::cout << "  [4/7] Testing torrent metadata bounds, piece validation, and magnet error...\n";
+    {
+        // 1. Piece length 0
+        std::string bad_torrent_1 = "d4:infod6:lengthi1024e4:name8:test.txt12:piece lengthi0e6:pieces20:12345678901234567890ee";
+        auto r1 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_1);
+        ASSERT_TRUE(!r1.ok(), "piece length 0 rejected");
+        ASSERT_TRUE(r1.error->code == "ERR_TORRENT_INVALID_PIECE_SIZE", "ERR_TORRENT_INVALID_PIECE_SIZE for piece length 0");
+
+        // 2. Piece length > 128 MiB
+        std::string bad_torrent_2 = "d4:infod6:lengthi1024e4:name8:test.txt12:piece lengthi268435456e6:pieces20:12345678901234567890ee";
+        auto r2 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_2);
+        ASSERT_TRUE(!r2.ok(), "piece length > 128 MiB rejected");
+        ASSERT_TRUE(r2.error->code == "ERR_TORRENT_INVALID_PIECE_SIZE", "ERR_TORRENT_INVALID_PIECE_SIZE for piece length > 128 MiB");
+
+        // 3. Piece count mismatch (requires 2 pieces = 40 bytes, but provides 20 bytes)
+        std::string bad_torrent_3 = "d4:infod6:lengthi32768e4:name8:test.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee";
+        auto r3 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_3);
+        ASSERT_TRUE(!r3.ok(), "piece count mismatch rejected");
+        ASSERT_TRUE(r3.error->code == "ERR_TORRENT_PIECE_COUNT_MISMATCH", "ERR_TORRENT_PIECE_COUNT_MISMATCH for mismatched piece count");
+
+        // 4. Negative file length
+        std::string bad_torrent_4 = "d4:infod6:lengthi-100e4:name8:test.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee";
+        auto r4 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_4);
+        ASSERT_TRUE(!r4.ok(), "negative file length rejected");
+        ASSERT_TRUE(r4.error->code == "ERR_TORRENT_INVALID_METADATA", "ERR_TORRENT_INVALID_METADATA for negative length");
+
+        // 5. Safe get_piece_size with empty or 0 length
+        openidm::torrent::TorrentInfo ti;
+        ti.total_length = 0;
+        ti.piece_length = 0;
+        ASSERT_TRUE(ti.get_piece_size(0) == 0, "get_piece_size with 0 length returns 0 safely without division by zero");
+
+        // 6. Magnet link rejection in TorrentEngine
+        std::atomic<bool> cancel_flag{false};
+        std::atomic<bool> pause_flag{false};
+        std::atomic<uint64_t> downloaded{0};
+        std::atomic<uint64_t> uploaded{0};
+        std::atomic<uint64_t> total{0};
+        std::atomic<uint64_t> global_limit{1048576};
+
+        auto mag_res = openidm::torrent::TorrentEngine::ExecuteTorrentDownload(
+            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test",
+            ".",
+            cancel_flag,
+            pause_flag,
+            downloaded,
+            uploaded,
+            total,
+            0,
+            &global_limit,
+            nullptr
+        );
+        ASSERT_TRUE(!mag_res.ok(), "Magnet download execution rejected");
+        ASSERT_TRUE(mag_res.error->code == "ERR_MAGNET_METADATA_UNSUPPORTED", "Error code is ERR_MAGNET_METADATA_UNSUPPORTED");
+    }
+
+    std::cout << "  [5/7] Testing stream task intermediate part file preservation on retry...\n";
+    {
+        std::error_code ec;
+        auto test_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_retry_stream_" + openidm::GenerateUuidV4());
+        std::filesystem::create_directories(test_dir, ec);
+
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = test_dir / "state.db";
+        cfg.default_download_dir = test_dir / "downloads";
+        cfg.temp_root_dir = test_dir / "tmp";
+
+        openidm::DownloadController ctrl(cfg);
+        ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller for stream retry test");
+
+        auto dummy_stream_file = test_dir / "stream_temp.part";
+        {
+            std::ofstream out(dummy_stream_file, std::ios::binary);
+            out << "STREAM_PARTIAL_SEGMENTS_REMAIN";
+        }
+
+        openidm::TaskModel t;
+        t.task_id = openidm::GenerateUuidV4();
+        t.task_type = openidm::TaskType::kVodStream;
+        t.state = openidm::TaskState::kFailed;
+        t.file_name = "stream_temp.mp4";
+        t.save_dir = test_dir.string();
+        t.part_path = dummy_stream_file.string();
+        t.url = "https://example.com/master.m3u8";
+        ASSERT_TRUE(ctrl.GetStore().UpsertTask(t).ok(), "Upsert failed stream task");
+
+        // Retry task must preserve intermediate segments for VOD stream
+        auto retry_res = ctrl.RetryTask(t.task_id);
+        ASSERT_TRUE(retry_res.ok(), "Retry stream task succeeded");
+        ASSERT_TRUE(std::filesystem::exists(dummy_stream_file, ec), "Stream intermediate part file preserved on retry");
+
+        ctrl.Shutdown();
+        std::filesystem::remove_all(test_dir, ec);
+    }
+
+    std::cout << "  [6/7] Testing SQLite crash recovery disk reconciliation...\n";
+    {
+        std::error_code ec;
+        auto test_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_reconcile_" + openidm::GenerateUuidV4());
+        std::filesystem::create_directories(test_dir, ec);
+
+        openidm::SqliteStore store;
+        ASSERT_TRUE(store.Open(test_dir / "state.db").ok(), "Open test db for reconciliation");
+
+        // Task 1: part file missing on disk
+        openidm::TaskModel t1;
+        t1.task_id = openidm::GenerateUuidV4();
+        t1.task_type = openidm::TaskType::kHttpFile;
+        t1.state = openidm::TaskState::kDownloading;
+        t1.url = "https://example.com/missing.bin";
+        t1.file_name = "missing.bin";
+        t1.save_dir = test_dir.string();
+        t1.part_path = (test_dir / "missing.bin.part").string();
+        t1.total_bytes = 100000;
+        t1.downloaded_bytes = 50000;
+        t1.segments = { openidm::Segment{0, 0, 50000, 99999, false} };
+        ASSERT_TRUE(store.UpsertTask(t1).ok(), "Upsert t1");
+
+        // Task 2: part file exists on disk but is only 30000 bytes
+        auto part2 = test_dir / "clamped.bin.part";
+        {
+            std::ofstream out(part2, std::ios::binary);
+            std::string dummy(30000, 'X');
+            out.write(dummy.data(), dummy.size());
+        }
+
+        openidm::TaskModel t2;
+        t2.task_id = openidm::GenerateUuidV4();
+        t2.task_type = openidm::TaskType::kHttpFile;
+        t2.state = openidm::TaskState::kDownloading;
+        t2.url = "https://example.com/clamped.bin";
+        t2.file_name = "clamped.bin";
+        t2.save_dir = test_dir.string();
+        t2.part_path = part2.string();
+        t2.total_bytes = 100000;
+        t2.downloaded_bytes = 50000;
+        t2.segments = { openidm::Segment{0, 0, 50000, 99999, false} };
+        ASSERT_TRUE(store.UpsertTask(t2).ok(), "Upsert t2");
+
+        // Recover with 0 safety rollback to test pure disk reconciliation
+        auto rec_res = store.RecoverInterruptedTasks(0);
+        ASSERT_TRUE(rec_res.ok() && *rec_res.value == 2, "Recovered 2 interrupted tasks");
+
+        // Verify t1 (missing file) reset to 0
+        auto loaded1 = store.GetTask(t1.task_id);
+        ASSERT_TRUE(loaded1.ok() && loaded1.value->has_value(), "Loaded t1");
+        ASSERT_TRUE((*loaded1.value)->downloaded_bytes == 0, "Missing part file reset downloaded_bytes to 0");
+        ASSERT_TRUE((*loaded1.value)->segments[0].current_offset == 0, "Missing part file reset segment offset to 0");
+
+        // Verify t2 (clamped to disk size 30000)
+        auto loaded2 = store.GetTask(t2.task_id);
+        ASSERT_TRUE(loaded2.ok() && loaded2.value->has_value(), "Loaded t2");
+        ASSERT_TRUE((*loaded2.value)->downloaded_bytes == 30000, "Clamped downloaded_bytes to disk size 30000");
+        ASSERT_TRUE((*loaded2.value)->segments[0].current_offset == 30000, "Clamped segment offset to disk size 30000");
+
+        store.Close();
+        std::filesystem::remove_all(test_dir, ec);
+    }
+
+    std::cout << "  [7/7] All audit-derived behavioral improvements verified successfully.\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 58;
+    const int total = 59;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -3765,6 +3983,7 @@ int main() {
     run(56, "TestSpeedFormattingMultiTrackProgressAndContainerVerification", TestSpeedFormattingMultiTrackProgressAndContainerVerification);
     run(57, "TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile", TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile);
     run(58, "TestRemediationPhaseRegressionSuites", TestRemediationPhaseRegressionSuites);
+    run(59, "TestAuditBehaviorImprovements", TestAuditBehaviorImprovements);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

@@ -312,7 +312,11 @@ Result<uint64_t> FtpClient::ProbeFileSize(
     }
 
     // Switch to binary mode (TYPE I)
-    SendFtpCommand(ctrl.Get(), "TYPE I");
+    auto type_res = SendFtpCommand(ctrl.Get(), "TYPE I");
+    if (!type_res.ok() || type_res.value->first != 200) {
+        SendFtpCommand(ctrl.Get(), "QUIT");
+        return Result<uint64_t>::Err("ERR_FTP_TYPE_FAILED", "Failed to negotiate binary transfer mode (TYPE I)");
+    }
 
     // SIZE command (RFC 3659)
     auto size_res = SendFtpCommand(ctrl.Get(), "SIZE " + url.remote_path);
@@ -367,7 +371,11 @@ Result<uint64_t> FtpClient::DownloadFile(
         return Result<uint64_t>::Err("ERR_FTP_AUTH", "FTP USER rejected");
     }
 
-    SendFtpCommand(ctrl.Get(), "TYPE I");
+    auto type_dl_res = SendFtpCommand(ctrl.Get(), "TYPE I");
+    if (!type_dl_res.ok() || type_dl_res.value->first != 200) {
+        SendFtpCommand(ctrl.Get(), "QUIT");
+        return Result<uint64_t>::Err("ERR_FTP_TYPE_FAILED", "Failed to negotiate binary transfer mode (TYPE I)");
+    }
 
     // Get Total Size
     uint64_t total_size = 0;
@@ -426,6 +434,25 @@ Result<uint64_t> FtpClient::DownloadFile(
     }
     AutoSocket data_sock(data_conn.value.value());
 
+    // Validate target_part_path on disk before attempting resume
+    std::error_code ec;
+    if (resume_offset > 0) {
+        if (!std::filesystem::exists(target_part_path, ec)) {
+            OPENIDM_LOG_WARN("FtpClient", "Part file missing on disk; resetting resume offset to 0");
+            resume_offset = 0;
+        } else {
+            uint64_t actual_sz = std::filesystem::file_size(target_part_path, ec);
+            if (actual_sz < resume_offset) {
+                OPENIDM_LOG_WARN("FtpClient", "Part file size (" + std::to_string(actual_sz) +
+                    ") is smaller than resume offset (" + std::to_string(resume_offset) + "); resetting to 0");
+                resume_offset = 0;
+            } else if (actual_sz > resume_offset) {
+                // Truncate partial file down to resume_offset to eliminate stale trailing data
+                std::filesystem::resize_file(target_part_path, resume_offset, ec);
+            }
+        }
+    }
+
     // REST offset validation if resuming (RFC 3659)
     bool resume_accepted = false;
     if (resume_offset > 0) {
@@ -436,17 +463,23 @@ Result<uint64_t> FtpClient::DownloadFile(
             OPENIDM_LOG_WARN("FtpClient", "FTP server rejected REST " + std::to_string(resume_offset) + "; restarting transfer from zero");
             resume_offset = 0;
             resume_accepted = false;
+            if (std::filesystem::exists(target_part_path, ec)) {
+                std::filesystem::resize_file(target_part_path, 0, ec);
+            }
         }
     }
 
     // RETR
     auto retr_res = SendFtpCommand(ctrl.Get(), "RETR " + url.remote_path);
     if (!retr_res.ok() || (retr_res.value->first != 150 && retr_res.value->first != 125)) {
+        data_sock.Close();
+        SendFtpCommand(ctrl.Get(), "ABOR");
+        SendFtpCommand(ctrl.Get(), "QUIT");
         return Result<uint64_t>::Err("ERR_FTP_RETR", "RETR failed: " + (retr_res.ok() ? retr_res.value->second : "error"));
     }
 
     std::ios_base::openmode mode = std::ios::binary | std::ios::out;
-    if (resume_accepted && resume_offset > 0) {
+    if (resume_accepted && resume_offset > 0 && std::filesystem::exists(target_part_path, ec)) {
         mode |= std::ios::in; // Open existing partial file
     } else {
         mode |= std::ios::trunc; // Clean truncation: never append to stale content
@@ -454,6 +487,9 @@ Result<uint64_t> FtpClient::DownloadFile(
 
     std::fstream ofs(target_part_path, mode);
     if (!ofs.is_open()) {
+        data_sock.Close();
+        SendFtpCommand(ctrl.Get(), "ABOR");
+        SendFtpCommand(ctrl.Get(), "QUIT");
         return Result<uint64_t>::Err("ERR_STORAGE_OPEN", "Failed to open part file: " + target_part_path.string());
     }
     if (resume_accepted && resume_offset > 0) {
@@ -470,6 +506,10 @@ Result<uint64_t> FtpClient::DownloadFile(
     while (!pause_requested.load() && !cancel_requested.load()) {
         int n = recv(data_sock.Get(), buf.data(), static_cast<int>(buf.size()), 0);
         if (n < 0) {
+            ofs.close();
+            data_sock.Close();
+            SendFtpCommand(ctrl.Get(), "ABOR");
+            SendFtpCommand(ctrl.Get(), "QUIT");
             return Result<uint64_t>::Err("ERR_FTP_TRANSFER", "FTP transfer error on data connection");
         }
         if (n == 0) {
@@ -522,7 +562,6 @@ Result<uint64_t> FtpClient::DownloadFile(
     data_sock.Close();
 
     if (cancel_requested.load()) {
-        std::error_code ec;
         std::filesystem::remove(target_part_path, ec);
         SendFtpCommand(ctrl.Get(), "ABOR");
         SendFtpCommand(ctrl.Get(), "QUIT");

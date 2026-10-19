@@ -54,7 +54,7 @@ async function persistSessionState(storageArea = null) {
     }
   }
 
-  // Persist recent clicked links ring buffer (up to 30 most recent clicks for correlation)
+  // Persist recent clicked links ring buffer (up to 50 most recent clicks for correlation)
   const recentClicks = [];
   if (G.clickedLinksByUrl) {
     const now = Date.now();
@@ -62,8 +62,38 @@ async function persistSessionState(storageArea = null) {
       const ts = item && (item.time || item.timestamp);
       if (item && ts && (now - ts) < 1800000) {
         recentClicks.push(item);
-        if (recentClicks.length >= 30) break;
+        if (recentClicks.length >= 50) break;
       }
+    }
+  }
+
+  // Persist recent download network responses for Content-Disposition & MIME correlation
+  const recentResponses = [];
+  if (G.recentDownloadResponses) {
+    const now = Date.now();
+    for (const [url, meta] of G.recentDownloadResponses.entries()) {
+      if (meta && (now - meta.timestamp) < 300000) {
+        recentResponses.push({ url, meta });
+        if (recentResponses.length >= 50) break;
+      }
+    }
+  }
+
+  // Persist redirect chains
+  const redirectChains = [];
+  if (G.redirectChainMap) {
+    let count = 0;
+    for (const [from, to] of G.redirectChainMap.entries()) {
+      if (count++ >= 50) break;
+      redirectChains.push([from, to]);
+    }
+  }
+  const reverseRedirects = [];
+  if (G.reverseRedirectMap) {
+    let count = 0;
+    for (const [to, root] of G.reverseRedirectMap.entries()) {
+      if (count++ >= 50) break;
+      reverseRedirects.push([to, root]);
     }
   }
 
@@ -71,7 +101,10 @@ async function persistSessionState(storageArea = null) {
     flux_cacheData: serializedTabs,
     flux_disabledHosts: Array.from(G.disabledHosts),
     flux_tabUrls: serializedTabUrls,
-    flux_recentClicks: recentClicks
+    flux_recentClicks: recentClicks,
+    flux_recentResponses: recentResponses,
+    flux_redirectChains: redirectChains,
+    flux_reverseRedirects: reverseRedirects
   });
   return true;
 }
@@ -79,7 +112,15 @@ async function persistSessionState(storageArea = null) {
 async function restoreSessionState(storageArea = null) {
   const store = getStorageStore(storageArea);
   if (!store || typeof store.get !== "function") return false;
-  const data = await store.get(["flux_cacheData", "flux_disabledHosts", "flux_tabUrls", "flux_recentClicks"]);
+  const data = await store.get([
+    "flux_cacheData",
+    "flux_disabledHosts",
+    "flux_tabUrls",
+    "flux_recentClicks",
+    "flux_recentResponses",
+    "flux_redirectChains",
+    "flux_reverseRedirects"
+  ]);
   const cacheSource = data ? data.flux_cacheData : null;
   if (cacheSource) {
     for (const [k, v] of Object.entries(cacheSource)) {
@@ -129,6 +170,27 @@ async function restoreSessionState(storageArea = null) {
           }
         }
       }
+    }
+  }
+  const respSource = data ? data.flux_recentResponses : null;
+  if (Array.isArray(respSource) && G.recentDownloadResponses) {
+    const now = Date.now();
+    for (const entry of respSource) {
+      if (entry && entry.url && entry.meta && (now - entry.meta.timestamp) < 300000) {
+        G.recentDownloadResponses.set(entry.url, entry.meta);
+      }
+    }
+  }
+  const chainSource = data ? data.flux_redirectChains : null;
+  if (Array.isArray(chainSource) && G.redirectChainMap) {
+    for (const [from, to] of chainSource) {
+      if (from && to) G.redirectChainMap.set(from, to);
+    }
+  }
+  const revSource = data ? data.flux_reverseRedirects : null;
+  if (Array.isArray(revSource) && G.reverseRedirectMap) {
+    for (const [to, root] of revSource) {
+      if (to && root) G.reverseRedirectMap.set(to, root);
     }
   }
   return true;
@@ -488,19 +550,17 @@ function onHeadersReceivedHandler(details) {
   }
 
   // 2a. Track HTTP Redirect chains (301, 302, 303, 307, 308) for ordinary download correlation
-  if (typeof details.statusCode === "number" &&
-      (details.statusCode === 301 || details.statusCode === 302 || details.statusCode === 303 ||
-       details.statusCode === 307 || details.statusCode === 308)) {
-    const loc = hmap["location"] || "";
-    if (loc) {
-      let resolvedTarget = loc;
-      try { resolvedTarget = new URL(loc, details.url).href; } catch (_) {}
-      recordRedirectHop(details.url, resolvedTarget, details.requestId, effectiveTabId);
-      if (details.requestId && G.requestMetaMap) {
-        const meta = G.requestMetaMap.get(details.requestId) || { initialUrl: details.url };
-        meta.currentUrl = resolvedTarget;
-        G.requestMetaMap.set(details.requestId, meta);
-      }
+  const loc = hmap["location"] || "";
+  const code = Number(details.statusCode);
+  const isRedirect = (code >= 300 && code <= 308) || (loc && (!details.statusCode || (code >= 300 && code < 400)));
+  if (isRedirect && loc) {
+    let resolvedTarget = loc;
+    try { resolvedTarget = new URL(loc, details.url).href; } catch (_) {}
+    recordRedirectHop(details.url, resolvedTarget, details.requestId, effectiveTabId);
+    if (details.requestId && G.requestMetaMap) {
+      const meta = G.requestMetaMap.get(details.requestId) || { initialUrl: details.url };
+      meta.currentUrl = resolvedTarget;
+      G.requestMetaMap.set(details.requestId, meta);
     }
     return null;
   }
@@ -608,7 +668,74 @@ function findCorrelatedNetworkResponse(downloadItem) {
   return null;
 }
 
-// 3. Intercept eligible ordinary file downloads and hand off to Flux (with safe browser fallback)
+// 3. Authoritative Per-Download State Machine & Robust Interception (ADR-0003 & Priority 1 Requirement)
+class DownloadStateMachine {
+  constructor() {
+    this.records = new Map();         // downloadId -> DownloadCorrelationRecord
+    this.inFlightOffers = new Map();  // downloadId -> Promise<Result>
+  }
+
+  getOrCreateRecord(downloadId, initialItem = {}) {
+    const id = Number(downloadId);
+    let rec = this.records.get(id);
+    if (!rec) {
+      rec = {
+        downloadId: id,
+        url: initialItem.url || "",
+        finalUrl: initialItem.finalUrl || initialItem.url || "",
+        originalUrl: initialItem.url || "",
+        redirectChain: [],
+        tabId: Number(initialItem.tabId) || 0,
+        frameId: 0,
+        filename: initialItem.filename || "",
+        suggestedFilename: "",
+        mime: initialItem.mime || "",
+        contentLength: initialItem.fileSize || initialItem.totalBytes || 0,
+        headers: {},
+        state: "INIT", // INIT, OFFERING, ACCEPTED, HANDED_OFF, DECLINED, FALLBACK, IGNORED, BYPASS
+        stage: "STAGE_INITIALIZATION",
+        correlationId: generateCorrelationId("dl"),
+        suggestCallback: null,
+        wasExplicitLinkClick: false,
+        isAttachment: false,
+        mechanism: "ORDINARY_LINK",
+        createdAt: Date.now(),
+        updatedAt: Date.now()
+      };
+      this.records.set(id, rec);
+      if (this.records.size > 200) {
+        const oldestKey = this.records.keys().next().value;
+        this.records.delete(oldestKey);
+      }
+    } else {
+      if (initialItem.finalUrl) rec.finalUrl = initialItem.finalUrl;
+      if (initialItem.url && !rec.url) rec.url = initialItem.url;
+      if (initialItem.filename && !rec.filename) rec.filename = initialItem.filename;
+      if (initialItem.mime && !rec.mime) rec.mime = initialItem.mime;
+      if (initialItem.fileSize) rec.contentLength = initialItem.fileSize;
+      else if (initialItem.totalBytes) rec.contentLength = initialItem.totalBytes;
+      if (initialItem.tabId && !rec.tabId) rec.tabId = Number(initialItem.tabId) || 0;
+      rec.updatedAt = Date.now();
+    }
+    return rec;
+  }
+
+  getRecord(downloadId) {
+    return this.records.get(Number(downloadId));
+  }
+
+  get(downloadId) {
+    return this.getRecord(downloadId);
+  }
+
+  removeRecord(downloadId) {
+    this.records.delete(Number(downloadId));
+    this.inFlightOffers.delete(Number(downloadId));
+  }
+}
+
+const downloadStateMachine = new DownloadStateMachine();
+
 async function onDownloadCreatedHandler(
   downloadItem,
   customTransport = null,
@@ -616,46 +743,64 @@ async function onDownloadCreatedHandler(
   suggestCallback = null,
   phase = "determine"
 ) {
-  const invokeSuggestIfNeeded = () => {
-    if (typeof suggestCallback === "function") {
-      try { suggestCallback(); } catch (_) {}
-      suggestCallback = null;
+  if (!downloadItem || (!downloadItem.url && !downloadItem.finalUrl && downloadItem.id === undefined)) {
+    if (typeof suggestCallback === "function") try { suggestCallback(); } catch (_) {}
+    return { intercepted: false, reason: "INVALID_DOWNLOAD_ITEM" };
+  }
+
+  const rec = downloadStateMachine.getOrCreateRecord(downloadItem.id, downloadItem);
+  if (typeof suggestCallback === "function") {
+    rec.suggestCallback = suggestCallback;
+  }
+
+  const invokeSuggest = (suggestPayload) => {
+    if (typeof rec.suggestCallback === "function") {
+      try { rec.suggestCallback(suggestPayload); } catch (_) {}
+      rec.suggestCallback = null;
     }
   };
 
-  if (!G.enableCapture || !downloadItem || (!downloadItem.url && !downloadItem.finalUrl)) {
-    invokeSuggestIfNeeded();
+  // 1. Interception globally disabled check
+  if (!G.enableCapture) {
+    rec.state = "IGNORED";
+    invokeSuggest();
     return { intercepted: false, reason: "CAPTURE_DISABLED" };
   }
 
-  // Check per-tab, per-URL, and global Alt-key bypass state (Defect C fix)
-  if (consumeBypassIfActive(downloadItem.tabId, downloadItem)) {
-    invokeSuggestIfNeeded();
+  // 2. Alt-key bypass check
+  if (consumeBypassIfActive(rec.tabId || downloadItem.tabId, downloadItem)) {
+    rec.state = "BYPASS";
+    invokeSuggest();
+    logPipelineStage(rec.correlationId, "DOWNLOAD_BYPASSED_BY_USER", { downloadId: rec.downloadId, url: rec.url });
     return { intercepted: false, reason: "BYPASS_MODIFIER_ACTIVE" };
   }
 
-  const targetUrl = downloadItem.finalUrl || downloadItem.url;
+  const targetUrl = downloadItem.finalUrl || downloadItem.url || rec.finalUrl || rec.url;
+  rec.finalUrl = targetUrl;
   const isBlob = targetUrl.startsWith("blob:");
   const isData = targetUrl.startsWith("data:");
   const isInternal = downloadItem.byExtensionId || targetUrl.startsWith("chrome-extension:") || targetUrl.startsWith("chrome:") || targetUrl.startsWith("brave:");
+
+  // 3. Blob / Data / Browser Internal URLs must stay in browser memory without disrupting user gestures
   if (isBlob || isData || isInternal) {
-    invokeSuggestIfNeeded();
+    rec.state = "IGNORED";
+    invokeSuggest();
     if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
       try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
     }
     const mechanism = isBlob ? "BROWSER_BLOB_OR_DATA" : (isData ? "BROWSER_DATA_DOWNLOAD" : "BROWSER_INTERNAL_OR_EXTENSION");
-    logPipelineStage(generateCorrelationId("blob"), "DOWNLOAD_DELEGATED_TO_BROWSER", {
+    logPipelineStage(rec.correlationId, "DOWNLOAD_DELEGATED_TO_BROWSER", {
+      downloadId: rec.downloadId,
       mechanism,
       stage: "STAGE_DELEGATION",
-      downloadId: downloadItem.id,
       filename: downloadItem.filename,
       url: targetUrl.slice(0, 64),
       reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
     });
-    logPipelineStage(generateCorrelationId("blob"), "DELEGATED_TO_BROWSER", {
+    logPipelineStage(rec.correlationId, "DELEGATED_TO_BROWSER", {
+      downloadId: rec.downloadId,
       mechanism,
       stage: "STAGE_DELEGATION",
-      downloadId: downloadItem.id,
       filename: downloadItem.filename,
       url: targetUrl.slice(0, 64),
       reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
@@ -663,157 +808,84 @@ async function onDownloadCreatedHandler(
     return { intercepted: false, reason: "EXTENSION_OR_BLOB_URL", mechanism };
   }
 
-  const netMeta = findCorrelatedNetworkResponse(downloadItem);
-  const effectiveTabId = downloadItem.tabId || (netMeta && netMeta.tabId) || 0;
-  const clickedInfo = findCorrelatedClick(effectiveTabId, downloadItem);
-  const originalUrl = (clickedInfo && clickedInfo.url) ||
-                      (netMeta && netMeta.originalUrl) ||
-                      resolveInitialUrlFromRedirects(downloadItem.url || targetUrl) ||
-                      downloadItem.url ||
-                      targetUrl;
-  const pageReferrer = downloadItem.referrer ||
-                       (clickedInfo ? clickedInfo.referrer : "") ||
-                       (netMeta ? netMeta.tabUrl : "") || "";
-  const correlationId = (clickedInfo && clickedInfo.correlationId) ||
-                        (netMeta && netMeta.correlationId) ||
-                        generateCorrelationId("dl");
-
-  if (isSiteDisabled(pageReferrer || targetUrl)) {
-    invokeSuggestIfNeeded();
-    if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
-      try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
-    }
-    return { intercepted: false, reason: "SITE_EXCLUDED" };
-  }
-
-  // Never intercept HTML watch pages as ordinary binary downloads
-  if (isWebpageWatchUrl(targetUrl)) {
-    invokeSuggestIfNeeded();
-    if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
-      try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
-    }
-    return { intercepted: false, reason: "WEBPAGE_URL" };
-  }
-
-  const rawFilename = downloadItem.filename ||
-                      (netMeta && netMeta.filename) ||
-                      (clickedInfo && clickedInfo.filename) || "";
-  const cleanFilename = rawFilename ? rawFilename.split(/[/\\]/).pop() : "";
-  const ext = extractUrlExtension(cleanFilename) ||
-              extractUrlExtension(targetUrl) ||
-              extractUrlExtension(originalUrl);
-  const mime = ((downloadItem.mime || (netMeta && netMeta.mime) || "").split(";")[0]).trim().toLowerCase();
-  const fileSize = downloadItem.fileSize || downloadItem.totalBytes || (netMeta && netMeta.size) || 0;
-
-  const isEligibleExt = G.InterceptFileExts.has(ext);
-  const isEligibleMime = Boolean(G.InterceptMimeTypes && G.InterceptMimeTypes.has(mime));
-  const isAttachment = Boolean(netMeta && netMeta.isAttachment);
-  const wasExplicitLinkClick = Boolean(clickedInfo);
-
-  const normTarget = normalizeCorrelationUrl(targetUrl);
-  const normOrig = normalizeCorrelationUrl(downloadItem.url || "");
-  const now = Date.now();
-  if (!customTransport && G.handledDownloadUrls) {
-    const isHandled = (u) => {
-      if (!u) return false;
-      if (G.handledDownloadUrls instanceof Map) {
-        const ts = G.handledDownloadUrls.get(u);
-        if (ts && (now - ts) < 15000) return true;
-        if (ts) G.handledDownloadUrls.delete(u);
-        return false;
-      }
-      return false;
-    };
-    if (isHandled(normTarget) || isHandled(normOrig)) {
-      invokeSuggestIfNeeded();
-      if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-        chrome.downloads.cancel(downloadItem.id, () => {
-          if (chrome.downloads.erase) chrome.downloads.erase({ id: downloadItem.id }, () => {});
-        });
-      }
-      return { intercepted: true, reason: "ALREADY_INTERCEPTED_VIA_CLICK" };
-    }
-  }
-
-  // Check if a click offer is currently in-flight for this URL
-  if (G.inFlightClickOffers && G.inFlightClickOffers instanceof Map) {
-    const inFlightOffer = G.inFlightClickOffers.get(normTarget) || G.inFlightClickOffers.get(normOrig);
-    if (inFlightOffer) {
-      try {
-        const clickRes = await inFlightOffer;
-        if (clickRes && clickRes.accepted) {
-          invokeSuggestIfNeeded();
-          if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-            chrome.downloads.cancel(downloadItem.id, () => {
-              if (chrome.downloads.erase) chrome.downloads.erase({ id: downloadItem.id }, () => {});
-            });
-          }
-          return { intercepted: true, reason: "ALREADY_INTERCEPTED_VIA_IN_FLIGHT_CLICK" };
-        }
-      } catch (_) {}
-    }
-  }
-
-  // In Chromium/Brave/Edge, onDeterminingFilename always fires to determine filename and hold progress.
-  // We defer the offer to onDeterminingFilename without prematurely calling pause(), preventing stuck paused downloads.
+  // 4. In Chromium/Brave/Edge, onDeterminingFilename always fires to determine filename and hold progress.
+  // Defer the offer to onDeterminingFilename without prematurely calling pause(), preventing stuck paused downloads.
   if (phase === "created" && typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
     return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
   }
 
-  if (!isEligibleExt && !isEligibleMime && !wasExplicitLinkClick && !isAttachment) {
-    if (fileSize === 0 || fileSize < G.minFileSizeBytes) {
-      invokeSuggestIfNeeded();
-      if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
-        try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
-      }
-      return { intercepted: false, reason: "BELOW_SIZE_OR_EXT_FILTER" };
-    }
-  }
-
-  // Prevent duplicate interception of the same browser download ID; if onCreated already initiated an offer
-  // and onDeterminingFilename fires while it is in-flight or completed, await the same offer before calling suggest()
-  G.inFlightDownloadOffers = G.inFlightDownloadOffers || new Map();
-  if (downloadItem.id !== undefined && G.inFlightDownloadOffers.has(downloadItem.id)) {
+  // 5. Deduplication & State Synchronization: if an offer for this exact downloadId is currently in flight, await it!
+  if (downloadStateMachine.inFlightOffers.has(rec.downloadId)) {
     try {
-      const prevRes = await G.inFlightDownloadOffers.get(downloadItem.id);
-      invokeSuggestIfNeeded();
-      return prevRes;
+      const existingRes = await downloadStateMachine.inFlightOffers.get(rec.downloadId);
+      invokeSuggest();
+      return existingRes;
     } catch (_) {
-      invokeSuggestIfNeeded();
+      invokeSuggest();
       return { intercepted: false, reason: "ALREADY_HANDLED" };
     }
   }
-  if (downloadItem.id !== undefined && G.handledDownloadIds) {
-    if (G.handledDownloadIds.has(downloadItem.id)) {
-      invokeSuggestIfNeeded();
-      return { intercepted: false, reason: "ALREADY_HANDLED" };
-    }
-    G.handledDownloadIds.add(downloadItem.id);
-    if (G.handledDownloadIds.size > 500) {
-      const oldest = G.handledDownloadIds.values().next().value;
-      G.handledDownloadIds.delete(oldest);
-    }
+
+  // If already accepted and handed off:
+  if (rec.state === "HANDED_OFF" || rec.state === "ACCEPTED") {
+    invokeSuggest();
+    return { intercepted: true, reason: "ALREADY_ACCEPTED", taskId: rec.taskId };
+  }
+  if (rec.state === "DECLINED" || rec.state === "FALLBACK" || rec.state === "IGNORED") {
+    invokeSuggest();
+    return { intercepted: false, reason: rec.state };
   }
 
-  // In onDeterminingFilename ("determine" phase), Chromium holds progress until suggest() is called.
-  // Only call chrome.downloads.pause() when not in the "determine" phase (e.g. Firefox or fallback phases).
-  if (phase !== "determine" && !customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
-    try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
-  }
+  // 6. Gather all correlation metadata across click, network response headers, and redirect chains
+  const netMeta = findCorrelatedNetworkResponse(downloadItem);
+  const effectiveTabId = downloadItem.tabId || (netMeta && netMeta.tabId) || rec.tabId || 0;
+  rec.tabId = effectiveTabId;
 
-  const recentHeaders = findRecentRequestHeadersForUrl(targetUrl);
-  const headers = Object.assign({}, recentHeaders, (netMeta && netMeta.headers) || {}, downloadItem.headers || {});
-  if (pageReferrer && !headers.Referer && !headers.referer) {
-    headers.Referer = pageReferrer;
+  const clickedInfo = findCorrelatedClick(effectiveTabId, downloadItem);
+  rec.originalUrl = (clickedInfo && clickedInfo.url) ||
+                    (netMeta && netMeta.originalUrl) ||
+                    resolveInitialUrlFromRedirects(downloadItem.url || targetUrl) ||
+                    downloadItem.url || targetUrl;
+
+  const pageReferrer = downloadItem.referrer ||
+                       (clickedInfo ? clickedInfo.referrer : "") ||
+                       (netMeta ? netMeta.tabUrl : "") || "";
+
+  rec.correlationId = (clickedInfo && clickedInfo.correlationId) ||
+                      (netMeta && netMeta.correlationId) ||
+                      rec.correlationId;
+
+  // Build redirect chain representation
+  const chain = [];
+  let curr = rec.originalUrl;
+  if (G.redirectChainMap) {
+    while (curr && G.redirectChainMap.has(normalizeCorrelationUrl(curr)) && chain.length < 10) {
+      const nextHop = G.redirectChainMap.get(normalizeCorrelationUrl(curr));
+      if (!nextHop || chain.includes(nextHop)) break;
+      chain.push(nextHop);
+      curr = nextHop;
+    }
   }
-  const cookieHeader = await collectCookiesForDownload(targetUrl, pageReferrer);
-  if (cookieHeader && !headers.Cookie && !headers.cookie) {
-    headers.Cookie = cookieHeader;
-  }
+  rec.redirectChain = chain;
+
+  const rawFilename = downloadItem.filename ||
+                      (netMeta && netMeta.filename) ||
+                      (clickedInfo && clickedInfo.filename) || "";
+  const cleanFilename = sanitizeFilename(rawFilename ? rawFilename.split(/[/\\]/).pop() : "");
+  rec.suggestedFilename = cleanFilename;
+
+  const mime = ((downloadItem.mime || (netMeta && netMeta.mime) || "").split(";")[0]).trim().toLowerCase();
+  rec.mime = mime;
+  const fileSize = downloadItem.fileSize || downloadItem.totalBytes || (netMeta && netMeta.size) || 0;
+  rec.contentLength = fileSize;
+  const isAttachment = Boolean(netMeta && netMeta.isAttachment);
+  rec.isAttachment = isAttachment;
+  const wasExplicitLinkClick = Boolean(clickedInfo);
+  rec.wasExplicitLinkClick = wasExplicitLinkClick;
 
   const isFrame = Boolean(downloadItem.tabId === -1 || (clickedInfo && clickedInfo.isFrame));
-  const hasRedirectHop = Boolean(downloadItem.finalUrl && downloadItem.url && downloadItem.finalUrl !== downloadItem.url);
-  const mechanism = classifyDownloadMechanism({
+  const hasRedirectHop = Boolean((downloadItem.finalUrl && downloadItem.url && downloadItem.finalUrl !== downloadItem.url) || chain.length > 0);
+  rec.mechanism = classifyDownloadMechanism({
     url: downloadItem.url,
     finalUrl: downloadItem.finalUrl,
     downloadItem,
@@ -824,72 +896,128 @@ async function onDownloadCreatedHandler(
     filenameFromContentDisposition: Boolean(netMeta && netMeta.filename)
   });
 
-  logPipelineStage(correlationId, "DOWNLOAD_OFFER_INITIATED", {
-    downloadId: downloadItem.id,
+  // 7. Check eligibility with unified isDownloadEligible
+  const eligibility = isDownloadEligible({
+    url: downloadItem.url,
+    finalUrl: targetUrl,
+    filename: cleanFilename,
+    mime,
+    fileSize,
+    isAttachment,
+    wasExplicitLinkClick,
+    tabUrl: pageReferrer
+  });
+
+  if (!eligibility.eligible) {
+    rec.state = "IGNORED";
+    invokeSuggest();
+    if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+      try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+    }
+    logPipelineStage(rec.correlationId, "DOWNLOAD_SKIPPED_NOT_ELIGIBLE", {
+      downloadId: rec.downloadId,
+      url: targetUrl,
+      reason: eligibility.reason,
+      mechanism: rec.mechanism
+    });
+    return { intercepted: false, reason: eligibility.reason };
+  }
+
+  // 8. In Firefox or non-determine phases, pause the download while offering
+  if (phase !== "determine" && !customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
+    try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+  }
+
+  // 9. Execute Offer Flow with safe handoff & browser fallback
+  rec.state = "OFFERING";
+  logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_INITIATED", {
+    downloadId: rec.downloadId,
     url: targetUrl,
-    originalUrl,
+    originalUrl: rec.originalUrl,
     filename: cleanFilename,
     fileSize,
     mime,
     wasExplicitLinkClick,
     isAttachment,
-    mechanism,
+    mechanism: rec.mechanism,
     stage: "STAGE_ELIGIBILITY"
   });
 
-  const executeOfferFlow = async () => {
+  const offerAction = async () => {
     try {
-      logPipelineStage(correlationId, "DOWNLOAD_OFFER_SENT", {
+      // Collect request headers and session cookies
+      const recentHeaders = findRecentRequestHeadersForUrl(targetUrl);
+      const headers = Object.assign({}, recentHeaders, (netMeta && netMeta.headers) || {}, downloadItem.headers || {});
+      if (pageReferrer && !headers.Referer && !headers.referer) {
+        headers.Referer = pageReferrer;
+      }
+      const cookieHeader = await collectCookiesForDownload(targetUrl, pageReferrer);
+      if (cookieHeader && !headers.Cookie && !headers.cookie) {
+        headers.Cookie = cookieHeader;
+      }
+      rec.headers = headers;
+
+      logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_SENT", {
         url: targetUrl,
         filename: cleanFilename,
         fileSize,
-        mechanism,
+        mechanism: rec.mechanism,
         stage: "STAGE_NATIVE_RPC"
       });
 
       const result = await sendNativeRpc("download.offer", {
         url: targetUrl,
-        originalUrl,
+        originalUrl: rec.originalUrl,
         filename: cleanFilename,
         fileSize: fileSize > 0 ? fileSize : 0,
         mime,
         tabUrl: pageReferrer,
         bypassModifier: false,
-        correlationId,
+        correlationId: rec.correlationId,
         headers,
         autoStart: true
       }, customTransport);
 
       if (result && result.accepted) {
-        logPipelineStage(correlationId, "DOWNLOAD_OFFER_ACCEPTED", {
-          downloadId: downloadItem.id,
+        rec.state = "ACCEPTED";
+        rec.taskId = result.taskId;
+
+        logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_ACCEPTED", {
+          downloadId: rec.downloadId,
           taskId: result.taskId,
-          fileName: result.fileName,
-          mechanism,
+          fileName: result.fileName || cleanFilename,
+          mechanism: rec.mechanism,
           stage: "STAGE_DESKTOP_ACCEPTANCE"
         });
-        logPipelineStage(correlationId, "DOWNLOAD_ACCEPTED_BY_FLUX", {
-          downloadId: downloadItem.id,
+        logPipelineStage(rec.correlationId, "DOWNLOAD_ACCEPTED_BY_FLUX", {
+          downloadId: rec.downloadId,
           taskId: result.taskId,
-          fileName: result.fileName,
-          mechanism,
+          fileName: result.fileName || cleanFilename,
+          mechanism: rec.mechanism,
           stage: "STAGE_DESKTOP_ACCEPTANCE"
         });
 
-        // Record target & original URLs so subsequent browser events for this download are suppressed
+        // Record target & original URLs in handled set with timestamp
         if (!G.handledDownloadUrls || !(G.handledDownloadUrls instanceof Map)) {
           G.handledDownloadUrls = new Map();
         }
-        G.handledDownloadUrls.set(normTarget, Date.now());
-        G.handledDownloadUrls.set(normOrig, Date.now());
+        G.handledDownloadUrls.set(normalizeCorrelationUrl(targetUrl), Date.now());
+        G.handledDownloadUrls.set(normalizeCorrelationUrl(rec.originalUrl), Date.now());
 
         // CRITICAL FOR BRAVE / CHROMIUM: Must invoke suggest() before calling chrome.downloads.cancel()!
         // Calling cancel() during onDeterminingFilename without resolving suggest throws:
         // "Cannot cancel a download while determining filename", causing timeout and fallback to native browser manager.
-        invokeSuggestIfNeeded();
+        invokeSuggest();
 
         if (cancelBrowserDownloadFn) {
-          await cancelBrowserDownloadFn(downloadItem.id);
+          try {
+            await cancelBrowserDownloadFn(downloadItem.id);
+          } catch (cancelErr) {
+            logPipelineStage(rec.correlationId, "BROWSER_CANCEL_ERROR_RECOVERED", {
+              downloadId: downloadItem.id,
+              error: cancelErr ? cancelErr.message : String(cancelErr)
+            });
+          }
         } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
           const tryCancel = (retries = 3) => {
             chrome.downloads.cancel(downloadItem.id, () => {
@@ -908,58 +1036,58 @@ async function onDownloadCreatedHandler(
           };
           tryCancel();
         }
-        return { intercepted: true, taskId: result.taskId, fileName: result.fileName, correlationId };
+
+        rec.state = "HANDED_OFF";
+        return { intercepted: true, taskId: result.taskId, fileName: result.fileName || cleanFilename, correlationId: rec.correlationId };
       }
 
       // Flux declined: allow native browser download to continue seamlessly
-      logPipelineStage(correlationId, "DOWNLOAD_OFFER_REJECTED", {
-        downloadId: downloadItem.id,
+      rec.state = "DECLINED";
+      logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_REJECTED", {
+        downloadId: rec.downloadId,
         reason: (result && result.reason) || "DECLINED_BY_DESKTOP",
-        mechanism,
+        mechanism: rec.mechanism,
         stage: "STAGE_DESKTOP_ACCEPTANCE"
       });
-      logPipelineStage(correlationId, "DOWNLOAD_DECLINED_BY_FLUX", {
-        downloadId: downloadItem.id,
+      logPipelineStage(rec.correlationId, "DOWNLOAD_DECLINED_BY_FLUX", {
+        downloadId: rec.downloadId,
         reason: (result && result.reason) || "DECLINED_BY_DESKTOP",
-        mechanism,
+        mechanism: rec.mechanism,
         stage: "STAGE_DESKTOP_ACCEPTANCE"
       });
-      invokeSuggestIfNeeded();
+      invokeSuggest();
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }
-      return { intercepted: false, reason: (result && result.reason) || "DECLINED_BY_DESKTOP", mechanism, correlationId };
+      return { intercepted: false, fallbackToBrowser: true, reason: (result && result.reason) || "DECLINED_BY_DESKTOP", mechanism: rec.mechanism, correlationId: rec.correlationId };
+
     } catch (err) {
       // Flux unreachable or RPC error: resume native browser download safely
-      logPipelineStage(correlationId, "INTERCEPTION_FAILED", {
-        downloadId: downloadItem.id,
+      rec.state = "FALLBACK";
+      logPipelineStage(rec.correlationId, "INTERCEPTION_FAILED", {
+        downloadId: rec.downloadId,
         error: err ? err.message : String(err),
-        mechanism,
+        mechanism: rec.mechanism,
         stage: "STAGE_FAILURE_RECOVERY"
       });
-      logPipelineStage(correlationId, "DOWNLOAD_FALLBACK_TO_BROWSER", {
-        downloadId: downloadItem.id,
+      logPipelineStage(rec.correlationId, "DOWNLOAD_FALLBACK_TO_BROWSER", {
+        downloadId: rec.downloadId,
         error: err ? err.message : String(err),
-        mechanism,
+        mechanism: rec.mechanism,
         stage: "STAGE_FAILURE_RECOVERY"
       });
-      invokeSuggestIfNeeded();
+      invokeSuggest();
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }
-      return { intercepted: false, fallbackToBrowser: true, error: err.message, correlationId };
+      return { intercepted: false, fallbackToBrowser: true, error: err ? err.message : String(err), correlationId: rec.correlationId };
+    } finally {
+      downloadStateMachine.inFlightOffers.delete(rec.downloadId);
     }
   };
 
-  const offerPromise = executeOfferFlow();
-  if (downloadItem.id !== undefined && G.inFlightDownloadOffers) {
-    G.inFlightDownloadOffers.set(downloadItem.id, offerPromise);
-    offerPromise.finally(() => {
-      setTimeout(() => {
-        if (G.inFlightDownloadOffers) G.inFlightDownloadOffers.delete(downloadItem.id);
-      }, 15000);
-    });
-  }
+  const offerPromise = offerAction();
+  downloadStateMachine.inFlightOffers.set(rec.downloadId, offerPromise);
   return await offerPromise;
 }
 
@@ -2017,6 +2145,7 @@ if (typeof module !== "undefined" && module.exports) {
     submitMediaCandidateToFlux,
     submitMediaCandidateToOpenIDM,
     resolveCandidateForDownloadRequest,
-    handleRuntimeMessage
+    handleRuntimeMessage,
+    downloadStateMachine
   };
 }

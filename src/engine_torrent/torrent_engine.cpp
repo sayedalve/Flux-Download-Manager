@@ -82,9 +82,20 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
     std::atomic<bool>& cancel_requested,
     std::atomic<uint64_t>& speed_limit_bps,
     TorrentProgressCallback on_progress,
-    std::shared_ptr<brisk::TokenBucketLimiter> global_limiter) {
+    std::shared_ptr<brisk::TokenBucketLimiter> global_limiter,
+    std::atomic<uint64_t>* global_speed_limit_bps) {
 
     EnsureWinSock();
+
+    // 0. Magnet link detection without BEP 9 metadata
+    if (torrent_info.is_magnet) {
+        task.state = TaskState::kFailed;
+        task.error_code = "ERR_MAGNET_METADATA_UNSUPPORTED";
+        task.error_message = "Magnet links require BitTorrent extension metadata exchange (BEP 9), which is not yet supported. Please download and open the .torrent file.";
+        task.status_detail = "Failed: Magnet metadata unsupported";
+        OPENIDM_LOG_WARN("TorrentEngine", "Magnet link download attempted without static metainfo for task " + task.task_id);
+        return Result<void>::Err("ERR_MAGNET_METADATA_UNSUPPORTED", task.error_message);
+    }
 
     // 1. Metainfo Pre-flight Validation
     if (torrent_info.total_length == 0 || torrent_info.num_pieces() == 0 || torrent_info.piece_length == 0) {
@@ -268,10 +279,12 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
             int r = recv(sock.s, reinterpret_cast<char*>(temp), sizeof(temp), 0);
             if (r <= 0) break;
 
-            // Apply rate limiting throttling on socket read
-            task_limiter->Consume(static_cast<size_t>(r), speed_limit_bps, cancel_requested);
-            if (global_limiter) {
-                global_limiter->Consume(static_cast<size_t>(r), speed_limit_bps, cancel_requested);
+            // Apply dual rate limiting throttling on socket read
+            if (speed_limit_bps.load(std::memory_order_relaxed) > 0) {
+                task_limiter->Consume(static_cast<size_t>(r), speed_limit_bps, cancel_requested);
+            }
+            if (global_limiter && global_speed_limit_bps && global_speed_limit_bps->load(std::memory_order_relaxed) > 0) {
+                global_limiter->Consume(static_cast<size_t>(r), *global_speed_limit_bps, cancel_requested);
             }
 
             recv_buf.insert(recv_buf.end(), temp, temp + r);

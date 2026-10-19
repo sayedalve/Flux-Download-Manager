@@ -567,18 +567,29 @@ def main():
         # ---------------------------------------------------------------------
         print("[5/8] IT-STREAM-01 & IT-STREAM-02: HLS Master Manifest Probe & FFmpeg Container Muxing...")
         probe_out = subprocess.run(
-            [str(OPENIDM_BIN), "--db", str(db_path), "--probe-stream", f"{base_url}/hls/master.m3u8"],
+            [
+                str(OPENIDM_BIN),
+                "--db", str(db_path),
+                "--worker-binary", str(STREAM_WORKER),
+                "--ffmpeg-binary", str(FFMPEG_BIN),
+                "--allow-loopback",
+                "--probe-stream", f"{base_url}/hls/master.m3u8"
+            ],
             capture_output=True,
             text=True,
             check=True,
         )
-        assert "[VIDEO]" in probe_out.stdout and "[SUBTITLES]" in probe_out.stdout, "Expected VIDEO and SUBTITLES tracks"
+        stdout_upper = probe_out.stdout.upper()
+        assert "[VIDEO]" in stdout_upper and "[SUBTITLES]" in stdout_upper, f"Expected VIDEO and SUBTITLES tracks, got stdout: {probe_out.stdout!r}, stderr: {probe_out.stderr!r}"
 
         subprocess.run(
             [
                 str(OPENIDM_BIN),
                 "--db", str(db_path),
                 "--out", str(dl_dir),
+                "--worker-binary", str(STREAM_WORKER),
+                "--ffmpeg-binary", str(FFMPEG_BIN),
+                "--allow-loopback",
                 "--stream", f"{base_url}/hls/master.m3u8",
             ],
             capture_output=True,
@@ -602,6 +613,9 @@ def main():
                 str(OPENIDM_BIN),
                 "--db", str(db_path),
                 "--out", str(dl_dir),
+                "--worker-binary", str(STREAM_WORKER),
+                "--ffmpeg-binary", str(FFMPEG_BIN),
+                "--allow-loopback",
                 "--stream", f"{base_url}/dash/manifest.mpd",
             ],
             capture_output=True,
@@ -759,6 +773,9 @@ def main():
         # and full muxing (including system /usr/bin/ffmpeg shared library footprint)
         probe_stat = measure_child_command_rusage([
             OPENIDM_BIN, "--db", bench_dir / "probe_bench.db",
+            "--worker-binary", str(STREAM_WORKER),
+            "--ffmpeg-binary", str(FFMPEG_BIN),
+            "--allow-loopback",
             "--probe-stream", f"{base_url}/hls/master.m3u8"
         ])
         peak_stream_worker_rss_mb = probe_stat["maxrss_kb"] / 1024.0
@@ -768,6 +785,9 @@ def main():
 
         stream_stat = measure_child_command_rusage([
             OPENIDM_BIN, "--db", bench_dir / "stream_bench.db", "--out", bench_dir,
+            "--worker-binary", str(STREAM_WORKER),
+            "--ffmpeg-binary", str(FFMPEG_BIN),
+            "--allow-loopback",
             "--stream", f"{base_url}/hls/master.m3u8"
         ])
         peak_stream_rss_mb = stream_stat["maxrss_kb"] / 1024.0
@@ -792,7 +812,14 @@ def main():
             for idx in range(1000)
         ]
         conn.executemany(
-            "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO tasks (
+                task_id, task_type, state, queue_id, queue_order, category,
+                url, page_url, file_name, save_dir, part_path,
+                total_bytes, downloaded_bytes, range_supported, max_connections,
+                etag, last_modified, headers_json, encrypted_auth_blob, stream_options_json,
+                expected_sha256, error_code, error_message,
+                created_at_ms, updated_at_ms, completed_at_ms
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             rows_1000
         )
         conn.commit()

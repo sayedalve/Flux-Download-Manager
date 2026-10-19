@@ -36,7 +36,7 @@ struct TorrentInfo {
 
     size_t num_pieces() const { return pieces.size(); }
     uint64_t get_piece_size(size_t piece_index) const {
-        if (piece_index >= pieces.size() || piece_length == 0) return 0;
+        if (piece_index >= pieces.size() || piece_length == 0 || total_length == 0) return 0;
         if (piece_index == pieces.size() - 1) {
             uint64_t remainder = total_length % piece_length;
             return remainder == 0 ? piece_length : remainder;

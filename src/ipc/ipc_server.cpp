@@ -589,7 +589,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         // the task must be queued without starting network transfer until the user confirms
         // choices in the Win32 New Download dialog.
         // In headless daemon / automated test mode (m_offer_cb == nullptr), there is no window to prompt, so start directly.
-        bool auto_start = m_offer_cb ? false : (params.contains("autoStart") ? params["autoStart"].as_bool(true) : true);
+        bool auto_start = (m_offer_cb != nullptr) ? false : true;
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             json::Value res = json::Object{};
@@ -624,14 +624,14 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             return MakeRpcResult(id, std::move(res)).dump();
         }
         auto state = task_opt->state;
-        if (state == TaskState::kCanceled || state == TaskState::kFailed) {
+        if (state == TaskState::kCanceled) {
             res["decision"] = "CANCELLED";
             res["state"] = TaskStateToString(state);
             return MakeRpcResult(id, std::move(res)).dump();
         }
         if (state == TaskState::kDownloading || state == TaskState::kProbing ||
             state == TaskState::kMuxing || state == TaskState::kVerifying ||
-            state == TaskState::kCompleted) {
+            state == TaskState::kCompleted || state == TaskState::kFailed) {
             // User clicked Download in New Download dialog! Task has started
             res["decision"] = "ACCEPTED";
             res["state"] = TaskStateToString(state);

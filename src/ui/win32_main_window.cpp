@@ -363,11 +363,7 @@ HitTestResult DesktopView::HitTestPoint(int x, int y, size_t scroll_offset) cons
         return {HitTargetType::kNone, 0, "", ""};
     }
     if (geom.table_header_rect.Contains(x, y)) {
-        for (size_t i = 0; i < geom.table_columns.size(); ++i) {
-            if (geom.table_columns[i].rect.width() > 0 && geom.table_columns[i].rect.height() > 0 && geom.table_columns[i].rect.Contains(x, y)) {
-                return {HitTargetType::kTableHeaderColumn, static_cast<int>(i), "", "Sort by " + geom.table_columns[i].title};
-            }
-        }
+        // Table header row is static and non-interactive
         return {HitTargetType::kNone, 0, "", ""};
     }
     if (geom.status_bar_rect.Contains(x, y)) {
@@ -985,17 +981,8 @@ void DesktopView::EndColumnResize() {
     m_resizing_col_index = -1;
 }
 
-int DesktopView::HitTestColumnDivider(int x, int y, size_t scroll_offset) const {
-    auto geom = ComputeLayoutGeometry(scroll_offset);
-    if (y < geom.table_header_rect.top || y > geom.table_header_rect.bottom) {
-        return -1;
-    }
-    for (size_t i = 0; i < geom.table_columns.size(); ++i) {
-        int r_edge = geom.table_columns[i].rect.right;
-        if (std::abs(x - r_edge) <= 4) {
-            return static_cast<int>(i);
-        }
-    }
+int DesktopView::HitTestColumnDivider(int /*x*/, int /*y*/, size_t /*scroll_offset*/) const {
+    // Table column dividers are static and non-interactive
     return -1;
 }
 
@@ -5325,20 +5312,15 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     DrawRoundedBoxGdi(hdc, settings_rc, 20, pal.surface_primary, pal.border_subtle, 1);
     DrawGearGlyphGdi(hdc, settings_rc, pal.text_secondary);
 
-    // 2. Table Column Headers
+    // 2. Table Column Headers (static and non-interactive)
     RECT header_rc = ToWinRect(geom.table_header_rect);
     SelectObject(hdc, hFontSmallBold);
+    SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
     for (size_t col_idx = 0; col_idx < geom.table_columns.size(); ++col_idx) {
         const auto& col = geom.table_columns[col_idx];
         if (col.rect.width() <= 0) continue;
         RECT crc = ToWinRect(col.rect);
         std::wstring wt = Utf8ToW(col.title);
-        if (view.GetSortColumn() == col.sort_column) {
-            wt += view.IsSortAscending() ? L" \x25B2" : L" \x25BC";
-            SetTextColor(hdc, pal.accent_primary.ToWin32ColorRef());
-        } else {
-            SetTextColor(hdc, pal.text_secondary.ToWin32ColorRef());
-        }
         DrawTextW(hdc, wt.c_str(), -1, &crc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
     RECT hdr_div{0, header_rc.bottom - 1, w, header_rc.bottom};

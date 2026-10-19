@@ -695,14 +695,20 @@ bool TestDesktopUiHitTestingAndMouseInteractions() {
     ASSERT_TRUE(view.GetActiveTooltip() == "Very_Long_University_Computer_Science_Lecture_Recording_2026_1080p_60fps.mp4",
                 "Hovering truncated filename exposes full untruncated filename in tooltip");
 
-    // 4. Click Table Column Header 'Filename' (index 0) to sort ascending, then click again to toggle descending
+    // 4. Verify Table Column Headers are static and non-interactive
     const auto& col0_rc = geom.table_columns[0].rect;
-    ASSERT_TRUE(view.HandleMouseClick((col0_rc.left + col0_rc.right) / 2, (col0_rc.top + col0_rc.bottom) / 2, false),
-                "Click Filename column header");
-    ASSERT_TRUE(view.GetSortColumn() == openidm::ui::SortColumn::kFileName && view.IsSortAscending(), "Sorted by Filename ascending");
-    ASSERT_TRUE(view.HandleMouseClick((col0_rc.left + col0_rc.right) / 2, (col0_rc.top + col0_rc.bottom) / 2, false),
-                "Click Filename column header again");
-    ASSERT_TRUE(!view.IsSortAscending(), "Toggled Filename sort to descending");
+    auto hit_hdr = view.HitTestPoint((col0_rc.left + col0_rc.right) / 2, (col0_rc.top + col0_rc.bottom) / 2);
+    ASSERT_TRUE(hit_hdr.type == openidm::ui::HitTargetType::kNone, "Header column hit-test is non-interactive");
+    ASSERT_TRUE(!view.HandleMouseClick((col0_rc.left + col0_rc.right) / 2, (col0_rc.top + col0_rc.bottom) / 2, false),
+                "Clicking column header does not trigger action");
+    ASSERT_TRUE(view.HitTestColumnDivider((col0_rc.left + col0_rc.right) / 2, (col0_rc.top + col0_rc.bottom) / 2) == -1,
+                "Column divider hit-test is non-interactive");
+
+    // Verify sorting remains fully functional via view sort controls
+    view.ToggleSortColumn(openidm::ui::SortColumn::kFileName);
+    ASSERT_TRUE(view.GetSortColumn() == openidm::ui::SortColumn::kFileName && view.IsSortAscending(), "Sorted by Filename ascending via sort control");
+    view.ToggleSortColumn(openidm::ui::SortColumn::kFileName);
+    ASSERT_TRUE(!view.IsSortAscending(), "Toggled Filename sort to descending via sort control");
 
     ctrl.Shutdown();
     std::filesystem::remove_all(work_dir);

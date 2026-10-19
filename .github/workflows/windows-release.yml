@@ -245,6 +245,7 @@ jobs:
             dist/*-Setup-*.exe
             dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Full.zip
             dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Core.zip
+            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64.zip
             dist/SHA256SUMS.txt
             benchmarks/latest_metrics.json
             docs/BENCHMARK_REPORT.md

@@ -12,7 +12,7 @@ var SourceType = {
 };
 
 var G = {
-  version: "0.3.0",
+  version: "0.3.1",
   nativeHostName: "com.flux.downloadmanager",
   fallbackNativeHostNames: ["org.flux.native", "org.openidm.native"],
   enableCapture: true,

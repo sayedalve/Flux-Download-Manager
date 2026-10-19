@@ -170,19 +170,24 @@ function isDownloadEligible(params = {}) {
     return { eligible: false, reason: "SITE_EXCLUDED" };
   }
 
-  // 3. Exclude webpage watch URLs (e.g. YouTube watch page)
-  if (isWebpageWatchUrl(targetUrl)) {
+  const cleanMime = (mime || "").split(";")[0].trim().toLowerCase();
+  const cleanFilename = sanitizeFilename(filename, "");
+  const ext = (extractUrlExtension(cleanFilename) || extractUrlExtension(targetUrl) || extractUrlExtension(url)).toLowerCase();
+  const webCodeExts = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "jsx", "ts", "tsx"]);
+  const hasDownloadExt = Boolean(ext && !webCodeExts.has(ext));
+
+  // 3. Exclude webpage watch URLs only when the request is an ordinary HTML page navigation
+  // (Never disqualify an explicit attachment, a downloadable file extension, or download attribute)
+  if (!isAttachment && !hasDownloadAttr && !hasDownloadExt &&
+      (cleanMime === "" || cleanMime === "text/html" || cleanMime === "application/xhtml+xml") &&
+      isWebpageWatchUrl(targetUrl)) {
     return { eligible: false, reason: "WEBPAGE_URL" };
   }
 
-  const cleanMime = (mime || "").split(";")[0].trim().toLowerCase();
-  // Exclude plain HTML page navigations unless explicitly marked as attachment or download attribute
-  if ((cleanMime === "text/html" || cleanMime === "application/xhtml+xml") && !isAttachment && !hasDownloadAttr) {
+  // Exclude plain HTML page navigations unless explicitly marked as attachment, download attribute, or recognized file
+  if ((cleanMime === "text/html" || cleanMime === "application/xhtml+xml") && !isAttachment && !hasDownloadAttr && !hasDownloadExt) {
     return { eligible: false, reason: "HTML_PAGE_NAVIGATION" };
   }
-
-  const cleanFilename = sanitizeFilename(filename, "");
-  const ext = (extractUrlExtension(cleanFilename) || extractUrlExtension(targetUrl) || extractUrlExtension(url)).toLowerCase();
 
   // 4. Content-Disposition: attachment explicitly declares intent to download
   if (isAttachment) {
@@ -212,7 +217,6 @@ function isDownloadEligible(params = {}) {
   }
 
   // 9. Non-web-code file extensions on the determined filename or URL
-  const webCodeExts = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "jsx", "ts", "tsx"]);
   if (ext && !webCodeExts.has(ext)) {
     return { eligible: true, reason: "VALID_DOWNLOAD_EXTENSION", ext, mime: cleanMime, filename: cleanFilename };
   }
@@ -291,8 +295,8 @@ function isWebpageWatchUrl(url) {
       if (!path.endsWith(".m3u8") && !path.endsWith(".mpd") && !path.endsWith(".mp4")) return true;
     }
 
-    // Generic HTML pages
-    if (path.endsWith(".html") || path.endsWith(".htm") || path.endsWith(".php") || path.endsWith(".asp") || path.endsWith(".aspx")) {
+    // Generic HTML pages (Note: never include server-side endpoints like .php, .asp, .aspx which commonly serve downloads)
+    if (path.endsWith(".html") || path.endsWith(".htm")) {
       return true;
     }
   } catch (_) {}
@@ -817,6 +821,7 @@ function mergeQualityLists(existingList = [], incomingList = []) {
         pairedAudioUrl: q.pairedAudioUrl || prev.pairedAudioUrl || "",
         variantUrl: q.variantUrl || prev.variantUrl || "",
         size: Math.max(Number(prev.size || 0), Number(q.size || 0)),
+        sizeEstimated: (q.sizeEstimated !== undefined) ? Boolean(q.sizeEstimated) : Boolean(prev.sizeEstimated),
         bandwidth: Math.max(Number(prev.bandwidth || 0), Number(q.bandwidth || 0)),
         height: Math.max(Number(prev.height || 0), Number(q.height || 0))
       }));
@@ -988,11 +993,25 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
   });
 
   if (existing) {
-    if (candidate.cachedManifestBody && !existing.cachedManifestBody) {
+    if (candidate.cachedManifestBody && (!existing.cachedManifestBody || candidate.cachedManifestBody.length > existing.cachedManifestBody.length)) {
       existing.cachedManifestBody = candidate.cachedManifestBody;
     }
-    if (candidate.extractorJson && !existing.extractorJson) {
-      existing.extractorJson = candidate.extractorJson;
+    if (candidate.extractorJson) {
+      if (!existing.extractorJson) {
+        existing.extractorJson = candidate.extractorJson;
+      } else {
+        try {
+          const exExisting = JSON.parse(existing.extractorJson);
+          const exIncoming = JSON.parse(candidate.extractorJson);
+          const existingQCount = (exExisting && Array.isArray(exExisting.qualities)) ? exExisting.qualities.length : 0;
+          const incomingQCount = (exIncoming && Array.isArray(exIncoming.qualities)) ? exIncoming.qualities.length : 0;
+          if (incomingQCount >= existingQCount) {
+            existing.extractorJson = candidate.extractorJson;
+          }
+        } catch (_) {
+          existing.extractorJson = candidate.extractorJson;
+        }
+      }
     }
     if (candidate.videoUrl && !existing.videoUrl) {
       existing.videoUrl = candidate.videoUrl;
@@ -1006,7 +1025,7 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
     if (candidate.resolution && (!existing.resolution || existing.resolution === "Auto")) {
       existing.resolution = candidate.resolution;
     }
-    if (candidate.size && (!existing.size || candidate.size > existing.size)) {
+    if (candidate.size && (!existing.size || existing.size === 0 || candidate.size > existing.size)) {
       existing.size = candidate.size;
     }
     if (candidate.pageTitle && (!existing.pageTitle || existing.pageTitle === "video" || existing.pageTitle === "youtube_video")) {
@@ -1020,6 +1039,9 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
       const topVid = existing.qualities.find(q => !q.isAudioOnly) || existing.qualities[0];
       if (topVid && topVid.resolution && (!existing.resolution || existing.resolution === "Auto")) {
         existing.resolution = topVid.resolution;
+      }
+      if (topVid && topVid.size && (!existing.size || existing.size === 0)) {
+        existing.size = topVid.size;
       }
     }
     return { added: false, candidate: existing };

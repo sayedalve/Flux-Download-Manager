@@ -113,7 +113,7 @@ struct StreamTrack {
 
 struct StreamSelectionOptions {
     std::string video_filter{"best"};     // -sv argument
-    std::string audio_filter{"all"};      // -sa argument
+    std::string audio_filter{"best"};     // -sa argument (default to best to avoid multi-language audio bloat)
     std::string subtitle_filter{"all"};   // -ss argument
     std::string output_format{"mp4"};     // "mp4" or "mkv"
     uint32_t thread_count{8};

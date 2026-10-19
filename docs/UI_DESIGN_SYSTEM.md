@@ -1,40 +1,46 @@
-# OpenIDM Desktop UI Design System (`src/ui/design_system.hpp` & `src/ui/win32_main_window.cpp`)
+# Flux Desktop UI Design System (`src/ui/design_system.hpp` & `src/ui/win32_main_window.cpp`)
 
 ## 1. Visual Direction & Design Philosophy
 
-OpenIDM's desktop interface is engineered as a native, low-overhead Windows 11 desktop application (`WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN`) rendered via double-buffered Win32 GDI/Direct2D primitives (`src/ui/design_system.hpp`, `src/ui/win32_main_window.cpp`) and backed by a platform-independent view-model (`openidm::ui::DesktopView`).
+Flux Download Manager's desktop interface is engineered as a native, high-performance Windows 11 desktop application (`WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN`) rendered via double-buffered Win32 GDI and Direct2D primitives (`src/ui/design_system.hpp`, `src/ui/win32_main_window.cpp`) and backed by a platform-independent view-model (`openidm::ui::DesktopView`).
 
 Key design principles:
-- **Restrained Windows 11 Aesthetic**: Deep charcoal surfaces (`#18181B` / `#1F1F23`), crisp typography (`Segoe UI Variable` / `Segoe UI`), 1px subtle dividers (`#3F3F46`), and a single restrained blue accent (`#3B82F6`) paired with a distinct stream indicator (`#8B5CF6`).
-- **Zero Decorative Bloat**: No glass/blur shaders, no animated background gradients, no emoji icons, and no heavy Chromium/Electron/Flutter runtime overhead.
+- **Preserved Flux Brand Identity**: Warm matte charcoal canvas (`#161618`), dark charcoal surfaces (`#1E1E22`), elevated floating cards (`#28282E`), subtle architectural borders (`#2E2F35`), crisp light typography (`#F2F2F3` / `#E2E8F0`), and the iconic signature **Coral Red** accent (`#FF4F57`).
+- **Authentic Glassmorphism Architecture**:
+  - Genuine translucency rendered via Windows 11 Desktop Window Manager (DWM) composition backdrops: Mica (`DWMWA_SYSTEMBACKDROP_TYPE = 2`) on the main window and Acrylic (`DWMWA_SYSTEMBACKDROP_TYPE = 3`) on transient dialogs, with `DWMWA_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND (33 = 2)`.
+  - True 32-bit premultiplied ARGB DIBSection composition blended onto the destination device context using Win32 `msimg32.lib`'s `AlphaBlend`. Never uses fake solid lighter colors in place of transparency.
+  - Restrained 1px specular top-edge highlights (`ColorRgba{255, 255, 255, 22}`) mimicking natural glass refraction.
 - **Strict Resource Discipline**: Double-buffered `WM_PAINT` updates only on state change or a 100 ms UI timer (`IDT_UI_REFRESH`) without querying SQLite on the paint thread.
+- **Zero Heavy Runtime Bloat**: Zero Electron, Qt, or Webview2 overhead. Built entirely in native ISO C++20 and Win32 APIs.
 
 ---
 
-## 2. Color Tokens (`openidm::ui::ThemePalette`)
+## 2. Color Tokens & Glass Palette (`openidm::ui::ThemePalette`)
 
-OpenIDM provides three theme modes (`ThemeMode::kDark`, `ThemeMode::kLight`, and `ThemeMode::kSystem`), persisted in SQLite (`settings.theme`) and synchronized with Windows 11 `DWMWA_USE_IMMERSIVE_DARK_MODE`.
+Flux provides three theme modes (`ThemeMode::kDark`, `ThemeMode::kLight`, and `ThemeMode::kSystem`), persisted in SQLite (`settings.theme`) and synchronized with Windows 11 `DWMWA_USE_IMMERSIVE_DARK_MODE`.
 
-| Token Name | Dark Theme (Default) | Light Theme | Purpose |
-|---|---|---|---|
-| `app_background` | `#18181B` | `#F8FAFC` | Main window canvas and task table background |
-| `surface_primary` | `#1F1F23` | `#FFFFFF` | Top toolbar, navigation sidebar, and bottom details panel |
-| `surface_elevated` | `#27272A` | `#F1F5F9` | Secondary toolbar buttons, status bar, and modal dialog cards |
-| `surface_hover` | `#2E2E33` | `#E2E8F0` | Interactive row and button hover background |
-| `surface_selected` | `#1E293B` | `#DBEAFE` | Selected download row and active sidebar category |
-| `border_subtle` | `#3F3F46` | `#CBD5E1` | 1px structural dividers between panes |
-| `border_focus` | `#60A5FA` | `#2563EB` | 2px keyboard focus ring (`WM_KEYDOWN` navigation) |
-| `text_primary` | `#F4F4F5` | `#0F172A` | Primary filenames, dialog titles, and active labels |
-| `text_secondary` | `#A1A1AA` | `#475569` | Column headers, transfer sizes, timestamps, and details metadata |
-| `text_muted` | `#71717A` | `#94A3B8` | Disabled toolbar buttons and empty-state hints |
-| `accent_primary` | `#3B82F6` | `#2563EB` | Primary `+ Add URL` button and HTTP file progress bar fill |
-| `accent_hover` | `#2563EB` | `#1D4ED8` | Primary action hover state |
-| `badge_stream` | `#8B5CF6` | `#7C3AED` | `HLS STREAM` / `DASH STREAM` badge and stream progress bar fill |
-| `badge_file` | `#3B82F6` | `#2563EB` | `HTTP MULTI` / `HTTP FILE` badge |
-| `status_success` | `#22C55E` | `#16A34A` | `Completed` state indicator |
-| `status_warning` | `#F59E0B` | `#D97706` | `Paused` / `Retrying` state indicator |
-| `status_danger` | `#EF4444` | `#DC2626` | `Failed` / `Error` state indicator |
-| `progress_track` | `#323238` | `#E2E8F0` | Unfilled progress bar track |
+| Token Name | Dark Theme (Default) | Redesign Theme | Light Theme | Purpose |
+|---|---|---|---|---|
+| `app_background` | `#161618` | `#161618` | `#F8FAFC` | Main window canvas and cosmic starfield backdrop |
+| `surface_primary` | `#1E1E22` | `#1E1E22` | `#FFFFFF` | Main toolbar container and search control |
+| `surface_elevated` | `#28282E` | `#28282E` | `#F1F5F9` | Secondary toolbar buttons, dialog cards, and status bar |
+| `surface_hover` | `#32323A` | `#32323A` | `#E2E8F0` | Interactive row, action button, and tab hover state |
+| `surface_selected` | `#2D2528` | `#2D2528` | `#DBEAFE` | Selected download row and active settings category |
+| `border_subtle` | `#2E2F35` | `#2E2F35` | `#CBD5E1` | 1px structural dividers and panel borders |
+| `border_focus` | `#FF4F57` | `#FF4F57` | `#FF4F57` | 2px keyboard focus ring and active input highlight |
+| `text_primary` | `#F2F2F3` | `#F2F2F3` | `#0F172A` | Primary filenames, dialog titles, and active labels |
+| `text_secondary` | `#9B9BA1` | `#9B9BA1` | `#475569` | Column headers, transfer sizes, timestamps, and details metadata |
+| `text_muted` | `#686870` | `#686870` | `#94A3B8` | Disabled buttons, hints, and secondary units |
+| `accent_primary` | `#FF4F57` | `#FF4F57` | `#FF4F57` | Signature Flux Coral Red action accent and progress fills |
+| `accent_hover` | `#FF6B72` | `#FF6B72` | `#FF353E` | Primary action button hover state |
+| `glass_surface` | `rgba(30,30,34, 180)` | `rgba(30,30,34, 180)` | `rgba(255,255,255, 180)` | Translucent glass panel fill (AlphaBlend DIB) |
+| `glass_elevated` | `rgba(40,40,46, 210)` | `rgba(40,40,46, 210)` | `rgba(240,244,248, 210)` | Translucent floating card and modal dialog card fill |
+| `glass_border` | `rgba(255,255,255, 20)` | `rgba(255,255,255, 20)` | `rgba(0,0,0, 18)` | Fine low-contrast glass perimeter border |
+| `glass_highlight` | `rgba(255,255,255, 26)` | `rgba(255,255,255, 26)` | `rgba(255,255,255, 45)` | Refractive top-edge specular highlight |
+| `status_success` | `#22C55E` | `#22C55E` | `#16A34A` | `Completed` state indicator |
+| `status_warning` | `#F59E0B` | `#F59E0B` | `#D97706` | `Paused` / `Retrying` state indicator |
+| `status_danger` | `#EF4444` | `#EF4444` | `#DC2626` | `Failed` / `Error` state indicator |
+| `progress_track` | `#1E293B` | `#1E293B` | `#E2E8F0` | Unfilled progress bar track |
 
 ---
 
@@ -92,17 +98,52 @@ Selecting a category filters the single unified queue view without creating sepa
   - When `total_bytes == 0` on an unchunked HTTP transfer: displays `1.2 MiB (Size Unknown)` and sets `progress_indeterminate = true` — **never** fabricates a percentage.
 - **Granular Stream Stages**: Distinguishes `Probing stream manifest...`, `Downloading video segments (X/Y)`, `Downloading audio segments (X/Y)`, `Downloading subtitle tracks (X/Y)`, `Merging audio/video tracks (FFmpeg)...`, `Verifying output container...`, `Completed`, and `Failed`.
 
-### D. Redacted Details Panel (`TaskDetailsViewModel`)
-Displays the selected task's Source URL, Page URL, Destination Path, Size/Progress/Speed, UTC Timestamps (`Created`, `Updated`, `Completed`), Retry Count, Engine (`Brisk Segmented HTTP/1.1` vs `N_m3u8DL-RE + FFmpeg`), Stream Format, Selected Tracks, and actionable Error Explanation.
-- **Strict Credential Redaction**: Passes URLs and headers through `Logger::RedactSensitiveData()` and replaces `auth_headers` with `Auth/Cookies: [N protected credential header(s) — REDACTED]`.
+### D. Floating Selected Download Inspector (`PaintDetailsPanelWin32`)
+When a download row is selected, a floating rounded glass card (`card_radius = ScaleForDpi(10, dpi)`) renders smoothly above the status bar with 16px horizontal margin and 6px vertical margin:
+- **Left Icon Box**: Rounded elevated container (`ScaleForDpi(42, dpi)` x `ScaleForDpi(46, dpi)`) housing a signature Coral Red media/file icon.
+- **Left Metadata Block** (3 rows):
+  - Row 1: Filename in bold white Segoe UI accompanied by engine badge (`[WinHTTP]`, `[Stream Pipeline]`).
+  - Row 2: File size, current transfer rate, and progress summary (`45.2 MB of 120.0 MB (37.7%) • 8.4 MB/s`).
+  - Row 3: Destination folder with native path ellipsis (`DT_PATH_ELLIPSIS`).
+- **Right Metadata Block** (3 rows):
+  - Row 1: Credential-redacted source URL with end ellipsis.
+  - Row 2: Timestamps (`Added: 2026-10-19 21:05 • Finished: 2026-10-19 21:06`).
+  - Row 3: Actionable Coral Red diagnostic notice (`Notice: ...`) if failed, or live stream track summary / status.
+- **Responsive Geometry**: Seamlessly collapses into a compact single-column card on narrow viewports without clipping.
 
-### E. Supporting Dialogs & System Tray
-1. **Add Download Dialog** (`SubmitAddDownloadDialog`): Validates `http://` / `https://` URLs, destination folder, connection count (`1..32`), and stream format (`mp4`/`mkv`) without exposing raw CLI flags.
-2. **Stream Quality & Track Selector** (`ProbeStreamForDialog` & `ConfirmStreamSelectionDialog`): Probes real tracks via `N_m3u8DL-RE --skip-download --write-meta-json` and binds user track choices (`video_filter`, `audio_filter`, `subtitle_filter`, `output_format`).
-3. **Settings Dialog** (`ActionSaveSettings` & `ActionRestoreDefaultSettings`): Configures and persists Theme (`dark`/`light`/`system`), Max Concurrent Downloads (`1..16`), Global Speed Limit, Default Download Directory, Browser Capture toggle, and Close-to-Tray behavior.
-4. **Browser Integration Status** (`GetBrowserIntegrationStatus`): Displays live IPC socket/pipe endpoint, capture toggle state, and `N_m3u8DL-RE` / `FFmpeg` worker availability.
-5. **About Dialog** (`GetAboutDialogView`): Displays version `0.2.0`, `GPL-3.0-or-later` license, and upstream attributions.
-6. **System Tray Icon** (`Shell_NotifyIconW`): Supports `Show OpenIDM`, `Hide to Tray`, `Pause All Downloads`, `Resume All Downloads`, and `Exit OpenIDM`, honoring `close_to_tray` on `WM_CLOSE`.
+### E. Custom Slim Fluent Scrollbar & Calm Static Canvas
+1. **Custom 6px Dark Fluent Scrollbar**:
+   - Eliminated the standard 17px light-gray Win32 scrollbar (`ShowScrollBar(hwnd, SB_VERT, FALSE)`).
+   - Rendered directly inside the table body gutter with a 6px width and 3px rounded radius (`rgba(255, 255, 255, 38)` on idle, `rgba(255, 255, 255, 80)` on hover/drag).
+   - Full mouse drag tracking (`SetCapture`), track clicking (page up / down), and mouse wheel scrolling.
+2. **Calm Static Canvas**:
+   - Completely removed cosmic moving stars and background animation drift timers from the visible desktop UI. Canvas remains calm, matte charcoal (`#161618`).
+3. **Unicode-Safe Filename Truncation**:
+   - `TruncateFilenameGracefully()` operates on wide character code points via `Utf8ToW` / `WToUtf8` rather than byte slices, completely preventing multi-byte UTF-8 corruption (``) on Bengali, Arabic, or Asian scripts.
+4. **Status Bar Text Collision Guard**:
+   - Strictly enforces minimum margins (`ScaleForDpi(24, dpi)`) after the rightmost status indicator (`NORMAL` / `LIMIT ON`) and automatically suppresses filename display when available width is below 140px, guaranteeing zero overlap.
+
+### F. Dialog Modernization & Modal Lifecycle
+1. **No WS_EX_TOPMOST / HWND_TOPMOST**:
+   - Eliminated aggressive `WS_EX_TOPMOST` and `HWND_TOPMOST` styles from `NewDownloadDlgProc`, `ShowNewDownloadDialogWin32`, `ShowSimpleInputDialogWin32`, and `DeleteConfirmDlgProc`.
+   - Modals are strictly owned by `hwndParent` maintaining proper Windows 11 taskbar, Alt+Tab, and Z-order stacking without permanently hijacking user focus across desktop applications.
+2. **Refined Understated Button Architecture**:
+   - Eradicated thick 2px pure white outlines and neon red glowing borders from buttons.
+   - All dialog buttons use modern Windows 11 6-8px corner radii and clean 1px borders (`ColorRgba{0x3E, 0x40, 0x4A, 180}` or subtle coral highlights).
+   - Handled `WM_CTLCOLORBTN` returning `ctx->hBgBrush` to eliminate Win32 button background artifacts.
+3. **Live Destination Disk Space Checking**:
+   - In `NewDownloadDlgProc`, an `EN_CHANGE` and `EN_KILLFOCUS` listener on the save directory edit control immediately invokes `GetDiskFreeSpaceExW()` on the user's destination drive.
+   - Dynamically updates the disk space feedback label (e.g. `Free Space: 142.6 GB available`) scaled for DPI.
+4. **Safe Deletion Confirmation Dialog (`DeleteConfirmDlgProc`)**:
+   - Features middle-truncated filename display with full path rendered safely with ellipsis.
+   - Default keyboard focus is assigned strictly to **Cancel** (`IDNO`), preventing accidental destructive deletions on Enter keypresses.
+   - When file deletion fails, a clear error dialog is displayed to the user rather than failing silently.
+5. **Settings Center Glass Modal (`PaintSettingsCenterOverlayWin32`)**:
+   - Translucent glass scrim backdrop with rounded dialog card and specular edge reflection.
+   - Fluid Windows 11 pill switches with smooth track and circular thumbs.
+   - Accessible category navigation pills with Coral Red active state indicators.
+6. **System Tray Integration (`Shell_NotifyIconW`)**:
+   - Supports `Show Flux`, `Hide to Tray`, `Pause All Downloads`, `Resume All Downloads`, and `Exit Flux`, honoring `close_to_tray` on `WM_CLOSE`.
 
 ---
 

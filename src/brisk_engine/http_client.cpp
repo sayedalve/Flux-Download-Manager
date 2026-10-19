@@ -713,14 +713,15 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         int resolve_timeout = std::max(timeout_ms, 15000);
         int connect_timeout = std::max(timeout_ms, 15000);
         int send_timeout = std::max(timeout_ms, 10000);
-        int recv_timeout = timeout_ms;
+        int recv_timeout = std::max(timeout_ms, 20000);
         WinHttpSetTimeouts(hSession, resolve_timeout, connect_timeout, send_timeout, recv_timeout);
 
         std::wstring whost = Utf8ToWide(pu.host);
         HINTERNET hConnect = WinHttpConnect(hSession, whost.c_str(), pu.port, 0);
         if (!hConnect) {
+            DWORD conn_err = GetLastError();
             WinHttpCloseHandle(hSession);
-            return Result<HttpResponseMeta>::Err("ERR_NET_CONNECT", "WinHttpConnect failed for " + pu.host, true);
+            return Result<HttpResponseMeta>::Err("ERR_NET_CONNECT", "WinHttpConnect failed for " + pu.host + " (error " + std::to_string(conn_err) + ")", true);
         }
 
         std::wstring wpath = Utf8ToWide(pu.path_and_query);
@@ -728,9 +729,10 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         HINTERNET hRequest = WinHttpOpenRequest(
             hConnect, L"GET", wpath.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, req_flags);
         if (!hRequest) {
+            DWORD req_err = GetLastError();
             WinHttpCloseHandle(hConnect);
             WinHttpCloseHandle(hSession);
-            return Result<HttpResponseMeta>::Err("ERR_NET_REQUEST", "WinHttpOpenRequest failed", true);
+            return Result<HttpResponseMeta>::Err("ERR_NET_REQUEST", "WinHttpOpenRequest failed (error " + std::to_string(req_err) + ")", true);
         }
 
         // Disable automatic WinHTTP redirects so OpenIDM's SSRF redirect guard inspects every hop
@@ -784,8 +786,25 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
 
         if (!WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
             !WinHttpReceiveResponse(hRequest, nullptr)) {
+            DWORD winhttp_err = GetLastError();
             cleanup_winhttp();
-            return Result<HttpResponseMeta>::Err("ERR_NET_SEND", "WinHTTP request/response failed", true);
+            std::string err_code = "ERR_NET_SEND";
+            std::string err_desc = "WinHTTP request/response failed (error " + std::to_string(winhttp_err) + ")";
+            bool is_retryable = true;
+            if (winhttp_err == ERROR_WINHTTP_TIMEOUT || winhttp_err == ERROR_WINHTTP_RESPONSE_DRAIN_OVERFLOW) {
+                err_code = "ERR_NET_TIMEOUT";
+                err_desc = "WinHTTP request timed out waiting for server response (error 12002)";
+            } else if (winhttp_err == ERROR_WINHTTP_CANNOT_CONNECT || winhttp_err == ERROR_WINHTTP_CONNECTION_ERROR) {
+                err_code = "ERR_NET_CONNECT";
+                err_desc = "WinHTTP cannot connect to server (error " + std::to_string(winhttp_err) + ")";
+            } else if (winhttp_err == ERROR_WINHTTP_NAME_NOT_RESOLVED) {
+                err_code = "ERR_NET_DNS";
+                err_desc = "WinHTTP host name could not be resolved (error 12007)";
+            } else if (winhttp_err == ERROR_WINHTTP_SECURE_FAILURE) {
+                err_code = "ERR_SSL_PROTOCOL";
+                err_desc = "WinHTTP secure channel / SSL certificate verification failure (error 12175)";
+            }
+            return Result<HttpResponseMeta>::Err(err_code, err_desc, is_retryable);
         }
 
         DWORD status_code = 0;

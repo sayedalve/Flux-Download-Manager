@@ -33,6 +33,19 @@
   #endif
 #endif
 
+; Resolve N_m3u8DL-RE worker: prioritize lightweight native C++ worker if compiled
+#if FileExists(SourceDir + "\N_m3u8DL-RE.exe")
+  #define Nm3u8dlSource SourceDir + "\N_m3u8DL-RE.exe"
+#elif FileExists("..\build\win-x64\Release\N_m3u8DL-RE.exe")
+  #define Nm3u8dlSource "..\build\win-x64\Release\N_m3u8DL-RE.exe"
+#elif FileExists("..\build\win-x64\N_m3u8DL-RE.exe")
+  #define Nm3u8dlSource "..\build\win-x64\N_m3u8DL-RE.exe"
+#elif FileExists("..\dist\tools\win-x64\N_m3u8DL-RE.exe")
+  #define Nm3u8dlSource "..\dist\tools\win-x64\N_m3u8DL-RE.exe"
+#else
+  #define Nm3u8dlSource "..\tools\win-x64\N_m3u8DL-RE.exe"
+#endif
+
 [Setup]
 AppId={{4D9C5F31-6B2E-4D73-8B2E-1F3C3D4E5891}
 AppName={#MyAppName}
@@ -47,9 +60,13 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-LicenseFile=..\LICENSE
+#ifdef CoreOnly
+  #define BaseFilename "Flux-Setup-x64-Core-" + MyAppVersion
+#else
+  #define BaseFilename "Flux-Setup-x64-" + MyAppVersion
+#endif
 OutputDir=..\dist
-OutputBaseFilename=Flux-Setup-x64-{#MyAppVersion}
+OutputBaseFilename={#BaseFilename}
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -79,16 +96,15 @@ Name: "autostart"; Description: "Start Flux minimized in system tray on Windows 
 Source: "{#SourceDir}\{#MyAppExeName}"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Components: core; Flags: ignoreversion
 Source: "{#SourceDir}\{#MyAppNmhName}"; DestDir: "{app}"; DestName: "{#MyAppNmhName}"; Components: core; Flags: ignoreversion
 
-; Stream extraction workers (N_m3u8DL-RE, FFmpeg, and yt-dlp)
-Source: "..\tools\win-x64\N_m3u8DL-RE.exe"; DestDir: "{app}\tools"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\tools\win-x64\N_m3u8DL-RE.exe"; DestDir: "{app}\tools\win-x64"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\tools\win-x64\ffmpeg.exe"; DestDir: "{app}\tools"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
+#ifndef CoreOnly
+; Stream extraction workers (N_m3u8DL-RE, FFmpeg, and yt-dlp) - installed exclusively to tools\win-x64
+Source: "{#Nm3u8dlSource}"; DestDir: "{app}\tools\win-x64"; DestName: "N_m3u8DL-RE.exe"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tools\win-x64\ffmpeg.exe"; DestDir: "{app}\tools\win-x64"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
-Source: "..\tools\win-x64\yt-dlp.exe"; DestDir: "{app}\tools"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tools\win-x64\yt-dlp.exe"; DestDir: "{app}\tools\win-x64"; Components: stream_workers; Flags: ignoreversion skipifsourcedoesntexist
+#endif
 
-; Browser extension, manifests, and documentation
-Source: "..\extension\*"; DestDir: "{app}\extension"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; Browser extension, manifests, and documentation (excludes development/test files)
+Source: "..\extension\*"; DestDir: "{app}\extension"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.ts,*.map,*.log,.git*,.github*,node_modules*,package*.json,tsconfig*.json,tests*,scratch*"
 Source: "..\README.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
@@ -97,6 +113,20 @@ Source: "manifests\com.flux.downloadmanager.chromium.json"; DestDir: "{app}\mani
 Source: "manifests\com.flux.downloadmanager.firefox.json"; DestDir: "{app}\manifests"; Components: core; Flags: ignoreversion
 Source: "manifests\org.openidm.native.chromium.json"; DestDir: "{app}\manifests"; Components: core; Flags: ignoreversion
 Source: "manifests\org.openidm.native.firefox.json"; DestDir: "{app}\manifests"; Components: core; Flags: ignoreversion
+
+[Dirs]
+Name: "{app}\tools\win-x64"; Components: stream_workers; Flags: uninsalwaysuninstall
+Name: "{app}\manifests"; Components: core; Flags: uninsalwaysuninstall
+Name: "{app}\scripts"; Components: core; Flags: uninsalwaysuninstall
+Name: "{app}\extension"; Components: core
+
+[InstallDelete]
+; Clean up legacy duplicate worker binaries from older installations that installed into {app}\tools
+Type: files; Name: "{app}\tools\ffmpeg.exe"
+Type: files; Name: "{app}\tools\ffprobe.exe"
+Type: files; Name: "{app}\tools\N_m3u8DL-RE.exe"
+Type: files; Name: "{app}\tools\yt-dlp.exe"
+Type: dirifempty; Name: "{app}\tools"
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

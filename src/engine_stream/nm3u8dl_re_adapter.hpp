@@ -39,6 +39,7 @@ struct StreamAdapterConfig {
     std::filesystem::path ffmpeg_binary_path;
     std::filesystem::path temp_root_dir;
     bool allow_loopback_manifests{false};
+    std::filesystem::path fallback_worker_path{};
 };
 
 class Nm3u8dlReAdapter {

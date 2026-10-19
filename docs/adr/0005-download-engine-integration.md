@@ -28,10 +28,15 @@ We must decide how to integrate or implement these engines within our C++20/Win3
      - *Dynamic Connection Reuse (Work-Stealing Split):* Whenever a worker completes its assigned byte range, find the active segment with the largest remaining byte count (`remaining >= 2 * min_split_size`, where `min_split_size = 1 MiB`), atomically truncate that active worker's `end_offset` to the midpoint `M`, and assign `[M + 1, old_end]` to the idle worker.
      - *Automatic Stall Reset:* Per-worker sliding-window timer resets and reconnects any individual stalled byte-range worker at its exact `current_offset`.
 2. **Stream Download Engine (`IStreamDownloadEngine` -> `Nm3u8dlReAdapter`):**
-   - Integrate **[N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE)** (`v0.6.0-beta`, MIT License) as an **unmodified out-of-process worker executable (`N_m3u8DL-RE.exe`)** paired with `ffmpeg.exe`.
+   - Integrate **[N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE)** (`v0.6.0-beta`, MIT License) as an **unmodified out-of-process worker executable (`N_m3u8DL-RE.exe`)** paired with a **minimal, deterministic `ffmpeg.exe`**.
    - Use a deterministic two-phase invocation contract:
      - **Phase 1 (Probe):** Invoke `N_m3u8DL-RE.exe <url> --skip-download --write-meta-json --tmp-dir <probe_dir> --no-ansi-color --no-config --disable-update-check --vod-select-parts false @<headers.rsp>`, then parse `<probe_dir>/meta.json` in C++ to populate the Win32 Track Selection dialog.
      - **Phase 2 (Download & Mux):** Invoke `N_m3u8DL-RE.exe <url> --tmp-dir <task_tmp> --save-dir <dest_dir> --save-name <temp_stem> -sv <video_filter> -sa <audio_filter> -ss <sub_filter> -mt --thread-count <N> --ffmpeg-binary-path <ffmpeg_path> -M format=<mp4|mkv>:muxer=ffmpeg:bin_path=<ffmpeg_path> --no-ansi-color --no-config --disable-update-check --vod-select-parts false @<headers.rsp>`, parsing line-buffered stdout/stderr progress into `StreamProgressEvent` updates.
+3. **Minimal Stream Muxer (`ffmpeg.exe`):**
+   - Replace the 169 MB general-purpose upstream FFmpeg distribution with a deterministic minimal Windows x64 build (`scripts/ffmpeg-minimal.config`) pinned to FFmpeg 7.1 (`n7.1`) and LLVM-MinGW UCRT.
+   - Strip all non-essential components: disable network protocols (`--disable-network`), heavy video encoders (`libx264`, `libx265`, `libvpx`, `svtav1`), hardware accelerators, and GPL-only codecs.
+   - Retain all formats required by Flux: demuxers (`mpegts`, `mov`, `matroska`, elementary audio, `webvtt`, `srt`, `concat`), muxers (`mp4`, `matroska`, `webm`, `ipod`, elementary audio, `srt`, `webvtt`, `null`), parsers, decoders, bitstream filters (`aac_adtstoasc`, `h264_mp4toannexb`, `hevc_mp4toannexb`, `extract_extradata`, `vp9_superframe`, `av1_frame_merge`), and subtitle encoders (`mov_text`, `subrip`, `webvtt`).
+   - Binary footprint is reduced from ~169 MB to ~12-16 MB uncompressed (~5-7 MB compressed), operating cleanly under LGPL-2.1+ / LGPL-3.0 without GPL contamination.
 
 ## Alternatives Considered
 

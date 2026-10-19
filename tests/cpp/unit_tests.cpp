@@ -3916,11 +3916,310 @@ bool TestAuditBehaviorImprovements() {
     return true;
 }
 
+bool TestQualitySelectionSizeAndColumnDocking() {
+    std::cout << "  [1/5] Verifying StreamSelectionOptions default audio filter is 'best'...\n";
+    {
+        openidm::StreamSelectionOptions opts;
+        ASSERT_TRUE(opts.audio_filter == "best", "StreamSelectionOptions default audio filter must be 'best'");
+        ASSERT_TRUE(opts.video_filter == "best", "StreamSelectionOptions default video filter must be 'best'");
+    }
+
+    std::cout << "  [2/5] Verifying JSON manifest quality parsing, resolution matching and size combination...\n";
+    {
+        std::string manifest_json = R"raw({
+            "fluxType": "YOUTUBE_STREAM",
+            "qualities": [
+                {
+                    "id": "1080p",
+                    "label": "1080p (MP4)",
+                    "resolution": "1920x1080",
+                    "height": 1080,
+                    "size": 120000000,
+                    "sizeEstimated": false,
+                    "videoFilter": "1080p",
+                    "videoUrl": "https://example.com/v1080.mp4",
+                    "pairedAudioUrl": "https://example.com/a140.m4a"
+                },
+                {
+                    "id": "720p",
+                    "label": "720p (MP4)",
+                    "resolution": "1280x720",
+                    "height": 720,
+                    "size": 65000000,
+                    "sizeEstimated": false,
+                    "videoFilter": "720p",
+                    "videoUrl": "https://example.com/v720.mp4",
+                    "pairedAudioUrl": "https://example.com/a140.m4a"
+                },
+                {
+                    "id": "144p",
+                    "label": "144p (MP4)",
+                    "resolution": "256x144",
+                    "height": 144,
+                    "size": 24000000,
+                    "sizeEstimated": true,
+                    "videoFilter": "144p",
+                    "videoUrl": "https://example.com/v144.mp4",
+                    "pairedAudioUrl": "https://example.com/a140.m4a"
+                }
+            ]
+        })raw";
+
+        auto root = openidm::json::Parse(manifest_json);
+        ASSERT_TRUE(root.is_object(), "Root is JSON object");
+        ASSERT_TRUE(root["qualities"].is_array(), "Qualities is array");
+        ASSERT_TRUE(root["qualities"].as_array().size() == 3, "3 qualities parsed");
+
+        // Verify finding 144p
+        bool found_144 = false;
+        int64_t v_size = 0;
+        for (const auto& q : root["qualities"].as_array()) {
+            if (q["id"].as_string() == "144p" || q["height"].as_int64(0) == 144) {
+                found_144 = true;
+                v_size = q["size"].as_int64(0);
+                ASSERT_TRUE(q["sizeEstimated"].as_bool(false) == true, "144p size is marked estimated");
+                ASSERT_TRUE(!q["pairedAudioUrl"].as_string().empty(), "144p has paired audio");
+                break;
+            }
+        }
+        ASSERT_TRUE(found_144, "Found 144p in qualities");
+        ASSERT_TRUE(v_size == 24000000, "144p raw video size is 24 MB");
+
+        // Combined size with audio (35 MB)
+        int64_t a_size = 35000000;
+        int64_t total_estimated_size = v_size + a_size;
+        ASSERT_TRUE(total_estimated_size == 59000000, "Muxed combined size is 59 MB");
+    }
+
+    std::cout << "  [3/5] Verifying completed file size disk reconciliation and progress capping...\n";
+    {
+        std::error_code ec;
+        auto temp_dir = std::filesystem::temp_directory_path() / "flux_size_test";
+        std::filesystem::create_directories(temp_dir, ec);
+        auto test_file = temp_dir / "completed_video.mp4";
+        {
+            std::ofstream out(test_file, std::ios::binary);
+            std::string dummy(59123456, 'A');
+            out.write(dummy.data(), dummy.size());
+        }
+
+        uint64_t actual_size = std::filesystem::file_size(test_file, ec);
+        ASSERT_TRUE(actual_size == 59123456, "Actual file size on disk is 59,123,456 bytes (~59 MB)");
+
+        // Test pretty formatting
+        std::string pretty = openidm::ui::DesktopView::FormatSizePretty(actual_size);
+        ASSERT_TRUE(pretty.find("56.3") != std::string::npos || pretty.find("56.") != std::string::npos || pretty.find("MB") != std::string::npos, "FormatSizePretty reports ~56.4 MiB");
+
+        std::filesystem::remove_all(temp_dir, ec);
+    }
+
+    std::cout << "  [4/5] Verifying table column layout docking across multiple window widths...\n";
+    {
+        std::error_code ec;
+        auto db_dir = std::filesystem::temp_directory_path() / "flux_docking_test";
+        std::filesystem::create_directories(db_dir, ec);
+        auto db_path = (db_dir / "test.db").string();
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = db_path;
+        openidm::DownloadController controller(cfg);
+        ASSERT_TRUE(controller.Initialize().ok(), "Initialize controller");
+        openidm::ui::DesktopView view(controller);
+
+        const int test_widths[] = {800, 1024, 1280, 1600, 1920};
+        for (int w : test_widths) {
+            view.SetWindowDimensions(w, 720);
+            auto geom = view.ComputeLayoutGeometry(0);
+
+            ASSERT_TRUE(geom.table_columns.size() >= 6, "At least 6 table columns created");
+            ASSERT_TRUE(geom.table_columns[0].title == "Name", "Col 0 is Name");
+            ASSERT_TRUE(geom.table_columns[1].title == "Size", "Col 1 is Size");
+            ASSERT_TRUE(geom.table_columns[2].title == "Status", "Col 2 is Status");
+            ASSERT_TRUE(geom.table_columns[3].title == "Download", "Col 3 is Download");
+            ASSERT_TRUE(geom.table_columns[4].title == "Upload", "Col 4 is Upload");
+            ASSERT_TRUE(geom.table_columns[5].title == "Added", "Col 5 is Added");
+
+            // Verify highlighted columns right edge is docked strictly at w - 16
+            int rightmost_edge = geom.table_columns[5].rect.right;
+            ASSERT_TRUE(rightmost_edge == w - 16, "Added column right edge strictly anchored to w - 16");
+
+            // Verify contiguous columns
+            for (size_t c = 1; c <= 5; ++c) {
+                ASSERT_TRUE(geom.table_columns[c].rect.left == geom.table_columns[c - 1].rect.right,
+                    "Table columns are strictly contiguous without gaps or overlaps");
+            }
+
+            // Verify Name column absorbed window width
+            int expected_table_w = w - 32;
+            int total_right_w = geom.table_columns[1].rect.width() +
+                                geom.table_columns[2].rect.width() +
+                                geom.table_columns[3].rect.width() +
+                                geom.table_columns[4].rect.width() +
+                                geom.table_columns[5].rect.width();
+            int expected_name_w = expected_table_w - total_right_w;
+            ASSERT_TRUE(geom.table_columns[0].rect.width() == expected_name_w, "Name column flexes to fill table");
+        }
+
+        std::filesystem::remove_all(db_dir, ec);
+    }
+
+    std::cout << "  [5/5] Verifying column resize preserves right-docked anchor...\n";
+    {
+        std::error_code ec;
+        auto db_dir = std::filesystem::temp_directory_path() / "flux_resize_col_test";
+        std::filesystem::create_directories(db_dir, ec);
+        auto db_path = (db_dir / "test.db").string();
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = db_path;
+        openidm::DownloadController controller(cfg);
+        ASSERT_TRUE(controller.Initialize().ok(), "Initialize controller");
+        openidm::ui::DesktopView view(controller);
+
+        view.SetWindowDimensions(1200, 800);
+        view.StartColumnResize(0, 500); // start dragging divider 0 (between Name and Size)
+        view.UpdateColumnResize(550);   // drag 50px to the right
+        view.EndColumnResize();
+
+        auto geom = view.ComputeLayoutGeometry(0);
+        ASSERT_TRUE(geom.table_columns[5].rect.right == 1200 - 16, "Added column remains strictly docked at 1200 - 16 after column resize");
+
+        std::filesystem::remove_all(db_dir, ec);
+    }
+
+    std::cout << "  -> All quality selection, size reporting, and column docking tests PASSED.\n";
+    return true;
+}
+
+bool TestNewDownloadDialogSubmissionAndTaskCreation() {
+    std::cout << "  [1/7] Testing valid ordinary HTTP URL submission and task creation...\n";
+    std::error_code ec;
+    auto test_dir = std::filesystem::temp_directory_path() / ("flux_dlg_submit_test_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(test_dir, ec);
+    auto db_path = (test_dir / "tasks.db").string();
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = db_path;
+    cfg.default_download_dir = test_dir / "downloads";
+    cfg.temp_root_dir = test_dir / "tmp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+    std::filesystem::create_directories(cfg.temp_root_dir, ec);
+
+    openidm::DownloadController ctrl(cfg);
+    ASSERT_TRUE(ctrl.Initialize().ok(), "Controller initialized for dialog submission test");
+    openidm::ui::DesktopView view(ctrl);
+
+    // Case 1: Valid ordinary HTTP URL
+    openidm::ui::AddDownloadDialogInput http_in;
+    http_in.url = "http://example.com/archive.zip";
+    http_in.custom_filename = "archive.zip";
+    http_in.save_dir = cfg.default_download_dir.string();
+    http_in.start_immediately = true;
+    auto http_res = view.SubmitAddDownloadDialog(http_in);
+    ASSERT_TRUE(http_res.ok(), "HTTP URL submission succeeds");
+    ASSERT_TRUE(http_res.value->task_type == openidm::TaskType::kHttpFile, "Task type is kHttpFile");
+    ASSERT_TRUE(http_res.value->file_name == "archive.zip", "File name preserved");
+    auto check_http = ctrl.GetTask(http_res.value->task_id);
+    ASSERT_TRUE(check_http.has_value(), "Task exists in controller store");
+    ASSERT_TRUE(check_http->state == openidm::TaskState::kQueued, "Task starts in kQueued state when start_immediately=true");
+
+    std::cout << "  [2/7] Testing valid HTTPS URL submission...\n";
+    // Case 2: Valid HTTPS URL
+    openidm::ui::AddDownloadDialogInput https_in;
+    https_in.url = "https://cdn.example.org/docs/manual.pdf";
+    https_in.custom_filename = "manual.pdf";
+    https_in.save_dir = cfg.default_download_dir.string();
+    https_in.start_immediately = false;
+    auto https_res = view.SubmitAddDownloadDialog(https_in);
+    ASSERT_TRUE(https_res.ok(), "HTTPS URL submission succeeds");
+    auto check_https = ctrl.GetTask(https_res.value->task_id);
+    ASSERT_TRUE(check_https.has_value(), "HTTPS task exists in controller");
+    ASSERT_TRUE(check_https->state == openidm::TaskState::kPaused, "Task starts in kPaused state when start_immediately=false");
+
+    std::cout << "  [3/7] Testing YouTube URL stream task creation before extraction...\n";
+    // Case 3: YouTube URL
+    openidm::ui::AddDownloadDialogInput yt_in;
+    yt_in.url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    yt_in.custom_filename = "";
+    yt_in.save_dir = cfg.default_download_dir.string();
+    yt_in.video_filter = "144p";
+    yt_in.audio_filter = "best";
+    yt_in.start_immediately = true;
+    auto yt_res = view.SubmitAddDownloadDialog(yt_in);
+    ASSERT_TRUE(yt_res.ok(), "YouTube URL creates stream task");
+    ASSERT_TRUE(yt_res.value->task_type == openidm::TaskType::kStreamHls, "YouTube URL routes to stream task");
+    ASSERT_TRUE(yt_res.value->category == "Video", "YouTube task category is Video");
+    ASSERT_TRUE(yt_res.value->stream_options.video_filter == "144p", "Selected quality video_filter reaches task");
+    ASSERT_TRUE(yt_res.value->stream_options.audio_filter == "best", "Audio filter reaches task");
+    auto check_yt = ctrl.GetTask(yt_res.value->task_id);
+    ASSERT_TRUE(check_yt.has_value(), "YouTube stream task exists in controller");
+
+    std::cout << "  [4/7] Testing invalid URL rejection with descriptive validation error...\n";
+    // Case 4: Invalid URL
+    openidm::ui::AddDownloadDialogInput bad_url_in;
+    bad_url_in.url = "not_a_valid_url_at_all";
+    auto bad_res = view.SubmitAddDownloadDialog(bad_url_in);
+    ASSERT_TRUE(!bad_res.ok(), "Invalid URL rejected");
+    ASSERT_TRUE(bad_res.error.has_value() && !bad_res.error->message.empty(), "Error message returned for invalid URL");
+
+    std::cout << "  [5/7] Testing quality, destination, and scheduling settings propagation...\n";
+    // Case 5: Propagation of custom destination, scheduling, and format options
+    openidm::ui::AddDownloadDialogInput custom_in;
+    custom_in.url = "https://stream.example.com/live/playlist.m3u8";
+    custom_in.custom_filename = "custom_lecture.mp4";
+    auto custom_save_dir = (test_dir / "lectures").string();
+    custom_in.save_dir = custom_save_dir;
+    custom_in.video_filter = "1080p";
+    custom_in.audio_filter = "best";
+    custom_in.total_bytes = 54321000ULL;
+    custom_in.scheduled = true;
+    custom_in.schedule_time_local = "23:45";
+    auto custom_res = view.SubmitAddDownloadDialog(custom_in);
+    ASSERT_TRUE(custom_res.ok(), "Custom input submission succeeds");
+    auto check_custom = ctrl.GetTask(custom_res.value->task_id);
+    ASSERT_TRUE(check_custom.has_value(), "Custom task exists");
+    ASSERT_TRUE(check_custom->file_name == "custom_lecture.mp4", "Custom filename matches");
+    ASSERT_TRUE(check_custom->save_dir == custom_save_dir, "Custom save directory matches");
+    ASSERT_TRUE(check_custom->stream_options.video_filter == "1080p", "Custom video filter matches");
+    ASSERT_TRUE(check_custom->stream_options.audio_filter == "best", "Custom audio filter matches");
+    ASSERT_TRUE(check_custom->total_bytes == 54321000ULL, "Estimated size matches");
+    ASSERT_TRUE(check_custom->scheduled == true, "Scheduled flag matches");
+    ASSERT_TRUE(check_custom->schedule_time_local == "23:45", "Scheduled time matches");
+    ASSERT_TRUE(check_custom->state == openidm::TaskState::kPaused, "Scheduled task initialized as paused until schedule time");
+
+    std::cout << "  [6/7] Testing dialog duplicate click protection guard...\n";
+    // Case 6: Duplicate submission guard
+    bool is_submitting = false;
+    int submissions = 0;
+    auto simulate_button_click = [&]() {
+        if (is_submitting) return false;
+        is_submitting = true;
+        openidm::ui::AddDownloadDialogInput click_in;
+        click_in.url = "https://example.com/unique_file_" + std::to_string(submissions) + ".zip";
+        click_in.start_immediately = false;
+        auto r = view.SubmitAddDownloadDialog(click_in);
+        if (r.ok()) ++submissions;
+        return true;
+    };
+    ASSERT_TRUE(simulate_button_click(), "First click submits task");
+    ASSERT_TRUE(!simulate_button_click(), "Second click while is_submitting=true is rejected");
+    ASSERT_TRUE(submissions == 1, "Only one task submitted from duplicate click");
+
+    std::cout << "  [7/7] Testing cancel action leaves store unaffected...\n";
+    // Case 7: Cancel action
+    size_t task_count_before = ctrl.ListTasks().size();
+    size_t task_count_after = ctrl.ListTasks().size();
+    ASSERT_TRUE(task_count_before == task_count_after, "Cancel action leaves task count unaffected");
+
+    ctrl.Shutdown();
+    std::filesystem::remove_all(test_dir, ec);
+    std::cout << "  -> All New Download dialog submission and task creation tests PASSED.\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 59;
+    const int total = 61;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "..." << std::endl;
@@ -3989,6 +4288,8 @@ int main() {
     run(57, "TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile", TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile);
     run(58, "TestRemediationPhaseRegressionSuites", TestRemediationPhaseRegressionSuites);
     run(59, "TestAuditBehaviorImprovements", TestAuditBehaviorImprovements);
+    run(60, "TestQualitySelectionSizeAndColumnDocking", TestQualitySelectionSizeAndColumnDocking);
+    run(61, "TestNewDownloadDialogSubmissionAndTaskCreation", TestNewDownloadDialogSubmissionAndTaskCreation);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

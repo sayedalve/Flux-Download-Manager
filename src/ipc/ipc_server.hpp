@@ -44,8 +44,28 @@ public:
     void SetCaptureEnabled(bool enabled) { m_capture_enabled.store(enabled); }
     bool IsCaptureEnabled() const { return m_capture_enabled.load(); }
 
+    void SetHeadlessDaemonMode(bool headless) { m_is_headless.store(headless); }
+    bool IsHeadlessDaemonMode() const { return m_is_headless.load(); }
+
     using OfferNotificationCallback = std::function<void(const TaskModel& task)>;
-    void SetOfferNotificationCallback(OfferNotificationCallback cb) { m_offer_cb = std::move(cb); }
+    void SetOfferNotificationCallback(OfferNotificationCallback cb) {
+        std::vector<TaskModel> pending;
+        OfferNotificationCallback active_cb;
+        {
+            std::lock_guard<std::mutex> lock(m_offer_mutex);
+            m_offer_cb = std::move(cb);
+            active_cb = m_offer_cb;
+            if (active_cb && !m_pending_offers.empty()) {
+                pending = std::move(m_pending_offers);
+                m_pending_offers.clear();
+            }
+        }
+        if (active_cb) {
+            for (const auto& task : pending) {
+                active_cb(task);
+            }
+        }
+    }
 
     static std::string DefaultSocketPath();
 
@@ -58,7 +78,10 @@ private:
     int m_listen_fd{-1};
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_capture_enabled{true};
+    std::atomic<bool> m_is_headless{false};
+    std::mutex m_offer_mutex;
     OfferNotificationCallback m_offer_cb;
+    std::vector<TaskModel> m_pending_offers;
     std::thread m_accept_thread;
 
     struct ClientWorkerEntry {

@@ -95,6 +95,28 @@ $Nm3u8dlExe = $null
 $FfmpegExe = $null
 $YtDlpExe = $null
 
+# Prioritize native C++ stream worker (< 5MB, ~340 KB) if compiled
+$nativeWorkerCandidates = @()
+if ($BuildDir) {
+    $nativeWorkerCandidates += (Join-Path $BuildDir "N_m3u8DL-RE.exe")
+    $nativeWorkerCandidates += (Join-Path $BuildDir "Release\N_m3u8DL-RE.exe")
+}
+$nativeWorkerCandidates += @(
+    (Join-Path $RepoRoot "build\win-x64\Release\N_m3u8DL-RE.exe"),
+    (Join-Path $RepoRoot "build\win-x64\N_m3u8DL-RE.exe"),
+    (Join-Path $RepoRoot "build\Release\N_m3u8DL-RE.exe"),
+    (Join-Path $RepoRoot "dist\tools\win-x64\N_m3u8DL-RE.exe")
+)
+foreach ($nw in $nativeWorkerCandidates) {
+    if (Test-Path $nw) {
+        $nwSize = (Get-Item $nw).Length
+        if ($nwSize -lt 5MB) {
+            $Nm3u8dlExe = (Resolve-Path $nw).Path
+            break
+        }
+    }
+}
+
 $toolsCandidates = @(
     (Join-Path $RepoRoot "tools\win-x64"),
     (Join-Path $RepoRoot "tools"),
@@ -111,6 +133,8 @@ foreach ($tc in $toolsCandidates) {
 
     $yt = Join-Path $tc "yt-dlp.exe"
     if ((-not $YtDlpExe) -and (Test-Path $yt)) { $YtDlpExe = (Resolve-Path $yt).Path }
+    $ytMin = Join-Path $tc "yt-dlp_min.exe"
+    if ((-not $YtDlpExe) -and (Test-Path $ytMin)) { $YtDlpExe = (Resolve-Path $ytMin).Path }
 }
 
 if ($PackageType -in @("Full", "Both")) {
@@ -125,10 +149,15 @@ if ($PackageType -in @("Full", "Both")) {
             exit 1
         }
     } else {
-        Write-Host "[+] Found N_m3u8DL-RE    : $Nm3u8dlExe" -ForegroundColor Green
-        Write-Host "[+] Found FFmpeg         : $FfmpegExe" -ForegroundColor Green
+        $nmSize = (Get-Item $Nm3u8dlExe).Length
+        $nmType = if ($nmSize -lt 5MB) { "native C++ worker ($([Math]::Round($nmSize/1KB, 1)) KB)" } else { "upstream .NET worker ($([Math]::Round($nmSize/1MB, 2)) MB)" }
+        $ffSize = (Get-Item $FfmpegExe).Length
+        $ffType = if ($ffSize -lt 25MB) { "minimal LGPL build ($([Math]::Round($ffSize/1MB, 2)) MB)" } else { "upstream build ($([Math]::Round($ffSize/1MB, 2)) MB)" }
+        Write-Host "[+] Found N_m3u8DL-RE    : $Nm3u8dlExe ($nmType)" -ForegroundColor Green
+        Write-Host "[+] Found FFmpeg         : $FfmpegExe ($ffType)" -ForegroundColor Green
         if ($YtDlpExe) {
-            Write-Host "[+] Found yt-dlp (opt)   : $YtDlpExe" -ForegroundColor Green
+            $ytSize = (Get-Item $YtDlpExe).Length
+            Write-Host "[+] Found yt-dlp (opt)   : $YtDlpExe ($([Math]::Round($ytSize/1MB, 2)) MB)" -ForegroundColor Green
         }
     }
 }
@@ -175,8 +204,8 @@ function Build-PackageArchive([string]$Type, [string]$ZipFileName) {
             $extDest = Join-Path $stageDir "extension"
             New-Item -ItemType Directory -Force -Path $extDest | Out-Null
 
-            # Copy extension files excluding dev/test/scratch files
-            $excludeItems = @(".git", ".github", "node_modules", "package.json", "package-lock.json", "tsconfig.json", "tests", "scratch", "*.ts")
+            # Copy extension files strictly excluding dev/test/scratch files
+            $excludeItems = @(".git", ".github", "node_modules", "package.json", "package-lock.json", "tsconfig.json", "tests", "scratch", "*.ts", "*.map", "*.log", "*.tmp", ".DS_Store", "Thumbs.db")
             Get-ChildItem -Path $extSrc -Recurse | Where-Object {
                 $item = $_
                 $relPath = $item.FullName.Substring($extSrc.Length)
@@ -200,7 +229,7 @@ function Build-PackageArchive([string]$Type, [string]$ZipFileName) {
             }
         }
 
-        # Stream Workers Handling
+        # Stream Workers Handling - single standard location tools\win-x64
         $toolsDest = Join-Path $stageDir "tools\win-x64"
         New-Item -ItemType Directory -Force -Path $toolsDest | Out-Null
 
@@ -241,6 +270,11 @@ Official Upstream Projects:
             $components += "tools/win-x64/README.txt"
         }
 
+        # Calculate uncompressed installed disk footprint before archiving
+        $stagedFiles = Get-ChildItem -Path $stageDir -Recurse -File
+        $uncompressedBytes = ($stagedFiles | Measure-Object -Property Length -Sum).Sum
+        $uncompressedMb = [Math]::Round($uncompressedBytes / 1MB, 2)
+
         # Package Metadata: PACKAGE_INFO.json
         $gitCommit = "unknown"
         try {
@@ -258,6 +292,9 @@ Official Upstream Projects:
             gitCommit = $gitCommit
             repository = "https://github.com/sayedalve/Flux-Download-Manager"
             license = "GPL-3.0-or-later"
+            installedDiskFootprintBytes = $uncompressedBytes
+            installedDiskFootprintMB = $uncompressedMb
+            standardWorkerLocation = "tools/win-x64"
             components = $components
         }
 
@@ -273,7 +310,12 @@ Official Upstream Projects:
 
         $zipSize = (Get-Item $destZip).Length
         $sizeMb = [Math]::Round($zipSize / 1MB, 2)
-        Write-Host "[+] Created: $destZip ($sizeMb MB)" -ForegroundColor Green
+        $compressionRatio = if ($uncompressedBytes -gt 0) { [Math]::Round((1 - ($zipSize / $uncompressedBytes)) * 100, 1) } else { 0 }
+
+        Write-Host "[+] Created: $destZip" -ForegroundColor Green
+        Write-Host "    - Installed Disk Footprint (Uncompressed) : $uncompressedMb MB ($uncompressedBytes bytes)" -ForegroundColor Cyan
+        Write-Host "    - Portable ZIP Download Size (Compressed) : $sizeMb MB ($zipSize bytes)" -ForegroundColor Green
+        Write-Host "    - Compression Space Savings               : $compressionRatio%" -ForegroundColor Gray
 
         return $destZip
     } finally {
@@ -338,6 +380,12 @@ if (-not $SkipHash -and $createdZips.Count -gt 0) {
 
     [System.IO.File]::WriteAllLines($sumsPath, $allLines, [System.Text.Encoding]::UTF8)
     Write-Host "[+] Updated: $sumsPath" -ForegroundColor Green
+}
+
+# 7. Comprehensive Packaging Size Audit Report
+$reportScript = Join-Path $ScriptDir "report-package-sizes.ps1"
+if (Test-Path $reportScript) {
+    & $reportScript -Version $Version -RepoRoot $RepoRoot -DistDir $OutputDir
 }
 
 Write-Host "`n=================================================================" -ForegroundColor Cyan

@@ -134,11 +134,11 @@
         if (!f || f.drmFamilies) continue;
         const mime = String(f.mimeType || "").toLowerCase();
         const bw = Number(f.bitrate || f.averageBitrate || 0);
-        if (mime.startsWith("video/") && f.url) {
+        if (mime.startsWith("video/")) {
           if (!bestVideo || bw > Number(bestVideo.bitrate || bestVideo.averageBitrate || 0)) {
             bestVideo = f;
           }
-        } else if (mime.startsWith("audio/") && f.url) {
+        } else if (mime.startsWith("audio/")) {
           if (!bestAudio || bw > Number(bestAudio.bitrate || bestAudio.averageBitrate || 0)) {
             bestAudio = f;
           }
@@ -149,9 +149,27 @@
       }
       if (bestAudioMp4) bestAudio = bestAudioMp4;
 
-      // Build complete multi-quality list across all available adaptive and progressive resolutions
-      const durSec = parseFloat(videoDetails.lengthSeconds || "0") || 0;
-      const audioByteLen = bestAudio ? parseInt(bestAudio.contentLength || "0", 10) : 0;
+      // Extract duration in seconds across videoDetails, format metadata, and DOM video element
+      let durSec = parseFloat(videoDetails.lengthSeconds || "0") || 0;
+      if (durSec <= 0) {
+        for (const f of allFormats) {
+          if (f && f.approxDurationMs) {
+            const ms = parseFloat(f.approxDurationMs);
+            if (ms > 0) { durSec = ms / 1000; break; }
+          }
+        }
+      }
+      if (durSec <= 0 && win.document) {
+        const vidEl = win.document.querySelector("video");
+        if (vidEl && vidEl.duration && !isNaN(vidEl.duration) && isFinite(vidEl.duration) && vidEl.duration > 0) {
+          durSec = vidEl.duration;
+        }
+      }
+
+      // Compute audio track byte size for accurate adaptive mux size estimation
+      const rawAudioBytes = bestAudio ? parseInt(bestAudio.contentLength || "0", 10) : 0;
+      const audioBw = bestAudio ? Number(bestAudio.bitrate || bestAudio.averageBitrate || 128000) : 128000;
+      const audioByteLen = rawAudioBytes > 0 ? rawAudioBytes : (durSec > 0 ? Math.round((audioBw / 8) * durSec) : 0);
       const cleanBestAudioUrl = (bestAudio && bestAudio.url) ? normalizeGooglevideoUrl(bestAudio.url) : "";
       const qualityMap = new Map();
 
@@ -175,14 +193,17 @@
 
         const hasDirectUrl = Boolean(f.url);
         const cleanVUrl = hasDirectUrl ? normalizeGooglevideoUrl(f.url) : "";
-        const needsMux = Boolean(isAdaptiveFmt && cleanBestAudioUrl);
+        const needsMux = Boolean(isAdaptiveFmt);
         const unpairedAdaptive = Boolean(isAdaptiveFmt && hasDirectUrl && !cleanBestAudioUrl);
         const requiresCipher = Boolean(!hasDirectUrl || unpairedAdaptive);
+
         const vSize = parseInt(f.contentLength || "0", 10);
         const estVBytes = (vSize === 0 && bw > 0 && durSec > 0) ? Math.round((bw / 8) * durSec) : 0;
-        const estABytes = (needsMux && audioByteLen === 0 && durSec > 0) ? Math.round((128000 / 8) * durSec) : 0;
-        const totalSize = vSize > 0 ? (vSize + (needsMux ? audioByteLen : 0)) : (estVBytes + (needsMux ? (audioByteLen > 0 ? audioByteLen : estABytes) : 0));
-        const isSizeEstimated = Boolean(vSize === 0 && totalSize > 0);
+        const effectiveVBytes = vSize > 0 ? vSize : estVBytes;
+        const totalSize = isAdaptiveFmt
+          ? (effectiveVBytes + (audioByteLen > 0 ? audioByteLen : (durSec > 0 ? Math.round((128000 / 8) * durSec) : 0)))
+          : (effectiveVBytes || vSize);
+        const isSizeEstimated = Boolean(vSize === 0 || (isAdaptiveFmt && rawAudioBytes === 0));
 
         const entry = {
           id: key,
@@ -228,8 +249,8 @@
         return (b.bandwidth || 0) - (a.bandwidth || 0);
       });
 
-      if (bestAudio && cleanBestAudioUrl) {
-        const audioBwKbps = bestAudio.bitrate ? `${Math.round(Number(bestAudio.bitrate) / 1000)} Kbps` : "M4A";
+      if (bestAudio) {
+        const audioBwKbps = `${Math.round(audioBw / 1000)} Kbps`;
         qualities.push({
           id: "audio-only",
           label: `Audio Only (${audioBwKbps})`,
@@ -237,18 +258,22 @@
           width: 0,
           height: 0,
           itag: bestAudio.itag || 140,
-          bandwidth: Number(bestAudio.bitrate || 128000),
+          bandwidth: audioBw,
           size: audioByteLen,
+          sizeEstimated: rawAudioBytes === 0,
           isAudioOnly: true,
           ext: "m4a",
           mime: String(bestAudio.mimeType || "audio/mp4").split(";")[0],
           videoUrl: cleanBestAudioUrl,
           pairedAudioUrl: "",
           requiresAudioMux: false,
-          requiresCipherExtraction: false,
+          requiresCipherExtraction: !bestAudio.url,
           videoFilter: "audio"
         });
       }
+
+      const topVid = qualities.find(q => !q.isAudioOnly) || qualities[0];
+      const primarySize = topVid ? (topVid.size || 0) : 0;
 
       // Adaptive video tracks on YouTube have no audio; only use adaptive bestVideo if bestAudio is also available,
       // otherwise prefer bestProgressive or mark requiresCipherExtraction so yt-dlp extracts & merges both tracks.
@@ -261,8 +286,8 @@
         const isUnpairedAdaptiveVideo = Boolean(chosenVideo === bestVideo && !cleanAudioUrl);
         const resolution = chosenVideo.qualityLabel ||
                            (chosenVideo.width && chosenVideo.height ? `${chosenVideo.width}x${chosenVideo.height}` : "HD");
-        const sizeBytes = parseInt(chosenVideo.contentLength || "0", 10) +
-                          (canMuxAdaptive ? parseInt(bestAudio.contentLength || "0", 10) : 0);
+        const sizeBytes = primarySize ||
+                          (parseInt(chosenVideo.contentLength || "0", 10) + (canMuxAdaptive ? audioByteLen : 0));
 
         const descriptor = {
           fluxType: "YOUTUBE_STREAM",
@@ -300,15 +325,14 @@
           qualities,
           referer: canonicalWatchUrl,
           extractorJson: JSON.stringify(descriptor),
-          cachedManifestBody: "" // Never pass YouTube JSON as an HLS/DASH manifest
+          cachedManifestBody: JSON.stringify(descriptor)
         });
         return true;
       }
 
       // If formats use signatureCipher / cipher or serverAbrStreamingUrl, register the YouTube extraction target for yt-dlp
       if (formats.length > 0 || adaptive.length > 0 || streamingData.serverAbrStreamingUrl) {
-        const topFmt = qualities[0] || adaptive[0] || formats[0];
-        const resolution = (topFmt && (topFmt.resolution || topFmt.qualityLabel)) || "Auto";
+        const resolution = (topVid && (topVid.resolution || topVid.qualityLabel)) || "Auto";
         const descriptor = {
           fluxType: "YOUTUBE_STREAM",
           sourceType: "YOUTUBE_EXTRACTION",
@@ -317,6 +341,7 @@
           watchUrl: canonicalWatchUrl,
           resolution,
           requiresCipherExtraction: true,
+          size: primarySize,
           qualities
         };
         lastInspectedYtVideoId = videoId || canonicalWatchUrl;
@@ -328,11 +353,12 @@
           videoId,
           pageTitle: cleanTitle,
           resolution,
+          size: primarySize,
           requiresCipherExtraction: true,
           qualities,
           referer: canonicalWatchUrl,
           extractorJson: JSON.stringify(descriptor),
-          cachedManifestBody: ""
+          cachedManifestBody: JSON.stringify(descriptor)
         });
         return true;
       }
@@ -364,8 +390,19 @@
           }
         }
 
+        // 2b. Check window.ytplayer?.config?.args?.raw_player_response
+        if (win.ytplayer && win.ytplayer.config && win.ytplayer.config.args) {
+          const rawPr = win.ytplayer.config.args.raw_player_response;
+          if (rawPr) {
+            const prObj = (typeof rawPr === "string") ? JSON.parse(rawPr) : rawPr;
+            if (prObj && inspectYouTubePlayerObject(prObj, win.location.href)) {
+              return true;
+            }
+          }
+        }
+
         // 3. Fallback: if on a valid YouTube watch/shorts/embed URL and #movie_player or <video> exists,
-        // register a site extraction candidate so the popup and overlay can route via yt-dlp
+        // register a site extraction candidate with standard presets & duration-based estimated sizes
         const href = win.location.href || "";
         const u = new URL(href);
         const path = u.pathname.toLowerCase();
@@ -377,14 +414,48 @@
         if (isWatchPage && win.document && win.document.querySelector && win.document.querySelector("video")) {
           const vid = u.searchParams.get("v") || path.split("/").filter(Boolean).pop() || "";
           const rawTitle = (win.document.title || "youtube_video").replace(/\s*-\s*YouTube$/i, "").trim() || "youtube_video";
+          const vidEl = win.document.querySelector("video");
+          const fallbackDur = (vidEl && vidEl.duration && !isNaN(vidEl.duration) && isFinite(vidEl.duration) && vidEl.duration > 0)
+            ? vidEl.duration
+            : 0;
+
+          const standardPresets = [
+            { id: "1080p_mp4", res: "1080p", label: "1080p Full HD (MP4)", bw: 4200000, h: 1080, ext: "mp4" },
+            { id: "720p_mp4", res: "720p", label: "720p HD (MP4)", bw: 2200000, h: 720, ext: "mp4" },
+            { id: "480p_mp4", res: "480p", label: "480p SD (MP4)", bw: 1100000, h: 480, ext: "mp4" },
+            { id: "360p_mp4", res: "360p", label: "360p Standard (MP4)", bw: 650000, h: 360, ext: "mp4" },
+            { id: "audio-only", res: "Audio", label: "Audio Only (128 Kbps)", bw: 128000, h: 0, ext: "m4a", isAudioOnly: true }
+          ];
+
+          const fallbackQualities = standardPresets.map(p => {
+            const sz = fallbackDur > 0 ? Math.round((p.bw / 8) * fallbackDur) : 0;
+            return {
+              id: p.id,
+              label: p.label,
+              resolution: p.res,
+              width: p.h > 0 ? Math.round((p.h * 16) / 9) : 0,
+              height: p.h,
+              bandwidth: p.bw,
+              size: sz,
+              sizeEstimated: true,
+              isAudioOnly: Boolean(p.isAudioOnly),
+              ext: p.ext,
+              requiresCipherExtraction: true,
+              videoFilter: p.h > 0 ? `${p.h}p` : "audio"
+            };
+          });
+
+          const primaryFallbackSize = fallbackQualities[0] ? fallbackQualities[0].size : 0;
           const descriptor = {
             fluxType: "YOUTUBE_STREAM",
             sourceType: "YOUTUBE_EXTRACTION",
             videoId: vid,
             title: rawTitle,
             watchUrl: href,
-            resolution: "Auto",
-            requiresCipherExtraction: true
+            resolution: "1080p",
+            requiresCipherExtraction: true,
+            size: primaryFallbackSize,
+            qualities: fallbackQualities
           };
           sendMedia({
             streamType: "YOUTUBE",
@@ -393,11 +464,13 @@
             url: href,
             videoId: vid,
             pageTitle: rawTitle,
-            resolution: "Auto",
+            resolution: "1080p",
+            size: primaryFallbackSize,
             requiresCipherExtraction: true,
+            qualities: fallbackQualities,
             referer: href,
             extractorJson: JSON.stringify(descriptor),
-            cachedManifestBody: ""
+            cachedManifestBody: JSON.stringify(descriptor)
           });
           return true;
         }
@@ -630,7 +703,7 @@
     // 1. Hook window.fetch
     if (typeof win.fetch === "function") {
       const origFetch = win.fetch;
-      win.fetch = async function (...args) {
+      win.fetch = function (...args) {
         let reqUrl = "";
         try {
           const req = args[0];
@@ -638,35 +711,40 @@
           if (reqUrl) inspectUrl(reqUrl);
         } catch (_) {}
 
-        const response = await origFetch.apply(this, args);
-        try {
-          const finalUrl = (response && response.url) ? response.url : reqUrl;
-          if (finalUrl && finalUrl !== reqUrl) inspectUrl(finalUrl);
+        return origFetch.apply(this, args).then((response) => {
+          try {
+            if (!response) return response;
+            const finalUrl = (response && response.url) ? response.url : reqUrl;
+            if (finalUrl && finalUrl !== reqUrl) inspectUrl(finalUrl);
 
-          if (response && typeof response.clone === "function") {
-            const contentType = (response.headers && typeof response.headers.get === "function" && response.headers.get("content-type")) || "";
-            const isMediaOrDoc = !contentType ||
-                                contentType.includes("mpegurl") ||
-                                contentType.includes("dash+xml") ||
-                                contentType.includes("xml") ||
-                                contentType.includes("json") ||
-                                contentType.includes("text") ||
-                                finalUrl.includes(".m3u8") ||
-                                finalUrl.includes(".mpd") ||
-                                finalUrl.includes("manifest") ||
-                                finalUrl.includes("playlist") ||
-                                finalUrl.includes("/youtubei/v1/player");
-            if (isMediaOrDoc) {
-              const cloned = response.clone();
-              if (cloned && typeof cloned.text === "function") {
-                cloned.text().then(text => {
-                  inspectManifestText(finalUrl, text, win.location ? win.location.href : "");
-                }).catch(() => {});
-              }
+            const lowerUrl = (finalUrl || "").toLowerCase();
+            const contentType = ((response.headers && typeof response.headers.get === "function" && response.headers.get("content-type")) || "").toLowerCase();
+
+            const isManifestOrPlayer =
+              lowerUrl.includes(".m3u8") ||
+              lowerUrl.includes(".mpd") ||
+              lowerUrl.includes("manifest") ||
+              lowerUrl.includes("playlist") ||
+              lowerUrl.includes("/youtubei/v1/player") ||
+              contentType.includes("mpegurl") ||
+              contentType.includes("dash") ||
+              !response.headers;
+
+            if (isManifestOrPlayer && typeof response.clone === "function" && !response.bodyUsed) {
+              try {
+                const cloned = response.clone();
+                if (cloned && typeof cloned.text === "function") {
+                  cloned.text().then(text => {
+                    if (text && typeof text === "string" && text.length < 5000000) {
+                      inspectManifestText(finalUrl, text, win.location ? win.location.href : "");
+                    }
+                  }).catch(() => {});
+                }
+              } catch (_) {}
             }
-          }
-        } catch (_) {}
-        return response;
+          } catch (_) {}
+          return response;
+        });
       };
     }
 
@@ -692,8 +770,11 @@
               inspectUrl(url);
               const rType = this.responseType;
               if (rType === "" || rType === "text") {
-                if (typeof this.responseText === "string") {
-                  inspectManifestText(url, this.responseText, win.location ? win.location.href : "");
+                const lower = url.toLowerCase();
+                if (lower.includes(".m3u8") || lower.includes(".mpd") || lower.includes("/youtubei/v1/player")) {
+                  if (typeof this.responseText === "string") {
+                    inspectManifestText(url, this.responseText, win.location ? win.location.href : "");
+                  }
                 }
               }
             } catch (_) {}
@@ -737,7 +818,7 @@
               size: obj.size || 0,
               createdAt: Date.now()
             });
-            if (type.includes("mpegurl") || type.includes("dash") || type.includes("xml") || obj.size < 524288) {
+            if (type.includes("mpegurl") || type.includes("dash") || (type.includes("xml") && obj.size < 524288)) {
               obj.text().then(text => {
                 inspectManifestText(blobUrl, text, win.location ? win.location.href : "");
               }).catch(() => {});

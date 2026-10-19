@@ -51,11 +51,13 @@ public:
     static std::filesystem::path GetDefaultDownloadsDir(const std::filesystem::path& exe_dir);
     static std::filesystem::path GetDefaultDownloadDir() { return GetDefaultDownloadsDir(GetExecutableDir()); }
 
-    // Dynamically discovers a worker executable (e.g., "N_m3u8DL-RE" or "ffmpeg") across:
-    //   1. <exe_dir>/tools/<name>(.exe)
-    //   2. <exe_dir>/../tools/<name>(.exe)
-    //   3. <exe_dir>/<name>(.exe)
-    //   4. System PATH environment variable (; on Windows, : on POSIX)
+    // Dynamically discovers a worker executable (e.g., "N_m3u8DL-RE", "ffmpeg", or "yt-dlp") across:
+    //   1. <exe_dir>/tools/win-x64/<name>(.exe) [standard packaged location]
+    //   2. <exe_dir>/tools/<name>(.exe) [backward compatibility for existing installations]
+    //   3. %LOCALAPPDATA%/Flux Download Manager/tools/win-x64/ and tools/
+    //   4. Parent directories up to 3 levels (development/test builds)
+    //   5. System PATH environment variable (; on Windows, : on POSIX)
+    //   6. Fallback: <exe_dir>/tools/win-x64/<name>(.exe)
     static std::filesystem::path FindWorkerBinary(
         std::string_view worker_name,
         const std::filesystem::path& exe_dir);

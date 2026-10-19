@@ -169,11 +169,8 @@ Verify-PeBinary $NmExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 Verify-PeBinary $FfExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 Verify-PeBinary $YtExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 
-$RootTools = Join-Path $RepoRoot "tools"
-New-Item -ItemType Directory -Force -Path $RootTools | Out-Null
-Copy-Item -Force $NmExe (Join-Path $RootTools "N_m3u8DL-RE.exe")
-Copy-Item -Force $FfExe (Join-Path $RootTools "ffmpeg.exe")
-Copy-Item -Force $YtExe (Join-Path $RootTools "yt-dlp.exe")
+# Stream workers are provisioned exclusively in tools\win-x64 (standard location)
+# Note: Redundant copying to repo tools\ root is eliminated to prevent duplicate disk footprint.
 
 # -----------------------------------------------------------------------------
 # 6. Stage Portable Distribution at dist/Flux.exe (No Installer / No MSI)
@@ -183,19 +180,68 @@ Get-Process | Where-Object {
     try { $_.Path -and $_.Path.StartsWith($DistDir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 200
-New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools\win-x64") | Out-Null
-New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "tools") | Out-Null
+
+# Ensure single standard tools location tools\win-x64 in dist
+$DistToolsWinDir = Join-Path $DistDir "tools\win-x64"
+New-Item -ItemType Directory -Force -Path $DistToolsWinDir | Out-Null
+
+# Clean up legacy duplicate files from older builds if present
+$legacyDupFiles = @(
+    (Join-Path $DistDir "tools\ffmpeg.exe"),
+    (Join-Path $DistDir "tools\ffprobe.exe"),
+    (Join-Path $DistDir "tools\N_m3u8DL-RE.exe"),
+    (Join-Path $DistDir "tools\yt-dlp.exe"),
+    (Join-Path $DistDir "N_m3u8DL-RE.exe")
+)
+foreach ($dup in $legacyDupFiles) {
+    if (Test-Path $dup) {
+        Remove-Item -Force $dup -ErrorAction SilentlyContinue
+    }
+}
+
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "Flux.exe")
 Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe")
 Copy-Item -Force (Join-Path $BuildDir "flux-nmh.exe") (Join-Path $DistDir "flux-nmh.exe")
-Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe")
-Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\win-x64\ffmpeg.exe")
-Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistDir "tools\win-x64\yt-dlp.exe")
-Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistDir "tools\N_m3u8DL-RE.exe")
-Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistDir "tools\ffmpeg.exe")
-Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistDir "tools\yt-dlp.exe")
-New-Item -ItemType Directory -Force -Path (Join-Path $DistDir "extension") | Out-Null
-Copy-Item -Recurse -Force (Join-Path $RepoRoot "extension\*") (Join-Path $DistDir "extension\")
+# Prioritize native C++ stream worker (< 5MB) from build output if available
+$builtWorker = Join-Path $BuildDir "N_m3u8DL-RE.exe"
+if (-not (Test-Path $builtWorker)) {
+    $builtWorker = Join-Path $BuildDir "Release\N_m3u8DL-RE.exe"
+}
+if (Test-Path $builtWorker) {
+    Write-Host "  Staged native C++ stream worker: $builtWorker" -ForegroundColor Green
+    Copy-Item -Force $builtWorker (Join-Path $DistToolsWinDir "N_m3u8DL-RE.exe")
+} elseif (Test-Path (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe")) {
+    Copy-Item -Force (Join-Path $ToolsWinDir "N_m3u8DL-RE.exe") (Join-Path $DistToolsWinDir "N_m3u8DL-RE.exe")
+}
+Copy-Item -Force (Join-Path $ToolsWinDir "ffmpeg.exe") (Join-Path $DistToolsWinDir "ffmpeg.exe")
+Copy-Item -Force (Join-Path $ToolsWinDir "yt-dlp.exe") (Join-Path $DistToolsWinDir "yt-dlp.exe")
+
+# Clean browser extension staging (strictly excludes development/test files)
+$extSrc = Join-Path $RepoRoot "extension"
+$extDest = Join-Path $DistDir "extension"
+New-Item -ItemType Directory -Force -Path $extDest | Out-Null
+$excludeItems = @(".git", ".github", "node_modules", "package.json", "package-lock.json", "tsconfig.json", "tests", "scratch", "*.ts", "*.map", "*.log")
+Get-ChildItem -Path $extSrc -Recurse | Where-Object {
+    $item = $_
+    $relPath = $item.FullName.Substring($extSrc.Length)
+    $skip = $false
+    foreach ($ex in $excludeItems) {
+        if ($relPath -like "*\$ex*" -or $relPath -like "*$ex") {
+            $skip = $true
+            break
+        }
+    }
+    -not $skip
+} | ForEach-Object {
+    $targetPath = Join-Path $extDest $_.FullName.Substring($extSrc.Length)
+    if ($_.PSIsContainer) {
+        if (-not (Test-Path $targetPath)) { New-Item -ItemType Directory -Force -Path $targetPath | Out-Null }
+    } else {
+        $parent = Split-Path -Parent $targetPath
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+        Copy-Item -Path $_.FullName -Destination $targetPath -Force
+    }
+}
 
 $CheckFiles = @(
     (Join-Path $DistDir "Flux.exe"),

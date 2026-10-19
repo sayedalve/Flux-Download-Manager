@@ -640,46 +640,57 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
     const std::string native_name = base;
 #endif
 
-    // 1. Check bundled tools directory relative to executable (<exe_dir>/tools, <exe_dir>/../tools)
-    // Check system PATH first for standard system tools (e.g. ffmpeg), then bundled tools/
-    if (base == "ffmpeg") {
-        if (const char* path_env = std::getenv("PATH")) {
+    // 1. Search bundled and local tools directories.
+    // Prioritize tools/win-x64 as the single standard location, followed by tools/
+    // for backward compatibility with existing installations.
+    std::vector<std::filesystem::path> search_dirs;
+    search_dirs.push_back(exe_dir / "tools" / "win-x64");
+    search_dirs.push_back(exe_dir / "tools");
+
+    // Check AppData tools directories (for portable or user-level stream workers)
+    auto app_data_dir = GetDefaultAppDataDir();
+    search_dirs.push_back(app_data_dir / "tools" / "win-x64");
+    search_dirs.push_back(app_data_dir / "tools");
+
 #ifdef _WIN32
-            const char sep = ';';
-#else
-            const char sep = ':';
-#endif
-            std::stringstream ss(path_env);
-            std::string item;
-            while (std::getline(ss, item, sep)) {
-                if (item.empty()) continue;
-                std::filesystem::path candidate = std::filesystem::path(item) / native_name;
-                if (std::filesystem::exists(candidate, ec)) return candidate;
-            }
+    if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
+        if (local_app_data[0] != '\0') {
+            std::filesystem::path legacy_dir = std::filesystem::path(local_app_data) / "OpenIDM" / "tools";
+            search_dirs.push_back(legacy_dir / "win-x64");
+            search_dirs.push_back(legacy_dir);
         }
     }
-    const std::filesystem::path bundled_dirs[] = {
-        exe_dir / "tools" / "win-x64",
-        exe_dir / "tools",
-        exe_dir.parent_path() / "tools" / "win-x64",
-        exe_dir.parent_path() / "tools",
-        exe_dir.parent_path().parent_path() / "tools" / "win-x64",
-        exe_dir.parent_path().parent_path() / "tools",
-        exe_dir.parent_path().parent_path().parent_path() / "tools" / "win-x64",
-        exe_dir.parent_path().parent_path().parent_path() / "tools",
-        std::filesystem::current_path() / "tools" / "win-x64",
-        std::filesystem::current_path() / "tools",
-        exe_dir
-    };
-    for (const auto& dir : bundled_dirs) {
+#endif
+
+    // Search parent directories up to 3 levels (for test and development builds in build/win-x64/Release/)
+    std::filesystem::path cur = exe_dir;
+    for (int depth = 0; depth < 3; ++depth) {
+        if (!cur.has_parent_path()) break;
+        cur = cur.parent_path();
+        search_dirs.push_back(cur / "tools" / "win-x64");
+        search_dirs.push_back(cur / "tools");
+    }
+
+    search_dirs.push_back(std::filesystem::current_path(ec) / "tools" / "win-x64");
+    search_dirs.push_back(std::filesystem::current_path(ec) / "tools");
+    search_dirs.push_back(exe_dir);
+
+    for (const auto& dir : search_dirs) {
         if (dir.empty()) continue;
         std::filesystem::path candidate = dir / native_name;
         if (std::filesystem::exists(candidate, ec)) {
             return candidate;
         }
+        if (base == "yt-dlp") {
+            std::filesystem::path min_candidate = dir / "yt-dlp_min.exe";
+            if (std::filesystem::exists(min_candidate, ec)) {
+                return min_candidate;
+            }
+        }
     }
 
     // 2. Search system PATH environment variable (; on Windows, : on POSIX)
+    // Allows Core installation users to use existing system FFmpeg / worker installations
     if (const char* path_env = std::getenv("PATH")) {
 #ifdef _WIN32
         const char sep = ';';
@@ -693,6 +704,12 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
             std::filesystem::path candidate = std::filesystem::path(item) / native_name;
             if (std::filesystem::exists(candidate, ec)) {
                 return candidate;
+            }
+            if (base == "yt-dlp") {
+                std::filesystem::path min_candidate = std::filesystem::path(item) / "yt-dlp_min.exe";
+                if (std::filesystem::exists(min_candidate, ec)) {
+                    return min_candidate;
+                }
             }
         }
     }
@@ -708,7 +725,8 @@ std::filesystem::path PathSanitizer::FindWorkerBinary(
         }
     }
 
-    return exe_dir / "tools" / native_name;
+    // Fall back to the standard location under the executable directory
+    return exe_dir / "tools" / "win-x64" / native_name;
 }
 
 Result<uint64_t> PathSanitizer::CheckAvailableDiskSpace(

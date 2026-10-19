@@ -5,9 +5,20 @@
 // (with Alt-key bypass), captures media events, and relays page MAIN world messages.
 
 function positionOverlayHost(video, hostEl) {
+  if (!video || !hostEl) return;
+  const doc = (video && video.ownerDocument) ? video.ownerDocument : (typeof document !== "undefined" ? document : null);
+  if (doc) {
+    const isFullscreen = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+    if (isFullscreen && doc.fullscreenElement && hostEl.parentElement !== doc.fullscreenElement) {
+      try { doc.fullscreenElement.appendChild(hostEl); } catch (_) {}
+    } else if (!isFullscreen && doc.body && hostEl.parentElement !== doc.body) {
+      try { doc.body.appendChild(hostEl); } catch (_) {}
+    }
+  }
+
   const rect = typeof video.getBoundingClientRect === "function"
     ? video.getBoundingClientRect()
-    : { width: video.width || 640, height: video.height || 360, top: 20, left: 20, right: 660 };
+    : { width: video.width || 640, height: video.height || 360, top: 20, left: 20, right: 660, bottom: 380 };
 
   // Hide unobtrusively if the video player is collapsed or scrolled out of the visible viewport
   const isCollapsed = (rect.width !== undefined && rect.width < 120) || (rect.height !== undefined && rect.height < 80);
@@ -38,32 +49,107 @@ function extractVideoElementSrc(video) {
   return src;
 }
 
+let g_contentScriptCleanedUp = false;
+let g_videoObserver = null;
+let g_messageListener = null;
+
+function isExtensionContextValid() {
+  try {
+    if (typeof chrome === "undefined") {
+      // In test/Node.js unit test environments where chrome is undefined, allow DOM testing
+      return typeof module !== "undefined";
+    }
+    if (!chrome.runtime) return false;
+    // In test/sandbox environments where chrome.runtime.id is not mocked, check sendMessage
+    if (typeof chrome.runtime.id === "undefined") {
+      return typeof chrome.runtime.sendMessage === "function";
+    }
+    return Boolean(chrome.runtime.id);
+  } catch (_) {
+    return false;
+  }
+}
+
+function cleanupContentScript() {
+  if (g_contentScriptCleanedUp) return;
+  g_contentScriptCleanedUp = true;
+  try {
+    if (typeof window !== "undefined") {
+      window.removeEventListener("click", handleLinkClick, { capture: true, passive: false });
+      if (g_messageListener) {
+        window.removeEventListener("message", g_messageListener, { capture: true });
+        g_messageListener = null;
+      }
+    }
+    if (typeof document !== "undefined") {
+      document.removeEventListener("play", handleMediaPlaybackEvent, true);
+      document.removeEventListener("playing", handleMediaPlaybackEvent, true);
+      document.removeEventListener("canplay", handleMediaPlaybackEvent, true);
+      document.removeEventListener("loadedmetadata", handleMediaPlaybackEvent, true);
+    }
+    if (g_videoObserver && typeof g_videoObserver.disconnect === "function") {
+      g_videoObserver.disconnect();
+      g_videoObserver = null;
+    }
+    if (typeof document !== "undefined" && document.querySelectorAll) {
+      const badges = document.querySelectorAll("[data-flux-shadow-host]");
+      badges.forEach(b => { try { b.remove(); } catch (_) {} });
+    }
+  } catch (_) {}
+}
+
+function safeSendRuntimeMessage(msg, callback) {
+  if (!isExtensionContextValid()) {
+    cleanupContentScript();
+    if (typeof callback === "function") callback(null);
+    return;
+  }
+  try {
+    chrome.runtime.sendMessage(msg, (response) => {
+      const err = (typeof chrome !== "undefined" && chrome.runtime) ? chrome.runtime.lastError : null;
+      if (err) {
+        const msgStr = err.message || String(err);
+        if (msgStr.includes("context invalidated") || msgStr.includes("Extension context invalidated")) {
+          cleanupContentScript();
+        }
+      }
+      if (typeof callback === "function") {
+        callback(response);
+      }
+    });
+  } catch (ex) {
+    const exStr = ex ? ex.message : String(ex);
+    if (exStr.includes("context invalidated") || exStr.includes("Extension context invalidated")) {
+      cleanupContentScript();
+    }
+    if (typeof callback === "function") {
+      callback(null);
+    }
+  }
+}
+
 function notifyDirectVideoElementDiscovered(video, doc) {
+  if (!isExtensionContextValid() || g_contentScriptCleanedUp) return;
   try {
     const src = extractVideoElementSrc(video);
     if (!src || src.startsWith("blob:") || src.startsWith("data:")) return;
     if (video.__fluxLastReportedSrc === src) return;
     video.__fluxLastReportedSrc = src;
 
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-      const lower = src.toLowerCase();
-      const streamType = lower.includes(".m3u8") ? "HLS" : (lower.includes(".mpd") ? "DASH" : "HTTP_FILE");
-      chrome.runtime.sendMessage({
-        action: "addMedia",
-        url: src,
-        streamType,
-        pageTitle: (doc && doc.title) ? doc.title : "video",
-        tabUrl: (doc && doc.location) ? doc.location.href : ""
-      }, () => {
-        if (typeof chrome !== "undefined" && chrome.runtime) {
-          void chrome.runtime.lastError;
-        }
-      });
-    }
+    const lower = src.toLowerCase();
+    const streamType = lower.includes(".m3u8") ? "HLS" : (lower.includes(".mpd") ? "DASH" : "HTTP_FILE");
+    safeSendRuntimeMessage({
+      action: "addMedia",
+      url: src,
+      streamType,
+      pageTitle: (doc && doc.title) ? doc.title : "video",
+      tabUrl: (doc && doc.location) ? doc.location.href : ""
+    });
   } catch (_) {}
 }
 
 function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHeight = 135) {
+  if (!isExtensionContextValid() || g_contentScriptCleanedUp) return [];
   if (!doc || !doc.querySelectorAll) return [];
   const videos = Array.from(doc.querySelectorAll("video"));
   const attached = [];
@@ -73,145 +159,189 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
 
     const rect = typeof video.getBoundingClientRect === "function"
       ? video.getBoundingClientRect()
-      : { width: video.width || 640, height: video.height || 360, top: 20, left: 20, right: 660 };
+      : { width: video.width || 640, height: video.height || 360, top: 20, left: 20, right: 660, bottom: 380 };
 
-    if (rect.width < minWidth || rect.height < minHeight) {
+    const isYouTube = Boolean(doc.location && doc.location.hostname && (doc.location.hostname.includes("youtube.com") || doc.location.hostname === "youtu.be"));
+    const isPlayerCandidate = (rect.width >= minWidth && rect.height >= minHeight) ||
+      (isYouTube && (rect.width >= 160 || (video.parentElement && video.parentElement.id === "movie_player")));
+
+    if (!isPlayerCandidate) {
       continue;
     }
 
     const src = extractVideoElementSrc(video);
-    if (!src) {
+    // On video sites like YouTube, video elements initially stream via MSE blob: or delayed src.
+    // Never skip attaching the overlay button to an active video player just because src is pending.
+    if (!src && !isYouTube && (rect.width < 320 || rect.height < 180)) {
       continue;
     }
-    const isBlob = src.startsWith("blob:");
+    const isBlob = Boolean(src && src.startsWith("blob:"));
     const isDrm = Boolean(video.mediaKeys);
 
-    if (!video.dataset.fluxOverlayAttached && !video.dataset.openidmOverlayAttached) {
-      video.dataset.fluxOverlayAttached = "true";
-      video.dataset.openidmOverlayAttached = "true";
-
-      const hostEl = doc.createElement("div");
-      hostEl.setAttribute("data-flux-shadow-host", "true");
-      hostEl.setAttribute("data-openidm-shadow-host", "true");
-      positionOverlayHost(video, hostEl);
-
-      // Closed Shadow DOM ensures zero CSS leakage into or from the host webpage
-      const shadow = hostEl.attachShadow ? hostEl.attachShadow({ mode: "closed" }) : hostEl;
-
-      const styleEl = doc.createElement("style");
-      styleEl.textContent = `
-        button {
-          display: inline-flex;
-          align-items: center;
-          gap: 8px;
-          background: #2D2E32;
-          color: #F2F2F3;
-          border: 1px solid #414248;
-          border-radius: 7px;
-          padding: 7px 14px;
-          font: 600 13px "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
-          letter-spacing: 0.01em;
-          cursor: pointer;
-          opacity: 0.94;
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
-          transition: opacity 0.14s ease, border-color 0.14s ease, background 0.14s ease, transform 0.1s ease;
-        }
-        button::before {
-          content: "";
-          width: 7px;
-          height: 7px;
-          border-radius: 50%;
-          background: #FF4F57;
-          box-shadow: 0 0 8px rgba(255, 79, 87, 0.75);
-          flex-shrink: 0;
-        }
-        button:hover:not(:disabled), button:focus-visible {
-          opacity: 1;
-          border-color: #FF4F57;
-          background: #37383D;
-          color: #FFFFFF;
-          outline: none;
-        }
-        button:active:not(:disabled) {
-          transform: scale(0.98);
-        }
-        button:disabled {
-          opacity: 0.72;
-          border-color: #414248;
-          color: #A4A5AC;
-          cursor: not-allowed;
-        }
-        button:disabled::before {
-          background: #64748B;
-          box-shadow: none;
-        }
-        @media (prefers-reduced-motion: reduce) {
-          button { transition: none; }
-        }
-      `;
-      if (shadow && typeof shadow.appendChild === "function") {
-        shadow.appendChild(styleEl);
-      }
-
-      const btn = doc.createElement("button");
-      btn.type = "button";
-      btn.textContent = isDrm ? "DRM Protected (Unsupported)" : "Download with Flux";
-      btn.disabled = isDrm;
-      const baseBtnStyle =
-        "background:#2D2E32;color:#F2F2F3;border:1px solid #414248;border-radius:7px;" +
-        "padding:7px 14px;font:600 13px 'Segoe UI Variable Text','Segoe UI',sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.55);";
-      if (btn.style) {
-        btn.style.cssText = baseBtnStyle;
-      }
-
-      const invokeClick = (ev) => {
-        if (ev && typeof ev.stopPropagation === "function") ev.stopPropagation();
-        if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
-
-        const liveDrm = Boolean(video.mediaKeys) || isDrm;
-        if (liveDrm) {
-          btn.textContent = "DRM Protected (Unsupported)";
-          btn.disabled = true;
-          return;
-        }
-
-        const liveSrc = extractVideoElementSrc(video);
-        const liveIsBlob = liveSrc.startsWith("blob:");
-
-        if (onDownloadClick) {
-          onDownloadClick({
-            videoSrc: liveIsBlob ? "" : liveSrc,
-            isMseBlob: liveIsBlob,
-            pageTitle: doc.title || "video",
-            frameUrl: (doc.location ? doc.location.href : ""),
-            tabUrl: (doc.location ? doc.location.href : ""),
-            isIframe: (typeof window !== "undefined" && window.self !== window.top),
-            buttonEl: btn,
-            hostEl,
-            baseBtnStyle
-          });
-        }
-      };
-
-      btn.addEventListener("click", invokeClick);
-      if (hostEl && typeof hostEl.addEventListener === "function") {
-        hostEl.addEventListener("click", invokeClick);
-      }
-
-      shadow.appendChild(btn);
-      if (doc.body && doc.body.appendChild) {
-        doc.body.appendChild(hostEl);
-      }
-      attached.push({
-        video,
-        hostEl,
-        btn,
-        isBlob,
-        isDrm,
-        src,
-        reposition: () => positionOverlayHost(video, hostEl)
-      });
+    // If host element is already attached and in DOM, ensure it's positioned correctly
+    if (video.__fluxHostEl && video.__fluxHostEl.isConnected) {
+      positionOverlayHost(video, video.__fluxHostEl);
+      continue;
     }
+
+    // If host element was previously created but detached during DOM updates/SPA navigation, re-append it
+    if (video.__fluxHostEl) {
+      const targetContainer = doc.fullscreenElement || doc.body;
+      if (targetContainer && targetContainer.appendChild) {
+        targetContainer.appendChild(video.__fluxHostEl);
+        positionOverlayHost(video, video.__fluxHostEl);
+        attached.push({
+          video,
+          hostEl: video.__fluxHostEl,
+          btn: video.__fluxBtn,
+          isBlob,
+          isDrm,
+          src,
+          reposition: () => positionOverlayHost(video, video.__fluxHostEl)
+        });
+        continue;
+      }
+    }
+
+    video.dataset.fluxOverlayAttached = "true";
+    video.dataset.openidmOverlayAttached = "true";
+
+    const hostEl = doc.createElement("div");
+    hostEl.setAttribute("data-flux-shadow-host", "true");
+    hostEl.setAttribute("data-openidm-shadow-host", "true");
+    if (isDrm) hostEl.setAttribute("data-flux-drm", "true");
+    positionOverlayHost(video, hostEl);
+
+    // Closed Shadow DOM ensures zero CSS leakage into or from the host webpage
+    const shadow = hostEl.attachShadow ? hostEl.attachShadow({ mode: "closed" }) : hostEl;
+
+    const styleEl = doc.createElement("style");
+    styleEl.textContent = `
+      button {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        background: #2D2E32;
+        color: #F2F2F3;
+        border: 1px solid #414248;
+        border-radius: 7px;
+        padding: 7px 14px;
+        font: 600 13px "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+        letter-spacing: 0.01em;
+        cursor: pointer;
+        opacity: 0.94;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.55);
+        transition: opacity 0.14s ease, border-color 0.14s ease, background 0.14s ease, transform 0.1s ease;
+        white-space: nowrap;
+      }
+      button::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #FF4F57;
+        box-shadow: 0 0 8px rgba(255, 79, 87, 0.75);
+        flex-shrink: 0;
+      }
+      button:hover:not(:disabled), button:focus-visible {
+        opacity: 1;
+        border-color: #FF4F57;
+        background: #37383D;
+        color: #FFFFFF;
+        outline: none;
+      }
+      button:active:not(:disabled) {
+        transform: scale(0.98);
+      }
+      button:disabled {
+        opacity: 0.72;
+        border-color: #414248;
+        color: #A4A5AC;
+        cursor: not-allowed;
+      }
+      button:disabled::before {
+        background: #64748B;
+        box-shadow: none;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        button { transition: none; }
+      }
+    `;
+    if (shadow && typeof shadow.appendChild === "function") {
+      shadow.appendChild(styleEl);
+    }
+
+    const lastCand = (typeof window !== "undefined" && window.__fluxLastCandidate) ? window.__fluxLastCandidate : null;
+    const topQ = (lastCand && Array.isArray(lastCand.qualities) && lastCand.qualities.length > 0)
+      ? (lastCand.qualities.find(q => !q.isAudioOnly) || lastCand.qualities[0])
+      : null;
+    const qSuffix = (topQ && topQ.resolution) ? ` [${topQ.resolution}]` : "";
+
+    const btn = doc.createElement("button");
+    btn.type = "button";
+    btn.textContent = isDrm ? "DRM Protected (Unsupported)" : `Download with Flux${qSuffix}`;
+    btn.disabled = isDrm;
+    const baseBtnStyle =
+      "background:#2D2E32;color:#F2F2F3;border:1px solid #414248;border-radius:7px;" +
+      "padding:7px 14px;font:600 13px 'Segoe UI Variable Text','Segoe UI',sans-serif;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,0.55);white-space:nowrap;";
+    if (btn.style) {
+      btn.style.cssText = baseBtnStyle;
+    }
+
+    const invokeClick = (ev) => {
+      if (ev && typeof ev.stopPropagation === "function") ev.stopPropagation();
+      if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+
+      const liveDrm = Boolean(video.mediaKeys) || isDrm;
+      if (liveDrm) {
+        btn.textContent = "DRM Protected (Unsupported)";
+        btn.disabled = true;
+        return;
+      }
+
+      const liveSrc = extractVideoElementSrc(video);
+      const liveIsBlob = liveSrc.startsWith("blob:");
+
+      if (onDownloadClick) {
+        onDownloadClick({
+          videoSrc: liveIsBlob ? "" : liveSrc,
+          isMseBlob: liveIsBlob,
+          pageTitle: doc.title || "video",
+          frameUrl: (doc.location ? doc.location.href : ""),
+          tabUrl: (doc.location ? doc.location.href : ""),
+          isIframe: (typeof window !== "undefined" && window.self !== window.top),
+          buttonEl: btn,
+          hostEl,
+          baseBtnStyle
+        });
+      }
+    };
+
+    btn.addEventListener("click", invokeClick);
+    if (hostEl && typeof hostEl.addEventListener === "function") {
+      hostEl.addEventListener("click", invokeClick);
+    }
+
+    shadow.appendChild(btn);
+    const targetContainer = doc.fullscreenElement || doc.body;
+    if (targetContainer && targetContainer.appendChild) {
+      targetContainer.appendChild(hostEl);
+    }
+
+    video.__fluxHostEl = hostEl;
+    video.__fluxBtn = btn;
+    hostEl.__fluxVideo = video;
+    hostEl.__fluxBtn = btn;
+
+    attached.push({
+      video,
+      hostEl,
+      btn,
+      isBlob,
+      isDrm,
+      src,
+      reposition: () => positionOverlayHost(video, hostEl)
+    });
   }
   return attached;
 }
@@ -226,6 +356,12 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
           item.hostEl.remove();
         }
         return false;
+      }
+      if (item.hostEl && item.hostEl.isConnected === false) {
+        const targetContainer = (doc && doc.fullscreenElement) || (doc && doc.body);
+        if (targetContainer && targetContainer.appendChild) {
+          targetContainer.appendChild(item.hostEl);
+        }
       }
       item.reposition();
       return true;
@@ -245,10 +381,33 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
     win.addEventListener("resize", refreshPositions, { passive: true });
   }
   if (doc && typeof doc.addEventListener === "function") {
-    doc.addEventListener("fullscreenchange", refreshPositions);
+    doc.addEventListener("fullscreenchange", () => {
+      refreshPositions();
+      rescanAndRefresh();
+    });
+    doc.addEventListener("webkitfullscreenchange", () => {
+      refreshPositions();
+      rescanAndRefresh();
+    });
     doc.addEventListener("loadedmetadata", rescanAndRefresh, true);
+    doc.addEventListener("loadeddata", rescanAndRefresh, true);
     doc.addEventListener("canplay", rescanAndRefresh, true);
+    doc.addEventListener("play", rescanAndRefresh, true);
+    doc.addEventListener("playing", rescanAndRefresh, true);
+    doc.addEventListener("timeupdate", refreshPositions, { passive: true, capture: true });
+    doc.addEventListener("yt-navigate-finish", rescanAndRefresh);
+    doc.addEventListener("yt-page-data-updated", rescanAndRefresh);
   }
+
+  // Periodic gentle sweep ensuring dynamic SPA player transitions never leave the overlay detached
+  const pollTimer = (typeof setInterval === "function") ? setInterval(() => {
+    if (g_contentScriptCleanedUp) {
+      clearInterval(pollTimer);
+      return;
+    }
+    rescanAndRefresh();
+  }, 1500) : null;
+
   if (typeof MutationObserver !== "undefined" && doc && doc.documentElement) {
     const observer = new MutationObserver((mutations) => {
       if (Array.isArray(mutations)) {
@@ -260,9 +419,10 @@ function observeDynamicVideosAndFullscreen(doc, win, onDownloadClick) {
       rescanAndRefresh();
     });
     observer.observe(doc.documentElement, { childList: true, subtree: true });
-    return { activeOverlays, observer, refreshPositions };
+    g_videoObserver = observer;
+    return { activeOverlays, observer, refreshPositions, pollTimer };
   }
-  return { activeOverlays, observer: null, refreshPositions };
+  return { activeOverlays, observer: null, refreshPositions, pollTimer };
 }
 
 
@@ -295,9 +455,7 @@ function triggerBrowserFallback(anchor, href) {
     if (anchor && anchor.dataset) {
       anchor.dataset.fluxBypass = "true";
     }
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({ action: "bypassNextDownload", url: href });
-    }
+    safeSendRuntimeMessage({ action: "bypassNextDownload", url: href });
     if (anchor && typeof anchor.click === "function") {
       anchor.click();
     } else if (typeof location !== "undefined" && location.assign) {
@@ -307,6 +465,10 @@ function triggerBrowserFallback(anchor, href) {
 }
 
 function handleLinkClick(ev) {
+  if (!isExtensionContextValid() || g_contentScriptCleanedUp) {
+    cleanupContentScript();
+    return;
+  }
   try {
     const correlationId = "click-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
 
@@ -346,9 +508,7 @@ function handleLinkClick(ev) {
     if (ev.altKey) {
       // IDM Alt-key bypass behavior: user explicitly requested browser-native download
       console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: isBlobOrData ? (href.slice(0, 48) + "...") : href, reason: "ALT_KEY_BYPASS", mechanism });
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({ action: "bypassNextDownload", url: href, correlationId });
-      }
+      safeSendRuntimeMessage({ action: "bypassNextDownload", url: href, correlationId });
       return;
     }
 
@@ -432,20 +592,18 @@ function handleLinkClick(ev) {
     // Record link click metadata for correlation in chrome.downloads.onDeterminingFilename.
     // User gesture is strictly preserved: we NEVER call ev.preventDefault() or ev.stopPropagation()
     // on natural anchor clicks, ensuring browser cookies, session state, and redirects proceed uninterrupted.
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({
-        action: "linkClicked",
-        url: href,
-        filename: anchor.download || "",
-        hasDownloadAttr,
-        referrer,
-        pageTitle,
-        bypass: false,
-        mechanism,
-        isFrame,
-        correlationId
-      });
-    }
+    safeSendRuntimeMessage({
+      action: "linkClicked",
+      url: href,
+      filename: anchor.download || "",
+      hasDownloadAttr,
+      referrer,
+      pageTitle,
+      bypass: false,
+      mechanism,
+      isFrame,
+      correlationId
+    });
 
     console.log(`[Flux Trace] [CLICK_OBSERVED] [${correlationId}]`, {
       url: href,
@@ -467,6 +625,10 @@ function handleLinkClick(ev) {
 }
 
 function handleMediaPlaybackEvent(ev) {
+  if (!isExtensionContextValid() || g_contentScriptCleanedUp) {
+    cleanupContentScript();
+    return;
+  }
   try {
     const target = ev.target;
     if (!target) return;
@@ -477,15 +639,13 @@ function handleMediaPlaybackEvent(ev) {
     if (src && !src.startsWith("blob:") && !src.startsWith("data:")) {
       const lower = src.toLowerCase();
       const streamType = lower.includes(".m3u8") ? "HLS" : (lower.includes(".mpd") ? "DASH" : "HTTP_FILE");
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({
-          action: "addMedia",
-          url: src,
-          streamType,
-          pageTitle: (typeof document !== "undefined" ? document.title : "video"),
-          tabUrl: (typeof location !== "undefined" ? location.href : "")
-        });
-      }
+      safeSendRuntimeMessage({
+        action: "addMedia",
+        url: src,
+        streamType,
+        pageTitle: (typeof document !== "undefined" ? document.title : "video"),
+        tabUrl: (typeof location !== "undefined" ? location.href : "")
+      });
     }
   } catch (_) {}
 }
@@ -536,19 +696,6 @@ function extractEligiblePageLinks(doc) {
   return results;
 }
 
-function injectDeepSearchScript() {
-  if (typeof document === "undefined" || !document.documentElement) return;
-  try {
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL) {
-      const script = document.createElement("script");
-      script.src = chrome.runtime.getURL("catch-script/catch.js");
-      script.async = false;
-      (document.head || document.documentElement).appendChild(script);
-      script.onload = () => { script.remove(); };
-    }
-  } catch (_) {}
-}
-
 function initContentScript() {
   if (typeof document === "undefined" || typeof window === "undefined") return;
 
@@ -562,16 +709,39 @@ function initContentScript() {
   document.addEventListener("loadedmetadata", handleMediaPlaybackEvent, true);
 
   // 3. Relay page MAIN world messages from catch-script/catch.js to background
-  window.addEventListener("message", (ev) => {
-    if (!ev || !ev.data) return;
-    if (ev.source !== window && ev.origin !== window.location.origin) return;
-
-    if (ev.data.action === "catCatchAddMedia") {
-      if (typeof window !== "undefined") {
-        window.__fluxLastCandidate = ev.data;
+  g_messageListener = (ev) => {
+    try {
+      if (!isExtensionContextValid() || g_contentScriptCleanedUp) {
+        cleanupContentScript();
+        return;
       }
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({
+      if (!ev || !ev.data) return;
+      if (ev.source !== window && ev.origin !== window.location.origin) return;
+
+      if (ev.data.action === "catCatchAddMedia") {
+        if (typeof window !== "undefined") {
+          window.__fluxLastCandidate = ev.data;
+        }
+        // Dynamically update overlay badge label with detected quality and estimated size
+        try {
+          if (typeof document !== "undefined" && document.querySelectorAll) {
+            const hosts = document.querySelectorAll("[data-flux-shadow-host]");
+            const topQ = (Array.isArray(ev.data.qualities) && ev.data.qualities.length > 0)
+              ? (ev.data.qualities.find(q => !q.isAudioOnly) || ev.data.qualities[0])
+              : null;
+            if (topQ) {
+              const qText = topQ.resolution || topQ.label || "";
+              const szStr = topQ.size > 0 ? ` (~${(topQ.size / 1048576).toFixed(0)} MB)` : "";
+              hosts.forEach(h => {
+                if (h.__fluxBtn && !h.getAttribute("data-flux-status") && !h.getAttribute("data-flux-drm")) {
+                  h.__fluxBtn.textContent = `Download [${qText}${szStr}]`;
+                  h.__fluxBtn.title = `Download ${qText} with Flux Download Manager`;
+                }
+              });
+            }
+          }
+        } catch (_) {}
+        safeSendRuntimeMessage({
           action: "addMedia",
           url: ev.data.url,
           streamType: ev.data.streamType || "HLS",
@@ -595,42 +765,31 @@ function initContentScript() {
           cachedManifestBody: ev.data.cachedManifestBody || "",
           tabUrl: location.href,
           pageTitle: ev.data.pageTitle || document.title || "video"
-        }, () => {
-          if (typeof chrome !== "undefined" && chrome.runtime) {
-            void chrome.runtime.lastError;
-          }
         });
-      }
-    } else if (ev.data.action === "catCatchAddKey") {
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({
+      } else if (ev.data.action === "catCatchAddKey") {
+        safeSendRuntimeMessage({
           action: "addKey",
           key: ev.data.key,
           url: ev.data.url
-        }, () => {
-          if (typeof chrome !== "undefined" && chrome.runtime) {
-            void chrome.runtime.lastError;
-          }
         });
-      }
-    } else if (ev.data.action === "catCatchPlayerError") {
-      if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-        chrome.runtime.sendMessage({
+      } else if (ev.data.action === "catCatchPlayerError") {
+        safeSendRuntimeMessage({
           action: "playerError",
           reason: ev.data.reason,
           url: ev.data.url || location.href
-        }, () => {
-          if (typeof chrome !== "undefined" && chrome.runtime) {
-            void chrome.runtime.lastError;
-          }
         });
       }
-    }
-  }, { capture: true });
+    } catch (_) {}
+  };
+  window.addEventListener("message", g_messageListener, { capture: true });
 
   // 3b. Handle background probePageMedia & extractPageLinks RPC
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+      if (!isExtensionContextValid() || g_contentScriptCleanedUp) {
+        cleanupContentScript();
+        return false;
+      }
       if (request && request.action === "probePageMedia") {
         try {
           window.postMessage({ action: "fluxScanPageMedia" }, "*");
@@ -652,12 +811,8 @@ function initContentScript() {
     });
   }
 
-  // 4. Inject deep search script into page DOM
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", injectDeepSearchScript, { once: true });
-  } else {
-    injectDeepSearchScript();
-  }
+  // 4. Note: catch-script/catch.js is injected directly into page MAIN world at document_start by manifest.json.
+  // Redundant DOM script tag injection has been removed to preserve CSP compliance across all frames.
 
   // 5. Observe videos and attach overlay with active visual status & error reporting
   const onDownloadClick = (mediaMeta) => {
@@ -678,56 +833,54 @@ function initContentScript() {
     const qualityId = mediaMeta.qualityId || (lastCand && lastCand.qualityId) || "";
     const videoSrc = mediaMeta.videoSrc || (lastCand ? (lastCand.videoUrl || lastCand.url) : "") || "";
 
-    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-      chrome.runtime.sendMessage({
-        action: "downloadMedia",
-        candidateId,
-        qualityId,
-        url: videoSrc,
-        isMseBlob: Boolean(mediaMeta.isMseBlob),
-        pageTitle: mediaMeta.pageTitle || document.title || "video",
-        tabUrl: mediaMeta.tabUrl || location.href,
-        frameUrl: mediaMeta.frameUrl || location.href
-      }, (resp) => {
-        const lastErr = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError)
-          ? chrome.runtime.lastError.message
-          : null;
+    safeSendRuntimeMessage({
+      action: "downloadMedia",
+      candidateId,
+      qualityId,
+      url: videoSrc,
+      isMseBlob: Boolean(mediaMeta.isMseBlob),
+      pageTitle: mediaMeta.pageTitle || document.title || "video",
+      tabUrl: mediaMeta.tabUrl || location.href,
+      frameUrl: mediaMeta.frameUrl || location.href
+    }, (resp) => {
+      const lastErr = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError)
+        ? chrome.runtime.lastError.message
+        : null;
 
-        if (lastErr || !resp || !resp.success) {
-          const errText = lastErr || (resp && resp.error) || "Download failed";
-          if (btn) {
-            btn.textContent = "Error: " + (errText.length > 28 ? errText.slice(0, 28) + "..." : errText);
-            btn.title = errText;
-            btn.disabled = false;
-            if (btn.style) btn.style.cssText = baseStyle + "border-color:#EF4444;color:#FCA5A5;";
-          }
-          if (hostEl && hostEl.setAttribute) {
-            hostEl.setAttribute("data-flux-status", "error");
-            hostEl.setAttribute("data-flux-error", errText);
-          }
-        } else {
-          const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
-          const taskId = (resp.result && resp.result.taskId) ? resp.result.taskId : "";
-          if (btn) {
-            btn.textContent = isFallback ? "Browser Download" : "Queued in Flux \u2713";
-            btn.title = taskId ? ("Task ID: " + taskId) : "Queued in Flux";
-            btn.disabled = false;
-            if (btn.style) btn.style.cssText = baseStyle + "border-color:#22C55E;color:#86EFAC;";
-          }
-          if (hostEl && hostEl.setAttribute) {
-            hostEl.setAttribute("data-flux-status", isFallback ? "browser_fallback" : "queued");
-            if (taskId) hostEl.setAttribute("data-flux-task-id", taskId);
-          }
+      if (lastErr || !resp || !resp.success) {
+        const errText = lastErr || (resp && resp.error) || "Download failed";
+        if (btn) {
+          btn.textContent = "Error: " + (errText.length > 28 ? errText.slice(0, 28) + "..." : errText);
+          btn.title = errText;
+          btn.disabled = false;
+          if (btn.style) btn.style.cssText = baseStyle + "border-color:#EF4444;color:#FCA5A5;";
         }
+        if (hostEl && hostEl.setAttribute) {
+          hostEl.setAttribute("data-flux-status", "error");
+          hostEl.setAttribute("data-flux-error", errText);
+        }
+      } else {
+        const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
+        const taskId = (resp.result && resp.result.taskId) ? resp.result.taskId : "";
+        if (btn) {
+          btn.textContent = isFallback ? "Browser Download" : "Queued in Flux \u2713";
+          btn.title = taskId ? ("Task ID: " + taskId) : "Queued in Flux";
+          btn.disabled = false;
+          if (btn.style) btn.style.cssText = baseStyle + "border-color:#22C55E;color:#86EFAC;";
+        }
+        if (hostEl && hostEl.setAttribute) {
+          hostEl.setAttribute("data-flux-status", isFallback ? "browser_fallback" : "queued");
+          if (taskId) hostEl.setAttribute("data-flux-task-id", taskId);
+        }
+      }
 
-        if (btn && typeof setTimeout === "function") {
-          setTimeout(() => {
-            btn.textContent = "Download with Flux";
-            if (btn.style && baseStyle) btn.style.cssText = baseStyle;
-          }, 3500);
-        }
-      });
-    }
+      if (btn && typeof setTimeout === "function") {
+        setTimeout(() => {
+          btn.textContent = "Download with Flux";
+          if (btn.style && baseStyle) btn.style.cssText = baseStyle;
+        }, 3500);
+      }
+    });
   };
 
   if (document.readyState === "loading") {

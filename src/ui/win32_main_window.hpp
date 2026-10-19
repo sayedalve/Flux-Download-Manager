@@ -256,9 +256,10 @@ struct AddDownloadDialogInput {
     std::string schedule_time_local;
     bool is_stream{false};
     std::string video_filter{"best"};
-    std::string audio_filter{"all"};
+    std::string audio_filter{"best"};
     std::string subtitle_filter{"all"};
     std::string output_format{"mp4"};
+    uint64_t total_bytes{0};
 };
 
 struct BrowserIntegrationStatusView {

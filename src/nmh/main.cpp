@@ -162,12 +162,12 @@ HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem:
             return h;
         }
 
-        // Always launch the background daemon with --daemon and hidden window (never launch a GUI window!)
-        std::wstring cmd = L"\"" + daemon_bin_path.wstring() + L"\" --daemon --ipc-socket \"" + wpipe + L"\"";
+        // Auto-launch the desktop application in minimized tray mode so the Win32 message loop and New Download dialogs are active
+        std::wstring cmd = L"\"" + daemon_bin_path.wstring() + L"\" --minimized --ipc-socket \"" + wpipe + L"\"";
         STARTUPINFOW si{sizeof(STARTUPINFOW)};
         si.dwFlags = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
-        DWORD creation_flags = CREATE_NO_WINDOW | DETACHED_PROCESS;
+        DWORD creation_flags = DETACHED_PROCESS;
         PROCESS_INFORMATION pi{};
         if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, creation_flags, nullptr, nullptr, &si, &pi)) {
             CloseHandle(pi.hThread);

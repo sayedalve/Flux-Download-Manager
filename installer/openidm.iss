@@ -39,8 +39,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Strict dependency enforcement: compilation fails immediately if any x64 binary is missing
 Source: "..\build\win-x64\openidm.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\build\win-x64\openidm-nmh.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\tools\win-x64\N_m3u8DL-RE.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
-Source: "..\tools\win-x64\ffmpeg.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
+Source: "..\tools\win-x64\N_m3u8DL-RE.exe"; DestDir: "{app}\tools\win-x64"; Flags: ignoreversion
+Source: "..\tools\win-x64\ffmpeg.exe"; DestDir: "{app}\tools\win-x64"; Flags: ignoreversion
 Source: "..\extension\*"; DestDir: "{app}\extension"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE_REVIEW.md"; DestDir: "{app}"; Flags: ignoreversion

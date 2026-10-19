@@ -243,88 +243,103 @@ Nm3u8dlReAdapter::Nm3u8dlReAdapter(StreamAdapterConfig cfg) : m_cfg(std::move(cf
 
 Result<std::string> Nm3u8dlReAdapter::VerifyWorkerBinary() const {
     std::error_code ec;
-    if (m_cfg.nm3u8dl_binary_path.empty() || !std::filesystem::exists(m_cfg.nm3u8dl_binary_path, ec)) {
-        return Result<std::string>::Err(
-            "ERR_DEPENDENCY_MISSING",
-            "Stream worker binary not found: " + m_cfg.nm3u8dl_binary_path.string());
-    }
+    auto test_bin = [&](const std::filesystem::path& bin_path) -> Result<std::string> {
+        if (bin_path.empty() || !std::filesystem::exists(bin_path, ec)) {
+            return Result<std::string>::Err(
+                "ERR_DEPENDENCY_MISSING",
+                "Stream worker binary not found: " + bin_path.string());
+        }
 #ifndef _WIN32
-    int pipefd[2];
-    if (pipe(pipefd) != 0) {
-        return Result<std::string>::Err("ERR_OS_PIPE", "pipe() failed during worker check");
-    }
-    pid_t pid = fork();
-    if (pid == 0) {
+        int pipefd[2];
+        if (pipe(pipefd) != 0) {
+            return Result<std::string>::Err("ERR_OS_PIPE", "pipe() failed during worker check");
+        }
+        pid_t pid = fork();
+        if (pid == 0) {
+            ::close(pipefd[0]);
+            dup2(pipefd[1], STDOUT_FILENO);
+            dup2(pipefd[1], STDERR_FILENO);
+            if (pipefd[1] > 2) ::close(pipefd[1]);
+            execl(bin_path.c_str(), bin_path.c_str(), "--version", nullptr);
+            _exit(127);
+        }
+        ::close(pipefd[1]);
+        std::string out;
+        char buf[512];
+        ssize_t n = 0;
+        while ((n = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
+            out.append(buf, static_cast<size_t>(n));
+        }
         ::close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        dup2(pipefd[1], STDERR_FILENO);
-        if (pipefd[1] > 2) ::close(pipefd[1]);
-        execl(m_cfg.nm3u8dl_binary_path.c_str(), m_cfg.nm3u8dl_binary_path.c_str(), "--version", nullptr);
-        _exit(127);
-    }
-    ::close(pipefd[1]);
-    std::string out;
-    char buf[512];
-    ssize_t n = 0;
-    while ((n = ::read(pipefd[0], buf, sizeof(buf))) > 0) {
-        out.append(buf, static_cast<size_t>(n));
-    }
-    ::close(pipefd[0]);
-    int status = 0;
-    waitpid(pid, &status, 0);
-    int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    if (code != 0 || out.empty()) {
-        return Result<std::string>::Err(
-            "ERR_WORKER_INCOMPATIBLE",
-            "Stream worker binary failed --version compatibility check (exit " + std::to_string(code) + ")");
-    }
-    return Result<std::string>::Ok(out);
+        int status = 0;
+        waitpid(pid, &status, 0);
+        int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (code != 0 || out.empty()) {
+            return Result<std::string>::Err(
+                "ERR_WORKER_INCOMPATIBLE",
+                "Stream worker binary failed --version compatibility check (exit " + std::to_string(code) + ")");
+        }
+        return Result<std::string>::Ok(out);
 #else
-    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    HANDLE hReadPipe = nullptr;
-    HANDLE hWritePipe = nullptr;
-    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
-        return Result<std::string>::Err("ERR_OS_PIPE", "CreatePipe failed during worker check");
-    }
-    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        HANDLE hReadPipe = nullptr;
+        HANDLE hWritePipe = nullptr;
+        if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+            return Result<std::string>::Err("ERR_OS_PIPE", "CreatePipe failed during worker check");
+        }
+        SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdOutput = hWritePipe;
-    si.hStdError = hWritePipe;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = hWritePipe;
+        si.hStdError = hWritePipe;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-    std::wstring cmd = L"\"" + m_cfg.nm3u8dl_binary_path.wstring() + L"\" --version";
-    PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(hReadPipe);
+        std::wstring cmd = L"\"" + bin_path.wstring() + L"\" --version";
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            CloseHandle(hReadPipe);
+            CloseHandle(hWritePipe);
+            return Result<std::string>::Err("ERR_WORKER_EXEC", "Failed to launch stream worker --version");
+        }
         CloseHandle(hWritePipe);
-        return Result<std::string>::Err("ERR_WORKER_EXEC", "Failed to launch stream worker --version");
-    }
-    CloseHandle(hWritePipe);
 
-    std::string out;
-    char buf[512];
-    DWORD got = 0;
-    while (ReadFile(hReadPipe, buf, sizeof(buf), &got, nullptr) && got > 0) {
-        out.append(buf, got);
-    }
-    CloseHandle(hReadPipe);
+        std::string out;
+        char buf[512];
+        DWORD got = 0;
+        while (ReadFile(hReadPipe, buf, sizeof(buf), &got, nullptr) && got > 0) {
+            out.append(buf, got);
+        }
+        CloseHandle(hReadPipe);
 
-    WaitForSingleObject(pi.hProcess, 5000);
-    DWORD exit_code = 1;
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+        WaitForSingleObject(pi.hProcess, 5000);
+        DWORD exit_code = 1;
+        GetExitCodeProcess(pi.hProcess, &exit_code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
 
-    if (exit_code != 0 || out.empty()) {
-        return Result<std::string>::Err(
-            "ERR_WORKER_INCOMPATIBLE",
-            "Stream worker binary failed --version compatibility check (exit " + std::to_string(exit_code) + ")");
-    }
-    return Result<std::string>::Ok(out);
+        if (exit_code != 0 || out.empty()) {
+            return Result<std::string>::Err(
+                "ERR_WORKER_INCOMPATIBLE",
+                "Stream worker binary failed --version compatibility check (exit " + std::to_string(exit_code) + ")");
+        }
+        return Result<std::string>::Ok(out);
 #endif
+    };
+
+    auto res = test_bin(m_cfg.nm3u8dl_binary_path);
+    if (res.ok()) return res;
+
+    std::filesystem::path fb = m_cfg.fallback_worker_path;
+    if (!fb.empty() && std::filesystem::exists(fb, ec)) {
+        auto fb_res = test_bin(fb);
+        if (fb_res.ok()) {
+            const_cast<Nm3u8dlReAdapter*>(this)->m_cfg.nm3u8dl_binary_path = fb;
+            return fb_res;
+        }
+    }
+    return res;
 }
 
 Result<void> Nm3u8dlReAdapter::ValidateManifestSafety(std::string_view url, std::string_view body) const {
@@ -676,8 +691,20 @@ Result<StreamProbeResult> Nm3u8dlReAdapter::ProbeManifest(
 
     std::error_code ec;
     if (!std::filesystem::exists(m_cfg.nm3u8dl_binary_path, ec)) {
-        return Result<StreamProbeResult>::Err(
-            "ERR_DEPENDENCY_MISSING", "Stream worker binary not found: " + m_cfg.nm3u8dl_binary_path.string(), false, true);
+        if (!m_cfg.fallback_worker_path.empty() && std::filesystem::exists(m_cfg.fallback_worker_path, ec)) {
+            m_cfg.nm3u8dl_binary_path = m_cfg.fallback_worker_path;
+        } else if (m_cfg.nm3u8dl_binary_path.empty()) {
+            auto discovered = PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", PathSanitizer::GetExecutableDir());
+            if (std::filesystem::exists(discovered, ec)) {
+                m_cfg.nm3u8dl_binary_path = discovered;
+            } else {
+                return Result<StreamProbeResult>::Err(
+                    "ERR_DEPENDENCY_MISSING", "Stream worker binary not found", false, true);
+            }
+        } else {
+            return Result<StreamProbeResult>::Err(
+                "ERR_DEPENDENCY_MISSING", "Stream worker binary not found: " + m_cfg.nm3u8dl_binary_path.string(), false, true);
+        }
     }
 
     auto safety = ValidateManifestSafety(manifest_url, cached_manifest_body);
@@ -802,18 +829,46 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     }
 
     if (!std::filesystem::exists(m_cfg.nm3u8dl_binary_path, ec)) {
-        task.state = TaskState::kFailed;
-        task.error_code = "ERR_DEPENDENCY_MISSING";
-        task.error_message = "N_m3u8DL-RE binary missing: " + m_cfg.nm3u8dl_binary_path.string();
-        task.status_detail = task.error_message;
-        return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+        if (!m_cfg.fallback_worker_path.empty() && std::filesystem::exists(m_cfg.fallback_worker_path, ec)) {
+            m_cfg.nm3u8dl_binary_path = m_cfg.fallback_worker_path;
+        } else if (m_cfg.nm3u8dl_binary_path.empty()) {
+            auto discovered = PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", PathSanitizer::GetExecutableDir());
+            if (std::filesystem::exists(discovered, ec)) {
+                m_cfg.nm3u8dl_binary_path = discovered;
+            } else {
+                task.state = TaskState::kFailed;
+                task.error_code = "ERR_DEPENDENCY_MISSING";
+                task.error_message = "N_m3u8DL-RE binary missing";
+                task.status_detail = task.error_message;
+                return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+            }
+        } else {
+            task.state = TaskState::kFailed;
+            task.error_code = "ERR_DEPENDENCY_MISSING";
+            task.error_message = "N_m3u8DL-RE binary missing: " + m_cfg.nm3u8dl_binary_path.string();
+            task.status_detail = task.error_message;
+            return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+        }
     }
     if (!std::filesystem::exists(m_cfg.ffmpeg_binary_path, ec)) {
-        task.state = TaskState::kFailed;
-        task.error_code = "ERR_DEPENDENCY_MISSING";
-        task.error_message = "FFmpeg binary missing: " + m_cfg.ffmpeg_binary_path.string();
-        task.status_detail = task.error_message;
-        return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+        if (m_cfg.ffmpeg_binary_path.empty()) {
+            auto discovered_ff = PathSanitizer::FindWorkerBinary("ffmpeg", PathSanitizer::GetExecutableDir());
+            if (std::filesystem::exists(discovered_ff, ec)) {
+                m_cfg.ffmpeg_binary_path = discovered_ff;
+            } else {
+                task.state = TaskState::kFailed;
+                task.error_code = "ERR_DEPENDENCY_MISSING";
+                task.error_message = "FFmpeg binary missing";
+                task.status_detail = task.error_message;
+                return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+            }
+        } else {
+            task.state = TaskState::kFailed;
+            task.error_code = "ERR_DEPENDENCY_MISSING";
+            task.error_message = "FFmpeg binary missing: " + m_cfg.ffmpeg_binary_path.string();
+            task.status_detail = task.error_message;
+            return Result<std::filesystem::path>::Err(task.error_code, task.error_message, false, true);
+        }
     }
 
     auto safety = ValidateManifestSafety(task.url, task.stream_options.cached_manifest_body);
@@ -892,8 +947,8 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     rsp_lines.push_back("--save-dir \"" + EscapeRspArg(task.save_dir) + "\"");
     rsp_lines.push_back("--save-name \"" + EscapeRspArg(temp_save_name) + "\"");
     rsp_lines.push_back("--thread-count " + std::to_string(std::clamp(task.stream_options.thread_count, 1u, 32u)));
-    rsp_lines.push_back("--download-retry-count 5");
-    rsp_lines.push_back("--http-request-timeout 30");
+    rsp_lines.push_back("--download-retry-count 3");
+    rsp_lines.push_back("--http-request-timeout 15");
     if (task.stream_options.concurrent_download) {
         rsp_lines.push_back("-mt");
     }
@@ -916,7 +971,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     } else {
         rsp_lines.push_back("--auto-select");
         rsp_lines.push_back("-sv " + EscapeRspArg(task.stream_options.video_filter.empty() ? "best" : task.stream_options.video_filter));
-        rsp_lines.push_back("-sa " + EscapeRspArg(task.stream_options.audio_filter.empty() ? "all" : task.stream_options.audio_filter));
+        rsp_lines.push_back("-sa " + EscapeRspArg(task.stream_options.audio_filter.empty() ? "best" : task.stream_options.audio_filter));
     }
     rsp_lines.push_back("-ss " + EscapeRspArg(task.stream_options.subtitle_filter.empty() ? "all" : task.stream_options.subtitle_filter));
     rsp_lines.push_back("-M format=" + fmt + ":muxer=ffmpeg:bin_path=\"" + EscapeMuxPath(m_cfg.ffmpeg_binary_path) + "\":keep=false");
@@ -959,6 +1014,14 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
     static const std::regex kProgressRe(R"((\d+)/(\d+)\s+(\d+(?:\.\d+)?)%\s*\|\s*([0-9.]+)MB/([0-9.]+)MB\s*\|\s*([0-9.]+)MBps)");
     std::string last_error_line;
 
+    struct StreamTrackDlState {
+        uint64_t dl_bytes{0};
+        uint64_t tot_bytes{0};
+        uint32_t done_segs{0};
+        uint32_t tot_segs{0};
+    };
+    std::map<std::string, StreamTrackDlState> stream_tracks;
+
     auto process_line = [&](const std::string& line) {
         if (line.empty()) return;
         OPENIDM_LOG_INFO("StreamWorker", line);
@@ -973,6 +1036,8 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
         if (line.find("Muxing") != std::string::npos || line.find("Merging") != std::string::npos) {
             task.state = TaskState::kMuxing;
             task.status_detail = "Merging audio/video tracks (FFmpeg)...";
+            task.stream_percent = 99.0;
+            task.speed_bps = 0;
             if (on_progress) {
                 StreamProgress sp;
                 sp.task_id = task.task_id;
@@ -982,6 +1047,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
                 sp.total_bytes = task.total_bytes;
                 sp.completed_segments = task.completed_segments;
                 sp.total_segments = task.total_segments;
+                sp.speed_bps = 0;
                 sp.status_line = task.status_detail;
                 on_progress(sp);
             }
@@ -996,29 +1062,51 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
             uint64_t tot_b = static_cast<uint64_t>(std::stod(m[5].str()) * 1048576.0);
             uint64_t spd_b = static_cast<uint64_t>(std::stod(m[6].str()) * 1048576.0);
 
-            task.state = TaskState::kDownloading;
-            task.downloaded_bytes = dl_b;
-            task.total_bytes = tot_b;
-            task.speed_bps = spd_b;
-            task.stream_percent = pct;
-            task.completed_segments = done_seg;
-            task.total_segments = tot_seg;
-
+            std::string media_key = "video";
             std::string media_label = "video segments";
-            if (line.rfind("Aud", 0) == 0) media_label = "audio segments";
-            else if (line.rfind("Sub", 0) == 0) media_label = "subtitle tracks";
+            if (line.rfind("Aud", 0) == 0) {
+                media_key = "audio";
+                media_label = "audio segments";
+            } else if (line.rfind("Sub", 0) == 0) {
+                media_key = "subtitle";
+                media_label = "subtitle tracks";
+            }
+            stream_tracks[media_key] = {dl_b, tot_b, done_seg, tot_seg};
+
+            uint64_t agg_dl = 0;
+            uint64_t agg_tot = 0;
+            uint32_t agg_done_seg = 0;
+            uint32_t agg_tot_seg = 0;
+            for (const auto& [k, st] : stream_tracks) {
+                agg_dl += st.dl_bytes;
+                agg_tot += st.tot_bytes;
+                agg_done_seg += st.done_segs;
+                agg_tot_seg += st.tot_segs;
+            }
+
+            double agg_pct = (agg_tot > 0)
+                ? std::min(99.0, (static_cast<double>(agg_dl) / static_cast<double>(agg_tot)) * 100.0)
+                : std::min(99.0, pct);
+
+            task.state = TaskState::kDownloading;
+            task.downloaded_bytes = agg_dl;
+            task.total_bytes = agg_tot;
+            task.speed_bps = spd_b;
+            task.stream_percent = agg_pct;
+            task.completed_segments = agg_done_seg;
+            task.total_segments = agg_tot_seg;
             task.status_detail = "Downloading " + media_label + " (" + std::to_string(done_seg) + "/" + std::to_string(tot_seg) + ")";
 
             if (on_progress) {
                 StreamProgress sp;
                 sp.task_id = task.task_id;
                 sp.phase = TaskState::kDownloading;
-                sp.percent = pct;
-                sp.downloaded_bytes = dl_b;
-                sp.total_bytes = tot_b;
+                sp.percent = agg_pct;
+                sp.downloaded_bytes = agg_dl;
+                sp.total_bytes = agg_tot;
                 sp.speed_bps = spd_b;
-                sp.completed_segments = done_seg;
-                sp.total_segments = tot_seg;
+                sp.completed_segments = agg_done_seg;
+                sp.total_segments = agg_tot_seg;
                 sp.status_line = task.status_detail;
                 on_progress(sp);
             }
@@ -1257,6 +1345,11 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
         return commit_res;
     }
 
+    uint64_t disk_sz = std::filesystem::file_size(*commit_res.value, ec);
+    if (!ec && disk_sz > 0) {
+        task.downloaded_bytes = disk_sz;
+        task.total_bytes = disk_sz;
+    }
     task.file_name = commit_res.value->filename().string();
     task.part_path.clear();
     task.state = TaskState::kCompleted;
@@ -1372,18 +1465,23 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                         }
                     }
                 }
-                if (video_url.empty() && (req_filter.empty() || req_filter == "best")) {
+                if (video_url.empty()) {
                     video_url = StripGooglevideoRangeParams(root["videoUrl"].as_string());
                 }
-                if (audio_url.empty() && (req_filter.empty() || req_filter == "best")) {
+                if (audio_url.empty()) {
                     audio_url = StripGooglevideoRangeParams(root["audioUrl"].as_string());
                 }
-                if (watch_url.empty() || is_raw_googlevideo(watch_url)) {
+                if (wants_audio_only && !audio_url.empty() && video_url != audio_url) {
+                    video_url = audio_url;
+                    audio_url.clear();
+                    requires_audio_mux = false;
+                }
+                if (!root["videoId"].as_string().empty()) {
+                    watch_url = "https://www.youtube.com/watch?v=" + root["videoId"].as_string();
+                } else if (watch_url.empty() || is_raw_googlevideo(watch_url)) {
                     std::string w = root["watchUrl"].as_string();
                     if (!w.empty() && !is_raw_googlevideo(w)) {
                         watch_url = w;
-                    } else if (!root["videoId"].as_string().empty()) {
-                        watch_url = "https://www.youtube.com/watch?v=" + root["videoId"].as_string();
                     }
                 }
                 hls_manifest_url = root["hlsManifestUrl"].as_string();
@@ -1412,6 +1510,21 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     if (!video_url.empty() && (video_url == watch_url || PathSanitizer::IsWebpageWatchUrl(video_url))) {
         if (watch_url.empty()) watch_url = video_url;
         video_url.clear();
+    }
+
+    bool is_youtube_host = (watch_url.find("youtube.com") != std::string::npos || watch_url.find("youtu.be") != std::string::npos ||
+                            task.url.find("youtube.com") != std::string::npos || task.url.find("youtu.be") != std::string::npos ||
+                            task.page_url.find("youtube.com") != std::string::npos || task.page_url.find("youtu.be") != std::string::npos);
+    if (is_youtube_host) {
+        std::smatch vid_m;
+        static const std::regex kVidRe(R"((?:v=|\/shorts\/|\/embed\/|\/live\/|youtu\.be\/)([a-zA-Z0-9_-]{11}))");
+        if (std::regex_search(watch_url, vid_m, kVidRe)) {
+            watch_url = "https://www.youtube.com/watch?v=" + vid_m[1].str();
+        } else if (std::regex_search(task.url, vid_m, kVidRe)) {
+            watch_url = "https://www.youtube.com/watch?v=" + vid_m[1].str();
+        } else if (std::regex_search(task.page_url, vid_m, kVidRe)) {
+            watch_url = "https://www.youtube.com/watch?v=" + vid_m[1].str();
+        }
     }
 
     std::map<std::string, std::string> combined_headers = task.headers;
@@ -1547,7 +1660,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         return Result<void>::Ok();
     };
 
-    if (video_url.empty() && !watch_url.empty() && hls_manifest_url.empty() && dash_manifest_url.empty()) {
+    if (video_url.empty() && !watch_url.empty() && hls_manifest_url.empty() && dash_manifest_url.empty() && !is_youtube_host) {
         std::string page_body;
         auto get_res = brisk::HttpClient::PerformGet(
             watch_url,
@@ -1627,9 +1740,6 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
 
     // 4. If cipher extraction, YouTube host, or site extraction is required (or video_url is empty), use external yt-dlp worker
     std::filesystem::path ytdlp_bin = PathSanitizer::FindWorkerBinary("yt-dlp", PathSanitizer::GetExecutableDir());
-    bool is_youtube_host = (watch_url.find("youtube.com") != std::string::npos || watch_url.find("youtu.be") != std::string::npos ||
-                            task.url.find("youtube.com") != std::string::npos || task.url.find("youtu.be") != std::string::npos ||
-                            task.page_url.find("youtube.com") != std::string::npos || task.page_url.find("youtu.be") != std::string::npos);
     bool should_use_ytdlp = std::filesystem::exists(ytdlp_bin, ec) && (is_youtube_host || video_url.empty() || requires_cipher);
     if (should_use_ytdlp) {
         task.state = TaskState::kDownloading;
@@ -1647,30 +1757,51 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         }
 
         std::string out_tmpl = (task_tmp_dir / ("output.%(ext)s")).string();
-        std::string ytdlp_fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best";
+        std::string ytdlp_fmt;
         if (wants_audio_only) {
-            ytdlp_fmt = "bestaudio[ext=m4a]/bestaudio/best";
+            ytdlp_fmt = "bestaudio[ext=m4a]/bestaudio/best/ba";
         } else if (target_height > 0) {
             std::string hs = std::to_string(target_height);
-            ytdlp_fmt = "bestvideo[height=" + hs + "]+bestaudio/bestvideo[height<=" + hs + "]+bestaudio/best[height<=" + hs + "]/best";
+            ytdlp_fmt = "bestvideo[height<=" + hs + "]+bestaudio/bestvideo[height=" + hs + "]+bestaudio/best[height<=" + hs + "]/best/b/18/w";
         } else if (!req_filter.empty() && req_filter != "best" && std::all_of(req_filter.begin(), req_filter.end(), ::isdigit)) {
-            ytdlp_fmt = req_filter + "+bestaudio/best";
+            ytdlp_fmt = req_filter + "+bestaudio/" + req_filter + "/bestvideo+bestaudio/best/b/18/w";
+        } else {
+            ytdlp_fmt = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best/b/18/w";
         }
+        std::filesystem::path ffmpeg_path = m_cfg.ffmpeg_binary_path;
+        if (ffmpeg_path.empty() || !std::filesystem::exists(ffmpeg_path, ec)) {
+            ffmpeg_path = PathSanitizer::FindWorkerBinary("ffmpeg", PathSanitizer::GetExecutableDir());
+        }
+
         std::vector<std::string> yt_args = {
             "--newline",
             "--no-playlist",
             "--no-warnings",
-            "--ffmpeg-location", m_cfg.ffmpeg_binary_path.string(),
+            "-N", "8",
+            "--concurrent-fragments", "8",
+            "--retries", "3",
+            "--fragment-retries", "3",
+            "--file-access-retries", "3",
+            "--socket-timeout", "15",
             "-f", ytdlp_fmt,
             "--merge-output-format", fmt,
             "-o", out_tmpl
         };
+        if (speed_limit_bps > 0) {
+            uint64_t rate_k = std::max<uint64_t>(1, speed_limit_bps / 1024);
+            yt_args.push_back("--limit-rate");
+            yt_args.push_back(std::to_string(rate_k) + "K");
+        }
+        if (std::filesystem::exists(ffmpeg_path, ec)) {
+            yt_args.push_back("--ffmpeg-location");
+            yt_args.push_back(ffmpeg_path.string());
+        }
         if (has_cookies && std::filesystem::exists(yt_cookies_file, ec)) {
             yt_args.push_back("--cookies");
             yt_args.push_back(yt_cookies_file.string());
         }
         yt_args.push_back("--extractor-args");
-        yt_args.push_back("youtube:player_client=android,web");
+        yt_args.push_back("youtube:player_client=android,ios;player_skip=webpage,configs,initial_data");
         std::filesystem::path node_bin = PathSanitizer::FindWorkerBinary("node", PathSanitizer::GetExecutableDir());
         if (std::filesystem::exists(node_bin, ec)) {
             yt_args.push_back("--js-runtimes");
@@ -1682,10 +1813,13 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         static const std::regex kYtDlpSpeedRe(R"(at\s+([0-9.]+)(B|KiB|MiB|GiB)/s)");
         static const std::regex kYtDlpDestRe(R"(\[download\]\s+Destination:\s+(.+))");
 
-        std::vector<uint64_t> track_totals;
-        std::vector<uint64_t> track_downloaded;
-        int current_track_idx = -1;
-        double last_track_pct = 0.0;
+        struct YtTrackProgress {
+            uint64_t dl_bytes{0};
+            uint64_t tot_bytes{0};
+            double pct{0.0};
+        };
+        std::map<std::string, YtTrackProgress> yt_tracks;
+        std::string current_dest = "primary";
         std::string last_yt_err;
 
         auto parse_yt_line = [&](const std::string& line) {
@@ -1703,18 +1837,16 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             }
 
             std::smatch dest_m;
-            if (std::regex_search(line, dest_m, kYtDlpDestRe) ||
-                line.find("has already been downloaded") != std::string::npos) {
-                if (current_track_idx < 0) {
-                    current_track_idx = 0;
-                } else if (static_cast<size_t>(current_track_idx) < track_totals.size() && track_totals[current_track_idx] > 0) {
-                    current_track_idx++;
+            if (std::regex_search(line, dest_m, kYtDlpDestRe)) {
+                std::string dest_fn = std::filesystem::path(dest_m[1].str()).filename().string();
+                if (!dest_fn.empty()) {
+                    current_dest = PathSanitizer::SanitizeFileName(dest_fn);
                 }
-                while (track_totals.size() <= static_cast<size_t>(current_track_idx)) {
-                    track_totals.push_back(0);
-                    track_downloaded.push_back(0);
+            } else if (line.find("has already been downloaded") != std::string::npos) {
+                if (!current_dest.empty() && yt_tracks.count(current_dest)) {
+                    yt_tracks[current_dest].dl_bytes = yt_tracks[current_dest].tot_bytes;
+                    yt_tracks[current_dest].pct = 100.0;
                 }
-                last_track_pct = 0.0;
             }
 
             if (line.find("[Merger]") != std::string::npos || line.find("Merging formats") != std::string::npos) {
@@ -1746,20 +1878,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 uint64_t tot_b = static_cast<uint64_t>(sz_val * mult);
                 uint64_t dl_b = static_cast<uint64_t>((pct / 100.0) * tot_b);
 
-                if (current_track_idx < 0) {
-                    current_track_idx = 0;
-                } else if (pct < last_track_pct - 15.0 && last_track_pct >= 90.0) {
-                    if (static_cast<size_t>(current_track_idx + 1) >= track_totals.size()) {
-                        current_track_idx++;
-                    }
-                }
-                while (track_totals.size() <= static_cast<size_t>(current_track_idx)) {
-                    track_totals.push_back(0);
-                    track_downloaded.push_back(0);
-                }
-                track_totals[current_track_idx] = tot_b;
-                track_downloaded[current_track_idx] = dl_b;
-                last_track_pct = pct;
+                yt_tracks[current_dest] = {dl_b, tot_b, pct};
 
                 std::smatch sm;
                 if (std::regex_search(line, sm, kYtDlpSpeedRe)) {
@@ -1774,23 +1893,22 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
 
                 uint64_t aggregate_tot = 0;
                 uint64_t aggregate_dl = 0;
-                for (size_t ti = 0; ti < track_totals.size(); ++ti) {
-                    aggregate_tot += track_totals[ti];
-                    aggregate_dl += track_downloaded[ti];
+                for (const auto& [dst, tr] : yt_tracks) {
+                    aggregate_tot += tr.tot_bytes;
+                    aggregate_dl += tr.dl_bytes;
                 }
 
                 double aggregate_pct = (aggregate_tot > 0)
-                    ? std::min(100.0, (static_cast<double>(aggregate_dl) / static_cast<double>(aggregate_tot)) * 100.0)
-                    : pct;
+                    ? std::min(99.0, (static_cast<double>(aggregate_dl) / static_cast<double>(aggregate_tot)) * 100.0)
+                    : std::min(99.0, pct);
 
                 task.state = TaskState::kDownloading;
                 task.stream_percent = aggregate_pct;
                 task.downloaded_bytes = aggregate_dl;
                 task.total_bytes = aggregate_tot;
-                task.status_detail = (track_totals.size() > 1)
-                    ? ("Downloading YouTube track " + std::to_string(current_track_idx + 1) + "/" +
-                       std::to_string(track_totals.size()) + " (" + std::to_string(static_cast<int>(aggregate_pct)) + "%)")
-                    : ("Downloading YouTube stream (" + std::to_string(static_cast<int>(pct)) + "%)");
+                task.status_detail = (yt_tracks.size() > 1)
+                    ? ("Downloading track (" + std::to_string(static_cast<int>(aggregate_pct)) + "%)")
+                    : ("Downloading stream (" + std::to_string(static_cast<int>(pct)) + "%)");
 
                 if (on_progress) {
                     StreamProgress sp;
@@ -1806,104 +1924,196 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             }
         };
 
-        int yt_exit = -1;
+        auto run_ytdlp_proc = [&](const std::vector<std::string>& current_args) -> int {
+            int exit_code = -1;
 #ifndef _WIN32
-        int pipefd[2];
-        if (pipe(pipefd) == 0) {
-            pid_t pid = fork();
-            if (pid == 0) {
-                setpgid(0, 0);
-                ::close(pipefd[0]);
-                dup2(pipefd[1], STDOUT_FILENO);
-                dup2(pipefd[1], STDERR_FILENO);
-                if (pipefd[1] > 2) ::close(pipefd[1]);
-                std::string bin_s = ytdlp_bin.string();
-                std::vector<char*> argv_ptrs;
-                argv_ptrs.push_back(const_cast<char*>(bin_s.c_str()));
-                for (const auto& a : yt_args) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
-                argv_ptrs.push_back(nullptr);
-                execvp(bin_s.c_str(), argv_ptrs.data());
-                _exit(127);
-            }
-            ::close(pipefd[1]);
-            std::string line_buf;
-            char rbuf[4096];
-            ssize_t n = 0;
-            while ((n = ::read(pipefd[0], rbuf, sizeof(rbuf))) > 0) {
-                if (cancel_requested.load() || pause_requested.load()) {
-                    kill(pid, SIGTERM);
-                    break;
+            int pipefd[2];
+            if (pipe(pipefd) == 0) {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    setpgid(0, 0);
+                    ::close(pipefd[0]);
+                    dup2(pipefd[1], STDOUT_FILENO);
+                    dup2(pipefd[1], STDERR_FILENO);
+                    if (pipefd[1] > 2) ::close(pipefd[1]);
+                    std::string bin_s = ytdlp_bin.string();
+                    std::vector<char*> argv_ptrs;
+                    argv_ptrs.push_back(const_cast<char*>(bin_s.c_str()));
+                    for (const auto& a : current_args) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
+                    argv_ptrs.push_back(nullptr);
+                    execvp(bin_s.c_str(), argv_ptrs.data());
+                    _exit(127);
                 }
-                line_buf.append(rbuf, static_cast<size_t>(n));
-                size_t nl;
-                while ((nl = line_buf.find_first_of("\r\n")) != std::string::npos) {
-                    parse_yt_line(line_buf.substr(0, nl));
-                    line_buf.erase(0, nl + 1);
-                }
-            }
-            if (!line_buf.empty()) parse_yt_line(line_buf);
-            ::close(pipefd[0]);
-            int st = 0;
-            waitpid(pid, &st, 0);
-            yt_exit = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
-        }
-#else
-        auto to_wide = [](std::string_view sv) {
-            if (sv.empty()) return std::wstring();
-            int sz = MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), nullptr, 0);
-            std::wstring w(sz, 0);
-            MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), w.data(), sz);
-            return w;
-        };
-        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-        HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
-        if (CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
-            SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
-            STARTUPINFOW si{};
-            si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESTDHANDLES;
-            si.hStdOutput = hWritePipe;
-            si.hStdError = hWritePipe;
-            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-
-            std::wostringstream wcmd_ss;
-            wcmd_ss << L"\"" << ytdlp_bin.wstring() << L"\"";
-            for (const auto& a : yt_args) wcmd_ss << L" \"" << to_wide(a) << L"\"";
-            std::wstring wcmd = wcmd_ss.str();
-            PROCESS_INFORMATION pi{};
-            if (CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-                CloseHandle(hWritePipe);
+                ::close(pipefd[1]);
                 std::string line_buf;
                 char rbuf[4096];
-                DWORD got = 0;
-                while (ReadFile(hReadPipe, rbuf, sizeof(rbuf), &got, nullptr) && got > 0) {
+                ssize_t n = 0;
+                while ((n = ::read(pipefd[0], rbuf, sizeof(rbuf))) > 0) {
                     if (cancel_requested.load() || pause_requested.load()) {
-                        TerminateProcess(pi.hProcess, 1);
+                        kill(pid, SIGTERM);
                         break;
                     }
-                    line_buf.append(rbuf, got);
+                    line_buf.append(rbuf, static_cast<size_t>(n));
                     size_t nl;
                     while ((nl = line_buf.find_first_of("\r\n")) != std::string::npos) {
                         parse_yt_line(line_buf.substr(0, nl));
                         line_buf.erase(0, nl + 1);
                     }
                 }
-                WaitForSingleObject(pi.hProcess, 300000);
-                DWORD wcode = 1;
-                GetExitCodeProcess(pi.hProcess, &wcode);
-                if (wcode == STILL_ACTIVE) {
-                    TerminateProcess(pi.hProcess, 1);
-                    wcode = 259;
-                }
-                yt_exit = static_cast<int>(wcode);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-            } else {
-                CloseHandle(hWritePipe);
+                if (!line_buf.empty()) parse_yt_line(line_buf);
+                ::close(pipefd[0]);
+                int st = 0;
+                waitpid(pid, &st, 0);
+                exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
             }
-            CloseHandle(hReadPipe);
-        }
+#else
+            auto to_wide = [](std::string_view sv) {
+                if (sv.empty()) return std::wstring();
+                int sz = MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), nullptr, 0);
+                std::wstring w(sz, 0);
+                MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), w.data(), sz);
+                return w;
+            };
+            auto to_utf8 = [](std::wstring_view wv) {
+                if (wv.empty()) return std::string();
+                int sz = WideCharToMultiByte(CP_UTF8, 0, wv.data(), static_cast<int>(wv.size()), nullptr, 0, nullptr, nullptr);
+                std::string s(sz, 0);
+                WideCharToMultiByte(CP_UTF8, 0, wv.data(), static_cast<int>(wv.size()), s.data(), sz, nullptr, nullptr);
+                return s;
+            };
+            SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+            HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
+            if (CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+                SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+                STARTUPINFOW si{};
+                si.cb = sizeof(si);
+                si.dwFlags = STARTF_USESTDHANDLES;
+                si.hStdOutput = hWritePipe;
+                si.hStdError = hWritePipe;
+                si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+                std::wostringstream wcmd_ss;
+                wcmd_ss << L"\"" << ytdlp_bin.wstring() << L"\"";
+                for (const auto& a : current_args) wcmd_ss << L" \"" << to_wide(a) << L"\"";
+                std::wstring wcmd = wcmd_ss.str();
+                OPENIDM_LOG_INFO("Nm3u8dlAdapter", "Launching yt-dlp: " + to_utf8(wcmd));
+                PROCESS_INFORMATION pi{};
+                if (CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                    CloseHandle(hWritePipe);
+                    std::string line_buf;
+                    char rbuf[4096];
+                    DWORD got = 0;
+                    while (ReadFile(hReadPipe, rbuf, sizeof(rbuf), &got, nullptr) && got > 0) {
+                        if (cancel_requested.load() || pause_requested.load()) {
+                            TerminateProcess(pi.hProcess, 1);
+                            break;
+                        }
+                        line_buf.append(rbuf, got);
+                        size_t nl;
+                        while ((nl = line_buf.find_first_of("\r\n")) != std::string::npos) {
+                            parse_yt_line(line_buf.substr(0, nl));
+                            line_buf.erase(0, nl + 1);
+                        }
+                    }
+                    WaitForSingleObject(pi.hProcess, 300000);
+                    DWORD wcode = 1;
+                    GetExitCodeProcess(pi.hProcess, &wcode);
+                    if (wcode == STILL_ACTIVE) {
+                        TerminateProcess(pi.hProcess, 1);
+                        wcode = 259;
+                    }
+                    exit_code = static_cast<int>(wcode);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                } else {
+                    CloseHandle(hWritePipe);
+                }
+                CloseHandle(hReadPipe);
+            }
 #endif
+            return exit_code;
+        };
+
+        auto find_output_file = [&]() -> std::filesystem::path {
+            std::filesystem::path p = task_tmp_dir / ("output." + fmt);
+            if (std::filesystem::exists(p, ec) && std::filesystem::file_size(p, ec) > 0) return p;
+            for (const auto& entry : std::filesystem::directory_iterator(task_tmp_dir, ec)) {
+                if (entry.is_regular_file() && entry.path().stem() == "output" && std::filesystem::file_size(entry.path(), ec) > 0) {
+                    return entry.path();
+                }
+            }
+            for (const auto& entry : std::filesystem::directory_iterator(task_tmp_dir, ec)) {
+                if (entry.is_regular_file() && entry.path().filename() != "yt_config.txt" &&
+                    entry.path().filename() != "yt_cookies.txt" &&
+                    !entry.path().extension().string().ends_with(".part") &&
+                    !entry.path().extension().string().ends_with(".ytdl") &&
+                    std::filesystem::file_size(entry.path(), ec) > 0) {
+                    return entry.path();
+                }
+            }
+            return {};
+        };
+
+        int yt_exit = run_ytdlp_proc(yt_args);
+        std::filesystem::path actual_output = find_output_file();
+        bool has_output = !actual_output.empty();
+
+        // Fallback retry 1: If extraction failed and cookies were used, retry without cookies
+        if ((yt_exit != 0 || !has_output) && !cancel_requested.load() && !pause_requested.load() && has_cookies) {
+            OPENIDM_LOG_WARN("Nm3u8dlAdapter", "yt-dlp failed with cookies (exit=" + std::to_string(yt_exit) +
+                             "), retrying without cookies: " + last_yt_err);
+            std::vector<std::string> no_cookie_args;
+            for (size_t i = 0; i < yt_args.size(); ++i) {
+                if (yt_args[i] == "--cookies") {
+                    ++i;
+                    continue;
+                }
+                no_cookie_args.push_back(yt_args[i]);
+            }
+            yt_tracks.clear();
+            last_yt_err.clear();
+            yt_exit = run_ytdlp_proc(no_cookie_args);
+            actual_output = find_output_file();
+            has_output = !actual_output.empty();
+        }
+
+        // Fallback retry 2: If requested format was unavailable or android client failed, retry with universal fallback best/b/18/w
+        if ((yt_exit != 0 || !has_output) && !cancel_requested.load() && !pause_requested.load()) {
+            OPENIDM_LOG_WARN("Nm3u8dlAdapter", "yt-dlp failed (exit=" + std::to_string(yt_exit) +
+                             "), retrying with android,ios,tv and universal fallback format best/b/18/w...");
+            std::vector<std::string> fallback_args = {
+                "--newline",
+                "--no-playlist",
+                "--no-warnings",
+                "-N", "8",
+                "--concurrent-fragments", "8",
+                "--retries", "3",
+                "--fragment-retries", "3",
+                "--file-access-retries", "3",
+                "--socket-timeout", "15",
+                "-f", "best/b/18/w",
+                "--merge-output-format", fmt,
+                "-o", out_tmpl
+            };
+            if (std::filesystem::exists(ffmpeg_path, ec)) {
+                fallback_args.push_back("--ffmpeg-location");
+                fallback_args.push_back(ffmpeg_path.string());
+            }
+            fallback_args.push_back("--extractor-args");
+            fallback_args.push_back("youtube:player_client=android,ios,tv;player_skip=webpage,configs,initial_data");
+            if (std::filesystem::exists(node_bin, ec)) {
+                fallback_args.push_back("--js-runtimes");
+                fallback_args.push_back("node:" + node_bin.string());
+            }
+            fallback_args.push_back(watch_url);
+
+            yt_tracks.clear();
+            last_yt_err.clear();
+            yt_exit = run_ytdlp_proc(fallback_args);
+            actual_output = find_output_file();
+            has_output = !actual_output.empty();
+        }
+
         if (std::filesystem::exists(yt_cookies_file, ec)) {
             std::ofstream cfs(yt_cookies_file, std::ios::binary | std::ios::trunc);
             cfs << std::string(512, '\0');
@@ -1923,28 +2133,6 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             return Result<std::filesystem::path>::Err("ERR_PAUSED", "YouTube download paused by user");
         }
 
-        std::filesystem::path actual_output = task_tmp_dir / ("output." + fmt);
-        if (!std::filesystem::exists(actual_output, ec) || std::filesystem::file_size(actual_output, ec) == 0) {
-            for (const auto& entry : std::filesystem::directory_iterator(task_tmp_dir, ec)) {
-                if (entry.is_regular_file() && entry.path().stem() == "output" && std::filesystem::file_size(entry.path(), ec) > 0) {
-                    actual_output = entry.path();
-                    break;
-                }
-            }
-        }
-        if (!std::filesystem::exists(actual_output, ec) || std::filesystem::file_size(actual_output, ec) == 0) {
-            for (const auto& entry : std::filesystem::directory_iterator(task_tmp_dir, ec)) {
-                if (entry.is_regular_file() && entry.path().filename() != "yt_config.txt" &&
-                    entry.path().filename() != "yt_cookies.txt" &&
-                    !entry.path().extension().string().ends_with(".part") &&
-                    !entry.path().extension().string().ends_with(".ytdl") &&
-                    std::filesystem::file_size(entry.path(), ec) > 0) {
-                    actual_output = entry.path();
-                    break;
-                }
-            }
-        }
-
         std::string detected_fmt = fmt;
         std::string ext_str = actual_output.extension().string();
         if (!ext_str.empty() && ext_str.front() == '.') ext_str = ext_str.substr(1);
@@ -1953,7 +2141,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             detected_fmt = lower_ext;
         }
 
-        bool has_output = std::filesystem::exists(actual_output, ec) && std::filesystem::file_size(actual_output, ec) > 0;
+        has_output = std::filesystem::exists(actual_output, ec) && std::filesystem::file_size(actual_output, ec) > 0;
         bool valid_container = false;
         if (has_output) {
             valid_container = VerifyContainerMagicBytes(actual_output, detected_fmt);
@@ -1968,7 +2156,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             }
         }
 
-        if (yt_exit == 0 && has_output && valid_container) {
+        if ((yt_exit == 0 || has_output) && has_output && valid_container) {
             uint64_t final_size = std::filesystem::file_size(actual_output, ec);
             task.downloaded_bytes = final_size;
             task.total_bytes = final_size;
@@ -1982,6 +2170,11 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 task.error_message = commit_res.error->message;
                 task.status_detail = task.error_message;
                 return commit_res;
+            }
+            uint64_t disk_sz = std::filesystem::file_size(*commit_res.value, ec);
+            if (!ec && disk_sz > 0) {
+                task.downloaded_bytes = disk_sz;
+                task.total_bytes = disk_sz;
             }
             task.file_name = commit_res.value->filename().string();
             task.part_path.clear();

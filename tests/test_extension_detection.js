@@ -591,7 +591,7 @@ async function runTests() {
     () => { suggestCalled10 = true; }
   );
   assert.strictEqual(res10.intercepted, true);
-  assert.strictEqual(suggestCalled10, true, "Scenario 10: Suggest called before cancel");
+  assert.strictEqual(suggestCalled10, false, "Scenario 10: Suggest must NOT be called on intercept to prevent browser shelf activation");
   assert.strictEqual(cancelCalled10, true, "Scenario 10: Browser download canceled upon desktop acceptance");
   console.log("  [Scenario 10/22] Desktop acceptance -> PASS");
 
@@ -785,9 +785,137 @@ async function runTests() {
   assert.strictEqual(resDl.intercepted, true, "Scenario 22: File download intercepted concurrently");
   console.log("  [Scenario 22/22] Concurrent media detection & file download -> PASS");
 
+  console.log("\n[15/15] Testing YouTube Cipher Quality Extraction with Sizes & Floating Overlay Attachment...");
+  // 1. Verify YouTube ciphered playerResponse extracts qualities with non-zero estimated sizes
+  let emittedYtMedia = null;
+  const mockWin = {
+    location: { href: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", hostname: "www.youtube.com" },
+    document: {
+      title: "Rick Astley - Never Gonna Give You Up (Official Music Video) - YouTube",
+      querySelector: () => ({ duration: 212 })
+    }
+  };
+  installDeepSearchHooks(mockWin, "test-nonce", (payload) => {
+    if (payload.action === "catCatchAddMedia") {
+      emittedYtMedia = payload;
+    }
+  });
+
+  const cipherPlayerResp = {
+    playabilityStatus: { status: "OK" },
+    videoDetails: {
+      videoId: "dQw4w9WgXcQ",
+      title: "Rick Astley - Never Gonna Give You Up",
+      lengthSeconds: "212"
+    },
+    streamingData: {
+      adaptiveFormats: [
+        {
+          itag: 137,
+          mimeType: "video/mp4; codecs=\"avc1.640028\"",
+          bitrate: 2800000,
+          averageBitrate: 2500000,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          qualityLabel: "1080p",
+          signatureCipher: "s=mock_sig&sp=sig&url=https%3A%2F%2Frr3.googlevideo.com%2Fvideoplayback%3Fitag%3D137"
+        },
+        {
+          itag: 136,
+          mimeType: "video/mp4; codecs=\"avc1.4d401f\"",
+          bitrate: 1500000,
+          averageBitrate: 1200000,
+          width: 1280,
+          height: 720,
+          fps: 30,
+          qualityLabel: "720p",
+          signatureCipher: "s=mock_sig&sp=sig&url=https%3A%2F%2Frr3.googlevideo.com%2Fvideoplayback%3Fitag%3D136"
+        },
+        {
+          itag: 140,
+          mimeType: "audio/mp4; codecs=\"mp4a.40.2\"",
+          bitrate: 128000,
+          averageBitrate: 128000,
+          signatureCipher: "s=mock_sig&sp=sig&url=https%3A%2F%2Frr3.googlevideo.com%2Fvideoplayback%3Fitag%3D140"
+        }
+      ]
+    }
+  };
+
+  mockWin.ytInitialPlayerResponse = cipherPlayerResp;
+  assert.ok(mockWin.__FluxCatchTestHook, "Test hook exposed on window");
+  const scanFound = mockWin.__FluxCatchTestHook.scanPageForYouTubeData();
+  assert.strictEqual(scanFound, true, "scanPageForYouTubeData successfully processed player response");
+  assert.ok(emittedYtMedia, "Dispatched catCatchAddMedia for YouTube video");
+  assert.strictEqual(emittedYtMedia.streamType, "YOUTUBE");
+  assert.strictEqual(emittedYtMedia.sourceType, "YOUTUBE_EXTRACTION");
+  assert.ok(Array.isArray(emittedYtMedia.qualities), "Qualities array present");
+  assert.strictEqual(emittedYtMedia.qualities.length, 3, "Parsed 1080p, 720p, and Audio Only qualities");
+
+  const q1080 = emittedYtMedia.qualities.find(q => q.resolution === "1080p");
+  const q720 = emittedYtMedia.qualities.find(q => q.resolution === "720p");
+  const qAudio = emittedYtMedia.qualities.find(q => q.isAudioOnly);
+
+  assert.ok(q1080, "1080p quality entry found");
+  assert.ok(q720, "720p quality entry found");
+  assert.ok(qAudio, "Audio Only quality entry found");
+
+  assert.ok(q1080.size > 0, "1080p quality has positive estimated byte size");
+  assert.ok(q720.size > 0, "720p quality has positive estimated byte size");
+  assert.ok(qAudio.size > 0, "Audio quality has positive estimated byte size");
+  assert.ok(q1080.size > q720.size, "1080p size is larger than 720p size");
+  assert.strictEqual(q1080.requiresCipherExtraction, true, "Marks cipher extraction required");
+  assert.ok(emittedYtMedia.size > 0, "Top-level candidate size is non-zero");
+  assert.ok(emittedYtMedia.extractorJson.includes("1080p"), "extractorJson includes qualities");
+  assert.ok(emittedYtMedia.cachedManifestBody.includes("1080p"), "cachedManifestBody includes descriptor JSON with qualities");
+
+  // 2. Verify scanAndAttachVideoOverlays attaches to YouTube <video> even if src is initially empty
+  let overlayClickData = null;
+  const mockVideoEl = {
+    currentSrc: "",
+    src: "",
+    mediaKeys: null,
+    dataset: {},
+    parentElement: { id: "movie_player" },
+    getBoundingClientRect: () => ({ width: 854, height: 480, top: 20, left: 20, right: 874, bottom: 500 })
+  };
+  const mockYtDoc = {
+    location: { href: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", hostname: "www.youtube.com" },
+    title: "Rick Astley - Official Video",
+    body: {
+      appendChild: (el) => { mockYtDoc._appended = el; }
+    },
+    createElement: (tag) => {
+      const el = {
+        tagName: tag.toUpperCase(),
+        style: {},
+        setAttribute: (k, v) => { el[k] = v; },
+        getAttribute: (k) => el[k],
+        addEventListener: (evt, fn) => { el["_" + evt] = fn; },
+        appendChild: (child) => { el._children = el._children || []; el._children.push(child); }
+      };
+      if (tag === "div") {
+        el.attachShadow = () => ({
+          appendChild: (c) => { el._shadowChild = c; }
+        });
+      }
+      return el;
+    },
+    querySelectorAll: (sel) => (sel === "video" ? [mockVideoEl] : [])
+  };
+
+  const attachedOverlays = scanAndAttachVideoOverlays(mockYtDoc, (meta) => { overlayClickData = meta; });
+  assert.strictEqual(attachedOverlays.length, 1, "Overlay attached to YouTube <video> with pending/empty src");
+  assert.ok(mockVideoEl.__fluxHostEl, "Host element stored on video element");
+  assert.ok(mockVideoEl.__fluxBtn, "Button element stored on video element");
+
+  console.log("  -> PASS");
+
   console.log("\n=======================================================");
-  console.log("Browser Extension Suite: 14/14 suites (22/22 edge scenarios) PASSED.");
+  console.log("Browser Extension Suite: 15/15 suites (23/23 edge scenarios) PASSED.");
   console.log("=======================================================");
+  process.exit(0);
 }
 
 runTests().catch((err) => {

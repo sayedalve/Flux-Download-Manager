@@ -771,6 +771,7 @@ void DownloadController::ScheduleLoop() {
                                      t.error_code == "ERR_CONNECTION_RESET" ||
                                      t.error_code == "ERR_NET_CONNECTION_RESET" ||
                                      t.error_code == "ERR_NET_CONNECT" ||
+                                     t.error_code == "ERR_NET_SEND" ||
                                      t.error_code == "ERR_NET_DNS" ||
                                      t.error_code == "ERR_HTTP_TIMEOUT" ||
                                      t.error_code == "ERR_HTTP_5XX_TRANSIENT" ||
@@ -1210,6 +1211,7 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 local_task.error_code = res.error->code;
                 local_task.error_message = res.error->message;
                 local_task.status_detail = "Failed: " + res.error->message;
+                OPENIDM_LOG_ERROR("Controller", "HTTP task " + task_id + " FAILED [" + local_task.error_code + "]: " + local_task.error_message + " (URL: " + local_task.url + ")");
             }
         }
     } else {
@@ -1273,6 +1275,7 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 local_task.error_code = res.error->code;
                 local_task.error_message = res.error->message;
                 local_task.status_detail = "Failed: " + res.error->message;
+                OPENIDM_LOG_ERROR("Controller", "Stream task " + task_id + " FAILED [" + local_task.error_code + "]: " + local_task.error_message + " (URL: " + local_task.url + ")");
             }
         }
     }
@@ -1949,7 +1952,8 @@ std::optional<TaskModel> DownloadController::GetTask(const std::string& task_id)
 }
 
 Result<TaskModel> DownloadController::WaitForTaskCompletion(const std::string& task_id, int timeout_ms) {
-    auto start = std::chrono::steady_clock::now();
+    auto last_progress = std::chrono::steady_clock::now();
+    uint64_t last_bytes = 0;
     while (true) {
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -1964,13 +1968,17 @@ Result<TaskModel> DownloadController::WaitForTaskCompletion(const std::string& t
                                 st == TaskState::kPaused || st == TaskState::kCanceled)) {
                 return Result<TaskModel>::Ok(it->second);
             }
+            if (it->second.downloaded_bytes > last_bytes) {
+                last_bytes = it->second.downloaded_bytes;
+                last_progress = std::chrono::steady_clock::now();
+            }
         }
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > timeout_ms) {
+            std::chrono::steady_clock::now() - last_progress).count();
+        if (timeout_ms > 0 && elapsed > timeout_ms) {
             return Result<TaskModel>::Err("ERR_TIMEOUT", "Timed out waiting for task completion");
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 

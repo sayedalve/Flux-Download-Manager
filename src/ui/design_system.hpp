@@ -114,6 +114,10 @@ struct ThemePalette {
     ColorRgba star_bright;         // Foreground celestial star point (#E2E8F0)
     ColorRgba star_mid;            // Mid-field star point (#94A3B8)
     ColorRgba star_dim;            // Deep dust star point (#38BDF8)
+    ColorRgba glass_surface;       // Translucent glass panel fill
+    ColorRgba glass_elevated;      // Translucent floating card/modal fill
+    ColorRgba glass_border;        // Fine low-contrast glass border
+    ColorRgba glass_highlight;     // Fine specular top edge highlight
 };
 
 struct LayoutMetrics {
@@ -389,6 +393,10 @@ public:
         p.star_bright      = {0xE2, 0xE8, 0xF0, 210}; // #E2E8F0 Bright Starlight
         p.star_mid         = {0x94, 0xA3, 0xB8, 145}; // #94A3B8 Mid Starlight
         p.star_dim         = {0x38, 0xBD, 0xF8, 95};  // #38BDF8 Cyan Dust Star
+        p.glass_surface    = {0x18, 0x22, 0x34, 215}; // Translucent dark glass
+        p.glass_elevated   = {0x24, 0x30, 0x44, 230}; // Elevated translucent glass
+        p.glass_border     = {0x4A, 0x55, 0x68, 140}; // Subtle glass border
+        p.glass_highlight  = {0xFF, 0xFF, 0xFF, 36};  // Subtle specular edge
         return p;
     }
 
@@ -413,6 +421,10 @@ public:
         p.status_warning   = {0xD9, 0x77, 0x06, 255};
         p.status_danger    = {0xDC, 0x26, 0x26, 255};
         p.progress_track   = {0xE2, 0xE8, 0xF0, 255};
+        p.glass_surface    = {0xFA, 0xFA, 0xFC, 225};
+        p.glass_elevated   = {0xFF, 0xFF, 0xFF, 240};
+        p.glass_border     = {0xCB, 0xD5, 0xE1, 160};
+        p.glass_highlight  = {0xFF, 0xFF, 0xFF, 120};
         return p;
     }
 
@@ -438,6 +450,10 @@ public:
         p.status_warning   = {0x9E, 0x9E, 0xA8, 255}; // #9E9EA8
         p.status_danger    = {0xFF, 0x4F, 0x57, 255}; // #FF4F57 Error Coral Red
         p.progress_track   = {0x2E, 0x2E, 0x36, 255}; // #2E2E36 Progress track
+        p.glass_surface    = {0x1C, 0x1C, 0x22, 215}; // Translucent charcoal glass
+        p.glass_elevated   = {0x26, 0x26, 0x2E, 230}; // Elevated translucent card
+        p.glass_border     = {0x40, 0x42, 0x4E, 140}; // Subtle glass border
+        p.glass_highlight  = {0xFF, 0xFF, 0xFF, 36};  // Subtle specular edge
         return p;
     }
 

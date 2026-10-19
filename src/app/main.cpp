@@ -88,6 +88,8 @@ int main(int argc, char* argv[]) {
             mode = "gui-snapshot";
         } else if (arg == "--daemon") {
             mode = "daemon";
+        } else if (arg == "--minimized") {
+            mode = "minimized";
         } else if (arg == "--ipc-socket" && i + 1 < argc) {
             ipc_socket_path = argv[++i];
         } else if (arg == "--worker-binary" && i + 1 < argc) {
@@ -104,12 +106,14 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
     std::wstring wpipe(ipc_socket_path.begin(), ipc_socket_path.end());
 
-    // 1. Single-instance check for GUI mode (mode.empty())
-    if (mode.empty()) {
+    // 1. Single-instance check for GUI mode (mode.empty() || mode == "minimized")
+    if (mode.empty() || mode == "minimized") {
         HWND existing_hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
         if (existing_hwnd) {
-            ShowWindow(existing_hwnd, SW_RESTORE);
-            SetForegroundWindow(existing_hwnd);
+            if (mode.empty()) {
+                ShowWindow(existing_hwnd, SW_RESTORE);
+                SetForegroundWindow(existing_hwnd);
+            }
             return 0; // Seamless single instance: bring existing GUI window to front and exit
         }
 
@@ -152,12 +156,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Default launch path (no CLI flags): Launch the Desktop GUI Application + IPC Server (BUG-002 Fix)
-    if (mode.empty()) {
-
-
+    // Default launch path: Launch the Desktop GUI Application + IPC Server (BUG-002 Fix)
+    if (mode.empty() || mode == "minimized") {
         openidm::ipc::IpcServer server(controller, ipc_socket_path);
         server.Start();
+        if (mode == "minimized") {
+            auto settings = controller.GetSettings();
+            settings.start_minimized = true;
+            controller.UpdateSettings(settings);
+        }
         openidm::ui::DesktopView view(controller, &server);
         int rc = view.RunApplicationLoop(false);
         server.Stop();
@@ -224,7 +231,7 @@ int main(int argc, char* argv[]) {
             controller.Shutdown();
             return 1;
         }
-        auto done = controller.WaitForTaskCompletion(added.value->task_id, 60000);
+        auto done = controller.WaitForTaskCompletion(added.value->task_id, 120000);
         controller.Shutdown();
         if (!done.ok() || done.value->state != openidm::TaskState::kCompleted) {
             std::cerr << "ERROR: Task failed: " << (done.ok() ? done.value->error_message : done.error->message) << "\n";
@@ -242,6 +249,7 @@ int main(int argc, char* argv[]) {
         HANDLE hShutdownEvent = CreateEventW(nullptr, FALSE, FALSE, L"Local\\Flux_Daemon_Shutdown_Event");
 #endif
         openidm::ipc::IpcServer server(controller, ipc_socket_path);
+        server.SetHeadlessDaemonMode(true);
         auto sres = server.Start();
         if (!sres.ok()) {
             std::cerr << "ERROR: Failed to start IPC server: " << sres.error->message << "\n";

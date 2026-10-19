@@ -42,21 +42,31 @@ Flux dynamically resolves all operational directories and worker binaries at run
 From a PowerShell terminal with Visual Studio 2022 (MSVC v143) and CMake 3.25+:
 
 ```powershell
-# Compiles flux.exe, flux-nmh.exe, provisions stream workers, runs unit/extension tests,
-# and stages portable binaries:
+# Compiles flux.exe, flux-nmh.exe, flux_unit_tests.exe, and N_m3u8DL-RE.exe:
 .\scripts\build-windows-msvc.ps1
 ```
 
-### 3.2 Assembling Standalone Portable Release Packages
+### 3.2 Compiling Minimal Static FFmpeg
+From a PowerShell terminal with MSYS2 MinGW-w64 toolchain:
+
+```powershell
+# Compiles minimal static FFmpeg 7.1 (~5.2 MB) and runs capability auditor:
+.\scripts\build-minimal-ffmpeg.ps1
+```
+
+### 3.3 Assembling Standalone Portable Release Packages
 ```powershell
 # Assembles both Full and Core portable zip archives with SHA256SUMS.txt:
 powershell -ExecutionPolicy Bypass -File scripts\package-release-zip.ps1 -Version "0.3.0" -PackageType Both
 ```
 
-### 3.3 Compiling Inno Setup 6 Installer
+### 3.4 Compiling Inno Setup 6 Installers
 ```powershell
-# Compiles dist\Flux-Setup-x64-0.3.0.exe:
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\flux.iss
+# Full Offline Installer (< 20 MB; ~19.28 MB actual):
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\flux.iss
+
+# Core-Only Standalone Installer (~2.89 MB actual):
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DCoreOnly installer\flux.iss
 ```
 
 ---

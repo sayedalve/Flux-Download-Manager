@@ -86,7 +86,7 @@ As verified in the [N_m3u8DL-RE v0.6.0 documentation](https://github.com/nilaoda
    - `--save-name` is a strictly sanitized basename (`[A-Za-z0-9._ -]+`) validated by `PathSanitizer`.
 4. `CreateProcessW` is invoked with:
    - `lpApplicationName`: Exact resolved path to `N_m3u8DL-RE.exe` (verified inside the app directory).
-   - `lpCommandLine`: `"\"C:\\Program Files\\OpenIDM\\tools\\N_m3u8DL-RE.exe\" --no-config --no-ansi-color --disable-update-check --vod-select-parts false --ui-language en-US @\"C:\\Users\\...\\AppData\\Local\\OpenIDM\\tmp\\<task_uuid>\\job.rsp\""`
+   - `lpCommandLine`: `"\"C:\\Program Files\\Flux\\tools\\win-x64\\N_m3u8DL-RE.exe\" --no-config --no-ansi-color --disable-update-check --vod-select-parts false --ui-language en-US @\"C:\\Users\\...\\AppData\\Local\\Flux\\tmp\\<task_uuid>\\job.rsp\""`
    - `dwCreationFlags`: `CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT` (assigned to the task's Job Object before `ResumeThread`).
 
 ### 4.2 Exact `job.rsp` Template for Phase 1 (Manifest Probe)
@@ -117,12 +117,12 @@ As verified in the [N_m3u8DL-RE v0.6.0 documentation](https://github.com/nilaoda
 --del-after-done true
 --auto-subtitle-fix true
 --sub-format SRT
---ffmpeg-binary-path "C:\Program Files\OpenIDM\tools\ffmpeg.exe"
+--ffmpeg-binary-path "C:\Program Files\Flux\tools\win-x64\ffmpeg.exe"
 --ffmpeg-concat-mode LOCAL_HTTP
 -sv res="1920*":codecs="avc1":for=best
 -sa lang="en":for=best
 -ss lang="en":for=all
--M format=mp4:muxer=ffmpeg:bin_path="C\:\Program Files\OpenIDM\tools\ffmpeg.exe":keep=false
+-M format=mp4:muxer=ffmpeg:bin_path="C\:\Program Files\Flux\tools\win-x64\ffmpeg.exe":keep=false
 -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 -H "Referer: https://watch.example.com/video/12345"
 -H "Cookie: session_id=secret_value"

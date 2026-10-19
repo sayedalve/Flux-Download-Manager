@@ -65,13 +65,19 @@
 | **`[50/53]`** | `TestSegmentSchedulerChunkNormalizationAndTruncationGuard` | `FR-003`, `FR-005` (Segment Restored Chunk Normalization & Truncation Guard) | `Verified by Execution` | **PASSED** |
 | **`[51/53]`** | `TestUrlUserinfoExtractionAndBasicAuthGeneration` | `FR-001` (URL Userinfo Extraction & HTTP Basic Authorization Header Generation) | `Verified by Execution` | **PASSED** |
 | **`[52/53]`** | `TestModernCoralThemeSettingsModalBoundsAndSafeDelete` | `FR-011`, `FR-026`, `NFR-011` (Coral Charcoal Theme `#FF4F57`, Modal Hit-Testing Bounds, Recycle Bin Safe Delete & Header Sorting Direction) | `Verified by Execution` | **PASSED** |
-| **`[53/55]`** | `TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload` | `FR-019`, `FR-024`, `FR-030` (YouTube Regex Speed Extraction, Scheduled Midnight-Crossing Window & BT Unchoke/Block Upload Accounting) | `Verified by Execution` | **PASSED** |
-| **`[54/55]`** | `TestFinalPhaseRemediationAndLiveMetrics` | `FR-011`, `FR-019`, `FR-026` (Toolbar Sort Stabilization, Recycle Bin vs Disk Delete, YouTube Googlevideo Routing) | `Verified by Execution` | **PASSED** |
-| **`[55/55]`** | `TestYouTubeCanonicalRoutingAndSchedulerThroughput` | `FR-003`, `FR-019`, `FR-020` (SegmentScheduler Dynamic Split-Eligibility, YouTube Watch Canonicalization & VP9/AV1 1080p Format Verification) | `Verified by Execution` | **PASSED** |
+| **`[53/61]`** | `TestYouTubeSpeedParsingMidnightCrossingAndBitTorrentUpload` | `FR-019`, `FR-024`, `FR-030` (YouTube Regex Speed Extraction, Scheduled Midnight-Crossing Window & BT Unchoke/Block Upload Accounting) | `Verified by Execution` | **PASSED** |
+| **`[54/61]`** | `TestFinalPhaseRemediationAndLiveMetrics` | `FR-011`, `FR-019`, `FR-026` (Toolbar Sort Stabilization, Recycle Bin vs Disk Delete, YouTube Googlevideo Routing) | `Verified by Execution` | **PASSED** |
+| **`[55/61]`** | `TestYouTubeCanonicalRoutingAndSchedulerThroughput` | `FR-003`, `FR-019`, `FR-020` (SegmentScheduler Dynamic Split-Eligibility, YouTube Watch Canonicalization & VP9/AV1 1080p Format Verification) | `Verified by Execution` | **PASSED** |
+| **`[56/61]`** | `TestSpeedFormattingMultiTrackProgressAndContainerVerification` | `FR-019`, `FR-020` (Multi-Track Progress Aggregation, Speed Formatting & Magic Bytes Container Check) | `Verified by Execution` | **PASSED** |
+| **`[57/61]`** | `TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile` | `FR-019`, `FR-022` (Pimpbunny Stream URL Extraction & Netscape Cookie File Construction) | `Verified by Execution` | **PASSED** |
+| **`[58/61]`** | `TestRemediationPhaseRegressionSuites` | `FR-001`–`FR-026` (Remediation Phase Regression Suites & Memory Integrity) | `Verified by Execution` | **PASSED** |
+| **`[59/61]`** | `TestAuditBehaviorImprovements` | `FR-001`, `FR-004`, `FR-020` (Audit-derived Behavior Improvements: Range Satisfaction, Stream Part Files, Crash Recovery) | `Verified by Execution` | **PASSED** |
+| **`[60/61]`** | `TestQualitySelectionSizeAndColumnDocking` | `FR-011`, `FR-019` (Video Quality Selection, Size Reporting & Table Column Right-Docking Anchors) | `Verified by Execution` | **PASSED** |
+| **`[61/61]`** | `TestNewDownloadDialogSubmissionAndTaskCreation` | `FR-011`, `FR-019`, `FR-025` (New Download Dialog Submission, Quality Options Propagation & State Reset) | `Verified by Execution` | **PASSED** |
 
 ---
 
-### 1.2 Browser Extension & Media Detection Test Suites (`node tests/test_extension_detection.js` — `12 / 12 PASSED`)
+### 1.2 Browser Extension & Media Detection Test Suites (`node tests/test_extension_detection.js` — `14 / 14 PASSED (22 / 22 Edge Scenarios)`)
 
 | Suite # | Suite Description (`tests/test_extension_detection.js`) | Mapped Requirements & Bug IDs | Verification Category | Result |
 | :--- | :--- | :--- | :--- | :--- |
@@ -86,7 +92,9 @@
 | **`[9/12]`** | Link-Click Interception & Alt-Key Bypass Behavior | `FR-008`, `FR-009`, `BUG-031` | `Verified by Execution` | **PASSED** |
 | **`[10/12]`** | Webpage Watch URL Guard & Background Runtime Message Routing | `FR-014`, `FR-021`, `BUG-033`, `BUG-034` | `Verified by Execution` | **PASSED** |
 | **`[11/12]`** | Cosmic Dark Extension Styling & Offscreen Overlay Visibility | `FR-011`, `FR-015` | `Verified by Execution` | **PASSED** |
-| **`[12/12]`** | Quality Size Estimation & Canonical YouTube Watch Routing | `FR-014`, `FR-019`, `FR-020` | `Verified by Execution` | **PASSED** |
+| **`[12/14]`** | Quality Size Estimation & Canonical YouTube Watch Routing | `FR-014`, `FR-019`, `FR-020` | `Verified by Execution` | **PASSED** |
+| **`[13/14]`** | Chromium Download Interception & Pre-Download New Dialog Offer Protocol | `FR-008`, `FR-009`, `FR-012`, `BUG-031` | `Verified by Execution` | **PASSED** |
+| **`[14/14]`** | Edge Scenarios (Duplicate Events, Navigation Bypass, Alt-Key, Frames, SW Restart & Concurrency) | `FR-008`, `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
 
 ---
 

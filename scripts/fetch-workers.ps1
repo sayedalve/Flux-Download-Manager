@@ -13,8 +13,12 @@ param(
     [string]$TargetDir = "",
     [string]$Nm3u8dlUrl = "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.3.0-beta/N_m3u8DL-RE_v0.3.0-beta_win-x64_20241203.zip",
     [string]$Nm3u8dlExpectedSha256 = "E5C93A8DE0C58C50922C17A8A3BABD7D2193FB43B1A7FACD0B18DE9274EF8061",
-    [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-    [string]$FfmpegExpectedSha256 = "", # Rolling latest build; leave empty to verify PE64 & compute hash, or pass pinned hash
+    [string]$FfmpegUrl = "",
+    [string]$FfmpegExpectedSha256 = "",
+    [switch]$UseUpstreamFfmpeg = $false,
+    [switch]$PreferNativeWorker = $true,
+    [ValidateSet("standard", "min")]
+    [string]$YtDlpFlavor = "standard",
     [string]$YtDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
     [string]$YtDlpExpectedSha256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
     [switch]$Force = $false,
@@ -93,34 +97,87 @@ Write-Host "=================================================================" -
 Write-Host "Target Directory: $TargetDir" -ForegroundColor White
 
 try {
-    # 1. N_m3u8DL-RE (MIT License - nilaoda/N_m3u8DL-RE)
+    # 1. N_m3u8DL-RE (Native C++ Stream Worker / Upstream Fallback)
     $NmExe = Join-Path $TargetDir "N_m3u8DL-RE.exe"
-    $needNmDownload = $Force -or (-not (Verify-ExistingBinary $NmExe $Nm3u8dlExpectedSha256))
+    $stagedFromNative = $false
 
-    if ($needNmDownload) {
-        Write-Host "`n[1/3] Downloading upstream nilaoda/N_m3u8DL-RE win-x64..." -ForegroundColor Cyan
-        $NmZip = Join-Path $TmpDir "nm3u8dl.zip"
-        Invoke-WebRequest -Uri $Nm3u8dlUrl -OutFile $NmZip -UseBasicParsing
-        Expand-Archive -Path $NmZip -DestinationPath (Join-Path $TmpDir "nm") -Force
-        $FoundNm = Get-ChildItem -Path (Join-Path $TmpDir "nm") -Filter "N_m3u8DL-RE.exe" -Recurse | Select-Object -First 1
-        if (-not $FoundNm) { throw "N_m3u8DL-RE.exe not found in downloaded archive: $NmZip" }
-        Assert-Pe64Executable $FoundNm.FullName
-        Assert-Sha256Checksum $FoundNm.FullName $Nm3u8dlExpectedSha256
-        Copy-Item -Force $FoundNm.FullName $NmExe
-        Write-Host "  [OK] Staged and verified N_m3u8DL-RE.exe" -ForegroundColor Green
-    } else {
-        Write-Host "`n[1/3] N_m3u8DL-RE.exe already present and verified in $TargetDir" -ForegroundColor Green
+    if ($PreferNativeWorker) {
+        $nativeCandidates = @(
+            (Join-Path $RepoRoot "build\win-x64\Release\N_m3u8DL-RE.exe"),
+            (Join-Path $RepoRoot "build\win-x64\N_m3u8DL-RE.exe"),
+            (Join-Path $RepoRoot "build\Release\N_m3u8DL-RE.exe"),
+            (Join-Path $RepoRoot "dist\tools\win-x64\N_m3u8DL-RE.exe")
+        )
+        foreach ($cand in $nativeCandidates) {
+            if (Test-Path $cand) {
+                $candSize = (Get-Item $cand).Length
+                if ($candSize -lt 5MB) {
+                    Assert-Pe64Executable $cand
+                    Copy-Item -Force $cand $NmExe
+                    $stagedFromNative = $true
+                    $candSizeKb = [Math]::Round($candSize / 1KB, 1)
+                    Write-Host "`n[1/3] Staged native C++ stream worker: $cand ($candSizeKb KB)" -ForegroundColor Green
+                    break
+                }
+            }
+        }
+    }
+
+    if (-not $stagedFromNative) {
+        $needNmDownload = $Force -or (-not (Verify-ExistingBinary $NmExe $Nm3u8dlExpectedSha256))
+        if ($needNmDownload) {
+            Write-Host "`n[1/3] Downloading upstream nilaoda/N_m3u8DL-RE win-x64..." -ForegroundColor Cyan
+            $NmZip = Join-Path $TmpDir "nm3u8dl.zip"
+            Invoke-WebRequest -Uri $Nm3u8dlUrl -OutFile $NmZip -UseBasicParsing
+            Expand-Archive -Path $NmZip -DestinationPath (Join-Path $TmpDir "nm") -Force
+            $FoundNm = Get-ChildItem -Path (Join-Path $TmpDir "nm") -Filter "N_m3u8DL-RE.exe" -Recurse | Select-Object -First 1
+            if (-not $FoundNm) { throw "N_m3u8DL-RE.exe not found in downloaded archive: $NmZip" }
+            Assert-Pe64Executable $FoundNm.FullName
+            Assert-Sha256Checksum $FoundNm.FullName $Nm3u8dlExpectedSha256
+            Copy-Item -Force $FoundNm.FullName $NmExe
+            Write-Host "  [OK] Staged and verified upstream N_m3u8DL-RE.exe" -ForegroundColor Green
+        } else {
+            Write-Host "`n[1/3] N_m3u8DL-RE.exe already present and verified in $TargetDir" -ForegroundColor Green
+        }
     }
     Assert-Pe64Executable $NmExe
+    $nmSize = (Get-Item $NmExe).Length
+    $nmSizeMb = [Math]::Round($nmSize / 1MB, 2)
+    Write-Host "  N_m3u8DL-RE binary footprint: $nmSize bytes ($nmSizeMb MiB)" -ForegroundColor White
 
-    # 2. FFmpeg (GPL-3.0 / LGPL-2.1)
+    # 2. FFmpeg (LGPL-2.1+ Minimal / GPL-3.0 Upstream)
     $FfExe = Join-Path $TargetDir "ffmpeg.exe"
+
+    if (-not $FfmpegUrl) {
+        if ($UseUpstreamFfmpeg) {
+            $FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+        } else {
+            # Pinned minimal FFmpeg 7.1 Windows x64 build
+            $FfmpegUrl = "https://github.com/BrisklyDev/brisk-stream-tools/releases/download/v1.0.0/ffmpeg-minimal-7.1-win-x64.zip"
+            if (-not $FfmpegExpectedSha256) {
+                $FfmpegExpectedSha256 = "6AFE28D701DE356612A0BD11894D5E9BF6DAF2039B2A4FBC4A144EC12A0E1A04"
+            }
+        }
+    }
+
     $needFfDownload = $Force -or (-not (Verify-ExistingBinary $FfExe $FfmpegExpectedSha256))
 
     if ($needFfDownload) {
-        Write-Host "`n[2/3] Downloading upstream FFmpeg win-x64..." -ForegroundColor Cyan
+        $flavorDesc = if ($UseUpstreamFfmpeg) { "upstream monolithic" } else { "minimal LGPL" }
+        Write-Host "`n[2/3] Downloading $flavorDesc FFmpeg win-x64 ($FfmpegUrl)..." -ForegroundColor Cyan
         $FfZip = Join-Path $TmpDir "ffmpeg.zip"
-        Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfZip -UseBasicParsing
+        try {
+            Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfZip -UseBasicParsing
+        } catch {
+            if (-not $UseUpstreamFfmpeg) {
+                Write-Host "  [WARN] Minimal release artifact not reachable; falling back to upstream release..." -ForegroundColor Yellow
+                $FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+                $FfmpegExpectedSha256 = ""
+                Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfZip -UseBasicParsing
+            } else {
+                throw
+            }
+        }
         Expand-Archive -Path $FfZip -DestinationPath (Join-Path $TmpDir "ff") -Force
         $FoundFf = Get-ChildItem -Path (Join-Path $TmpDir "ff") -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
         if (-not $FoundFf) { throw "ffmpeg.exe not found in downloaded archive: $FfZip" }
@@ -142,16 +199,35 @@ try {
     }
     Assert-Pe64Executable $FfExe
 
-    # 3. yt-dlp (Optional auxiliary metadata worker - Unlicense)
+    $ffSize = (Get-Item $FfExe).Length
+    $ffSizeMiB = [Math]::Round($ffSize / 1MB, 2)
+    Write-Host "  FFmpeg binary footprint: $ffSize bytes ($ffSizeMiB MiB)" -ForegroundColor White
+
+    # Run capability auditor if available
+    $VerifyScript = Join-Path $ScriptDir "verify-ffmpeg-capabilities.ps1"
+    if (Test-Path $VerifyScript) {
+        Write-Host "  Auditing FFmpeg capabilities for Flux stream pipeline..." -ForegroundColor Cyan
+        & $VerifyScript -FfmpegPath $FfExe -FailOnMissing:$false
+    }
+
+    # 3. yt-dlp (Auxiliary metadata & site extractor worker)
     $YtExe = Join-Path $TargetDir "yt-dlp.exe"
+
+    if ($YtDlpFlavor -eq "min" -and $YtDlpUrl -like "*yt-dlp.exe*") {
+        $YtDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_min.exe"
+        if (-not $Force) { $YtDlpExpectedSha256 = "" }
+    }
+
     $needYtDownload = $Force -or (-not (Verify-ExistingBinary $YtExe $YtDlpExpectedSha256))
 
     if ($needYtDownload) {
-        Write-Host "`n[3/3] Downloading upstream yt-dlp win-x64..." -ForegroundColor Cyan
+        Write-Host "`n[3/3] Downloading upstream yt-dlp ($YtDlpFlavor flavor)..." -ForegroundColor Cyan
         $YtDl = Join-Path $TmpDir "yt-dlp.exe"
         Invoke-WebRequest -Uri $YtDlpUrl -OutFile $YtDl -UseBasicParsing
         Assert-Pe64Executable $YtDl
-        Assert-Sha256Checksum $YtDl $YtDlpExpectedSha256
+        if ($YtDlpExpectedSha256) {
+            Assert-Sha256Checksum $YtDl $YtDlpExpectedSha256
+        }
         Copy-Item -Force $YtDl $YtExe
         Write-Host "  [OK] Staged and verified yt-dlp.exe" -ForegroundColor Green
     } else {
@@ -159,14 +235,11 @@ try {
     }
     Assert-Pe64Executable $YtExe
 
-    # Also keep tools/ root synchronized for local development convenience
-    $RootTools = Join-Path $RepoRoot "tools"
-    New-Item -ItemType Directory -Force -Path $RootTools | Out-Null
-    Copy-Item -Force $NmExe (Join-Path $RootTools "N_m3u8DL-RE.exe")
-    Copy-Item -Force $FfExe (Join-Path $RootTools "ffmpeg.exe")
-    Copy-Item -Force $YtExe (Join-Path $RootTools "yt-dlp.exe")
+    $ytSize = (Get-Item $YtExe).Length
+    $ytSizeMb = [Math]::Round($ytSize / 1MB, 2)
+    Write-Host "  yt-dlp binary footprint: $ytSize bytes ($ytSizeMb MiB)" -ForegroundColor White
 
-    # If dist\tools exists, keep it in sync for distribution packaging
+    # If dist\tools\win-x64 exists, keep it in sync for distribution packaging
     $DistToolsX64 = Join-Path $RepoRoot "dist\tools\win-x64"
     if (Test-Path (Join-Path $RepoRoot "dist")) {
         New-Item -ItemType Directory -Force -Path $DistToolsX64 | Out-Null

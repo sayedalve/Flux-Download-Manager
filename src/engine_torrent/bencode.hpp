@@ -119,10 +119,11 @@ private:
                 return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Standalone minus sign in bencode integer");
             }
 
+            std::string tmp_num(num_str);
             char* end_ptr = nullptr;
             errno = 0;
-            int64_t val = std::strtoll(std::string(num_str).c_str(), &end_ptr, 10);
-            if (errno == ERANGE || end_ptr != std::string(num_str).c_str() + num_str.size()) {
+            int64_t val = std::strtoll(tmp_num.c_str(), &end_ptr, 10);
+            if (errno == ERANGE || end_ptr != tmp_num.c_str() + tmp_num.size()) {
                 return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Integer overflow or invalid digits in bencode");
             }
             return Result<BencodeValue>::Ok(BencodeValue(val));
@@ -169,10 +170,11 @@ private:
             if (len_str.size() > 1 && len_str[0] == '0') {
                 return Result<BencodeValue>::Err("ERR_BENCODE_STR", "Leading zero in string length");
             }
+            std::string tmp_len(len_str);
             char* end_ptr = nullptr;
             errno = 0;
-            unsigned long long u_len = std::strtoull(std::string(len_str).c_str(), &end_ptr, 10);
-            if (errno == ERANGE || end_ptr != std::string(len_str).c_str() + len_str.size()) {
+            unsigned long long u_len = std::strtoull(tmp_len.c_str(), &end_ptr, 10);
+            if (errno == ERANGE || end_ptr != tmp_len.c_str() + tmp_len.size()) {
                 return Result<BencodeValue>::Err("ERR_BENCODE_STR", "Invalid string length in bencode");
             }
             pos = colon + 1;

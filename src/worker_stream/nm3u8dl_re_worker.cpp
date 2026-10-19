@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,7 @@
 #include <map>
 #include <mutex>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -54,8 +56,13 @@ struct WorkerOptions {
     std::filesystem::path save_dir{"."};
     std::string save_name{"output"};
     uint32_t thread_count{8};
+    uint32_t download_retry_count{5};
+    uint32_t http_request_timeout_ms{30000};
+    uint64_t max_speed_kbps{0};
     bool skip_download{false};
     bool write_meta_json{true};
+    bool del_after_done{true};
+    std::string sub_format{"SRT"};
     std::string ffmpeg_binary_path{"ffmpeg"};
     std::string select_video{"best"};
     std::string select_audio{"all"};
@@ -67,6 +74,9 @@ struct WorkerOptions {
     std::string custom_hls_method;
     std::string custom_hls_key;
     std::map<std::string, std::string> headers;
+    uint32_t live_record_limit_sec{0};
+    bool live_real_time_merge{false};
+    bool live_keep_segments{false};
 };
 
 struct SegmentItem {
@@ -200,6 +210,17 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
         }
     }
 
+    for (const auto& tok : expanded) {
+        if (tok == "--version" || tok == "-v") {
+            std::cout << "N_m3u8DL-RE (Flux Stream Worker v0.3.0 / N_m3u8DL-RE v0.3.0-beta CLI contract)\n";
+            std::exit(0);
+        }
+        if (tok == "--help" || tok == "-h") {
+            std::cout << "N_m3u8DL-RE v0.3.0 --auto-select --ffmpeg-binary-path --skip-download --write-meta-json\n";
+            std::exit(0);
+        }
+    }
+
     WorkerOptions opts;
     for (size_t i = 0; i < expanded.size();) {
         const std::string& tok = expanded[i];
@@ -212,15 +233,77 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
         } else if (tok == "--write-meta-json") {
             opts.write_meta_json = true;
             ++i;
-        } else if (tok == "--vod-select-parts" || tok == "--check-segments-count" ||
-                   tok == "--del-after-done" || tok == "--auto-subtitle-fix") {
+        } else if (tok == "--del-after-done") {
+            if (i + 1 < expanded.size() && (ToLower(expanded[i + 1]) == "true" || ToLower(expanded[i + 1]) == "false")) {
+                opts.del_after_done = (ToLower(expanded[i + 1]) == "true");
+                i += 2;
+            } else {
+                opts.del_after_done = true;
+                ++i;
+            }
+        } else if (tok == "--vod-select-parts" || tok == "--check-segments-count" || tok == "--auto-subtitle-fix") {
             if (i + 1 < expanded.size() && (ToLower(expanded[i + 1]) == "true" || ToLower(expanded[i + 1]) == "false")) {
                 i += 2;
             } else {
                 ++i;
             }
-        } else if (tok == "--ui-language" || tok == "--sub-format" || tok == "--download-retry-count" ||
-                   tok == "--http-request-timeout" || tok == "-R" || tok == "--max-speed") {
+        } else if (tok == "--download-retry-count" && i + 1 < expanded.size()) {
+            try { opts.download_retry_count = static_cast<uint32_t>(std::stoul(expanded[i + 1])); } catch (...) {}
+            i += 2;
+        } else if (tok == "--http-request-timeout" && i + 1 < expanded.size()) {
+            try {
+                uint32_t sec = static_cast<uint32_t>(std::stoul(expanded[i + 1]));
+                opts.http_request_timeout_ms = sec > 0 ? (sec * 1000) : 30000;
+            } catch (...) {}
+            i += 2;
+        } else if ((tok == "-R" || tok == "--max-speed") && i + 1 < expanded.size()) {
+            std::string val = expanded[i + 1];
+            uint64_t multiplier = 1;
+            if (!val.empty() && (val.back() == 'k' || val.back() == 'K')) {
+                multiplier = 1000;
+                val.pop_back();
+            } else if (!val.empty() && (val.back() == 'm' || val.back() == 'M')) {
+                multiplier = 1000000;
+                val.pop_back();
+            }
+            try { opts.max_speed_kbps = (std::stoull(val) * multiplier) / 1000; } catch (...) {}
+            i += 2;
+        } else if (tok == "--sub-format" && i + 1 < expanded.size()) {
+            opts.sub_format = ToUpper(expanded[i + 1]);
+            i += 2;
+        } else if (tok == "--live-record-limit" && i + 1 < expanded.size()) {
+            std::string val = expanded[i + 1];
+            uint32_t limit_sec = 0;
+            std::vector<std::string> parts;
+            std::stringstream pss(val);
+            std::string pitem;
+            while (std::getline(pss, pitem, ':')) {
+                parts.push_back(pitem);
+            }
+            if (parts.size() == 3) {
+                try {
+                    limit_sec = std::stoul(parts[0]) * 3600 + std::stoul(parts[1]) * 60 + std::stoul(parts[2]);
+                } catch (...) {}
+            } else if (parts.size() == 2) {
+                try {
+                    limit_sec = std::stoul(parts[0]) * 60 + std::stoul(parts[1]);
+                } catch (...) {}
+            } else if (!parts.empty()) {
+                try {
+                    limit_sec = std::stoul(parts[0]);
+                } catch (...) {}
+            }
+            opts.live_record_limit_sec = limit_sec;
+            i += 2;
+        } else if (tok == "--live-real-time-merge") {
+            opts.live_real_time_merge = true;
+            ++i;
+        } else if (tok == "--live-keep-segments") {
+            opts.live_keep_segments = true;
+            ++i;
+        } else if (tok == "--live-pipe-mux") {
+            ++i;
+        } else if (tok == "--ui-language") {
             i += 2;
         } else if (tok == "--base-url" && i + 1 < expanded.size()) {
             opts.base_url = expanded[i + 1];
@@ -263,6 +346,31 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
             else if (mux_s.find("format=webm") != std::string::npos) opts.mux_format = "webm";
             else if (mux_s.find("format=ts") != std::string::npos) opts.mux_format = "ts";
             else opts.mux_format = "mp4";
+
+            auto bp_pos = mux_s.find("bin_path=");
+            if (bp_pos != std::string::npos) {
+                std::string bp = mux_s.substr(bp_pos + 9);
+                if (!bp.empty() && bp.front() == '"') {
+                    bp.erase(0, 1);
+                    auto qend = bp.find('"');
+                    if (qend != std::string::npos) bp = bp.substr(0, qend);
+                } else {
+                    auto kpos = bp.find(":keep=");
+                    if (kpos != std::string::npos) bp = bp.substr(0, kpos);
+                }
+                std::string unescaped;
+                for (size_t k = 0; k < bp.size(); ++k) {
+                    if (bp[k] == '\\' && k + 1 < bp.size() && (bp[k + 1] == ':' || bp[k + 1] == '\\')) {
+                        unescaped.push_back(bp[++k]);
+                    } else {
+                        unescaped.push_back(bp[k]);
+                    }
+                }
+                std::error_code ec;
+                if (!unescaped.empty() && std::filesystem::exists(unescaped, ec)) {
+                    opts.ffmpeg_binary_path = unescaped;
+                }
+            }
             i += 2;
         } else if (tok == "--drop-video") {
             opts.drop_video = true;
@@ -287,6 +395,13 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
             ++i;
         }
     }
+
+    const char* env_lb1 = std::getenv("FLUX_ALLOW_LOOPBACK");
+    const char* env_lb2 = std::getenv("OPENIDM_ALLOW_LOOPBACK");
+    if ((env_lb1 && std::string(env_lb1) == "1") || (env_lb2 && std::string(env_lb2) == "1")) {
+        opts.allow_loopback = true;
+    }
+
     return opts;
 }
 
@@ -319,7 +434,8 @@ bool FetchBytes(
     std::vector<uint8_t>& out_bytes,
     std::string& out_resolved_url,
     bool allow_loopback = false,
-    bool is_manifest_input = false) {
+    bool is_manifest_input = false,
+    uint32_t timeout_ms = 30000) {
 
     std::error_code ec;
     std::filesystem::path p(url_or_path);
@@ -338,7 +454,7 @@ bool FetchBytes(
         headers,
         std::nullopt,
         std::nullopt,
-        20000,
+        timeout_ms,
         allow_loopback,
         cancel,
         [&](const openidm::brisk::HttpResponseMeta& meta) -> bool {
@@ -350,6 +466,30 @@ bool FetchBytes(
             return true;
         });
     return res.ok();
+}
+
+bool FetchBytesWithRetry(
+    const std::string& url_or_path,
+    const std::map<std::string, std::string>& headers,
+    std::vector<uint8_t>& out_bytes,
+    std::string& out_resolved_url,
+    uint32_t retry_count = 3,
+    uint32_t timeout_ms = 30000,
+    bool allow_loopback = false,
+    bool is_manifest_input = false,
+    const std::atomic<bool>* cancel_flag = nullptr) {
+
+    for (uint32_t attempt = 0; attempt <= retry_count; ++attempt) {
+        if (cancel_flag && cancel_flag->load()) return false;
+        if (attempt > 0) {
+            uint32_t backoff = std::min<uint32_t>(3000, 200 * (1 << (attempt - 1)));
+            std::this_thread::sleep_for(std::chrono::milliseconds(backoff));
+        }
+        if (FetchBytes(url_or_path, headers, out_bytes, out_resolved_url, allow_loopback, is_manifest_input, timeout_ms)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::map<std::string, std::string> ParseM3u8Attributes(const std::string& attr_line) {
@@ -876,7 +1016,7 @@ bool ParseYouTubeJsonIntoMeta(const openidm::json::Value& root, const WorkerOpti
 bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
     std::vector<uint8_t> raw_bytes;
     std::string resolved_url;
-    if (!FetchBytes(opts.input, opts.headers, raw_bytes, resolved_url, opts.allow_loopback, true)) {
+    if (!FetchBytesWithRetry(opts.input, opts.headers, raw_bytes, resolved_url, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, true)) {
         return false;
     }
     std::string base_url = opts.base_url.empty() ? resolved_url : opts.base_url;
@@ -913,7 +1053,7 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                     std::string sub_url = ResolveUrl(base_url, uri);
                     std::vector<uint8_t> sub_bytes;
                     std::string sub_res_url;
-                    if (!FetchBytes(sub_url, opts.headers, sub_bytes, sub_res_url, opts.allow_loopback, false)) continue;
+                    if (!FetchBytesWithRetry(sub_url, opts.headers, sub_bytes, sub_res_url, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false)) continue;
                     TrackItem tr;
                     tr.id = (mtype == "AUDIO") ? ("aud_" + std::to_string(aud_idx++)) : ("sub_" + std::to_string(sub_idx++));
                     tr.media_type = (mtype == "AUDIO") ? "AUDIO" : "SUBTITLES";
@@ -933,7 +1073,7 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                         std::string var_url = ResolveUrl(base_url, lines[i + 1]);
                         std::vector<uint8_t> var_bytes;
                         std::string var_res_url;
-                        if (!FetchBytes(var_url, opts.headers, var_bytes, var_res_url, opts.allow_loopback, false)) continue;
+                        if (!FetchBytesWithRetry(var_url, opts.headers, var_bytes, var_res_url, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false)) continue;
                         TrackItem tr;
                         tr.id = "vid_" + std::to_string(vid_idx++);
                         tr.media_type = "VIDEO";
@@ -1233,36 +1373,212 @@ std::vector<TrackItem> SelectTracks(const std::vector<TrackItem>& tracks, const 
         return a.bandwidth > b.bandwidth;
     });
 
-    if (fl == "all" || fl.find("for=all") != std::string::npos) {
+    if (fl == "all") {
         return candidates;
     }
-    if (fl.find("worst") != std::string::npos) {
+    if (fl == "worst") {
         return {candidates.back()};
     }
-    if (fl != "best" && !fl.empty()) {
-        // Match requested resolution height (e.g. "720p", "1080p", "360p", "1280x720") or track id/name
-        int target_h = 0;
-        std::smatch hm;
-        static const std::regex kHeightRe(R"((?:^|x|res=\"?\d*x?)(\d{3,4})p?(?:$|\"|\b))");
-        if (std::regex_search(fl, hm, kHeightRe)) {
-            target_h = std::stoi(hm[1].str());
+    if (fl == "best" || fl.empty()) {
+        return {candidates.front()};
+    }
+
+    // Helper to parse width and height from a resolution string (e.g. "1920x1080", "256x144", "1080p")
+    auto parse_wh = [](std::string_view r, int& out_w, int& out_h) {
+        out_w = 0;
+        out_h = 0;
+        auto x_pos = r.find('x');
+        if (x_pos == std::string_view::npos) x_pos = r.find('X');
+        if (x_pos != std::string_view::npos) {
+            try {
+                out_w = std::stoi(std::string(r.substr(0, x_pos)));
+                out_h = std::stoi(std::string(r.substr(x_pos + 1)));
+            } catch (...) {}
+        } else {
+            std::smatch m;
+            std::string s(r);
+            static const std::regex kRe(R"((\d{3,4})p?)");
+            if (std::regex_search(s, m, kRe)) {
+                try { out_h = std::stoi(m[1].str()); } catch (...) {}
+            }
         }
+    };
+
+    // Helper to extract height from a filter or selector (e.g. "144", "144p", "res=144*", "res='144p*'", "height=144")
+    auto extract_target_height = [](std::string_view f) -> int {
+        std::string s(f);
+        std::smatch m;
+        static const std::regex kRe(R"((?:height\s*=\s*|res\s*=\s*["']?|^)(\d{3,4})p?)");
+        if (std::regex_search(s, m, kRe)) {
+            try { return std::stoi(m[1].str()); } catch (...) {}
+        }
+        return 0;
+    };
+
+    int req_target_h = extract_target_height(fl);
+
+    // Check if composite filter with colons or key-values (e.g. res=..., codecs=..., lang=..., for=...)
+    bool is_composite = (fl.find(':') != std::string::npos || fl.find('=') != std::string::npos);
+    if (!is_composite) {
         for (const auto& c : candidates) {
             std::string rl = ToLower(c.resolution);
             std::string idl = ToLower(c.id);
-            if (rl == fl || idl == fl) {
+            std::string langl = ToLower(c.language);
+            std::string namel = ToLower(c.name);
+            if (rl == fl || idl == fl || langl == fl || namel == fl) {
                 return {c};
             }
-            if (target_h > 0) {
-                std::string suffix = "x" + std::to_string(target_h);
-                std::string p_str = std::to_string(target_h) + "p";
-                if (rl.ends_with(suffix) || rl == p_str || rl.find(p_str) != std::string::npos || idl.find(p_str) != std::string::npos) {
+            if (req_target_h > 0) {
+                int cw = 0, ch = 0;
+                parse_wh(c.resolution, cw, ch);
+                std::string suffix = "x" + std::to_string(req_target_h);
+                std::string p_str = std::to_string(req_target_h) + "p";
+                if (ch == req_target_h || rl.ends_with(suffix) || rl == p_str ||
+                    rl.find(p_str) != std::string::npos || idl.find(p_str) != std::string::npos ||
+                    namel.find(p_str) != std::string::npos) {
                     return {c};
                 }
             }
         }
+        // If a specific target height was requested and no exact match found, find closest resolution
+        if (req_target_h > 0) {
+            const TrackItem* best_closest = &candidates.front();
+            int min_diff = 999999;
+            for (const auto& c : candidates) {
+                int cw = 0, ch = 0;
+                parse_wh(c.resolution, cw, ch);
+                if (ch > 0) {
+                    int diff = std::abs(ch - req_target_h);
+                    if (diff < min_diff) {
+                        min_diff = diff;
+                        best_closest = &c;
+                    }
+                }
+            }
+            return {*best_closest};
+        }
+        return {candidates.front()};
     }
-    return {candidates.front()};
+
+    // Parse composite filter key-value pairs
+    std::map<std::string, std::string> criteria;
+    std::string for_target = (media_type == "AUDIO") ? "best" : "best";
+    std::stringstream fss(fl);
+    std::string item;
+    while (std::getline(fss, item, ':')) {
+        item = Trim(item);
+        if (item.empty()) continue;
+        auto eq = item.find('=');
+        if (eq != std::string::npos) {
+            std::string k = Trim(item.substr(0, eq));
+            std::string v = Trim(item.substr(eq + 1));
+            if (v.size() >= 2 && ((v.front() == '"' && v.back() == '"') || (v.front() == '\'' && v.back() == '\''))) {
+                v = v.substr(1, v.size() - 2);
+            }
+            if (k == "for") {
+                for_target = v;
+            } else {
+                criteria[k] = v;
+            }
+        }
+    }
+
+    std::vector<TrackItem> matched;
+    int crit_target_h = 0;
+    if (criteria.count("res")) {
+        crit_target_h = extract_target_height(criteria["res"]);
+    } else if (criteria.count("height")) {
+        try { crit_target_h = std::stoi(criteria["height"]); } catch (...) {}
+    }
+
+    for (const auto& c : candidates) {
+        bool pass = true;
+        std::string rl = ToLower(c.resolution);
+        std::string idl = ToLower(c.id);
+        std::string langl = ToLower(c.language);
+        std::string codl = ToLower(c.codecs);
+        std::string namel = ToLower(c.name);
+        int cw = 0, ch = 0;
+        parse_wh(c.resolution, cw, ch);
+
+        for (const auto& [k, v] : criteria) {
+            if (k == "res") {
+                std::string target_res = v;
+                bool res_matched = false;
+                if (crit_target_h > 0 && ch == crit_target_h) {
+                    res_matched = true;
+                } else if (!target_res.empty() && target_res.back() == '*') {
+                    std::string prefix = target_res.substr(0, target_res.size() - 1);
+                    if (rl.rfind(prefix, 0) == 0 || rl.find(prefix) != std::string::npos ||
+                        namel.find(prefix) != std::string::npos) {
+                        res_matched = true;
+                    }
+                } else if (rl == target_res || rl.find(target_res) != std::string::npos) {
+                    res_matched = true;
+                }
+                if (!res_matched) pass = false;
+            } else if (k == "height") {
+                try {
+                    int h_val = std::stoi(v);
+                    if (ch != h_val) pass = false;
+                } catch (...) {
+                    pass = false;
+                }
+            } else if (k == "codecs") {
+                std::string target_c = v;
+                if (!target_c.empty() && target_c.back() == '*') {
+                    std::string prefix = target_c.substr(0, target_c.size() - 1);
+                    if (codl.rfind(prefix, 0) != 0 && codl.find(prefix) == std::string::npos) pass = false;
+                } else if (codl.find(target_c) == std::string::npos) {
+                    pass = false;
+                }
+            } else if (k == "lang" || k == "language") {
+                if (langl != v && langl.find(v) == std::string::npos && v.find(langl) == std::string::npos) {
+                    pass = false;
+                }
+            } else if (k == "id") {
+                if (idl != v && idl.rfind(v, 0) != 0) pass = false;
+            } else if (k == "name" || k == "group") {
+                if (namel.find(v) == std::string::npos) pass = false;
+            } else if (k == "bw") {
+                try {
+                    uint64_t target_bw = std::stoull(v.front() == '>' || v.front() == '<' ? v.substr(1) : v);
+                    if (v.rfind(">=", 0) == 0 && c.bandwidth < target_bw) pass = false;
+                    else if (v.front() == '<' && c.bandwidth > target_bw) pass = false;
+                } catch (...) {}
+            }
+            if (!pass) break;
+        }
+        if (pass) matched.push_back(c);
+    }
+
+    if (matched.empty()) {
+        if (crit_target_h > 0) {
+            const TrackItem* best_closest = &candidates.front();
+            int min_diff = 999999;
+            for (const auto& c : candidates) {
+                int cw = 0, ch = 0;
+                parse_wh(c.resolution, cw, ch);
+                if (ch > 0) {
+                    int diff = std::abs(ch - crit_target_h);
+                    if (diff < min_diff) {
+                        min_diff = diff;
+                        best_closest = &c;
+                    }
+                }
+            }
+            return {*best_closest};
+        }
+        matched = candidates;
+    }
+
+    if (for_target == "all") {
+        return matched;
+    }
+    if (for_target == "worst") {
+        return {matched.back()};
+    }
+    return {matched.front()};
 }
 
 std::vector<uint8_t> HexToBytes(std::string_view hex_sv) {
@@ -1345,7 +1661,7 @@ bool DownloadAndAssembleTrack(
         if (!std::filesystem::exists(init_file, ec)) {
             std::vector<uint8_t> ibytes;
             std::string rurl;
-            if (!FetchBytes(track.init_url, opts.headers, ibytes, rurl)) return false;
+            if (!FetchBytesWithRetry(track.init_url, opts.headers, ibytes, rurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback)) return false;
             std::ofstream ofs(init_file, std::ios::binary);
             ofs.write(reinterpret_cast<const char*>(ibytes.data()), static_cast<std::streamsize>(ibytes.size()));
         }
@@ -1384,7 +1700,7 @@ bool DownloadAndAssembleTrack(
                 } else {
                     std::vector<uint8_t> raw;
                     std::string rurl;
-                    if (!FetchBytes(seg.url, opts.headers, raw, rurl)) {
+                    if (!FetchBytesWithRetry(seg.url, opts.headers, raw, rurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false, &failed)) {
                         failed.store(true);
                         break;
                     }
@@ -1401,7 +1717,7 @@ bool DownloadAndAssembleTrack(
                             }
                             if (key_bytes.empty()) {
                                 std::string krurl;
-                                if (!FetchBytes(seg.key_uri, opts.headers, key_bytes, krurl) || key_bytes.size() != 16) {
+                                if (!FetchBytesWithRetry(seg.key_uri, opts.headers, key_bytes, krurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false, &failed) || key_bytes.size() != 16) {
                                     failed.store(true);
                                     break;
                                 }
@@ -1438,6 +1754,20 @@ bool DownloadAndAssembleTrack(
                     ofs.write(reinterpret_cast<const char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
                     ofs.close();
                     seg_sz = raw.size();
+                }
+
+                if (opts.max_speed_kbps > 0) {
+                    uint64_t max_bytes_per_sec = (opts.max_speed_kbps * 1000) / 8;
+                    if (max_bytes_per_sec > 0) {
+                        auto now_throttle = std::chrono::steady_clock::now();
+                        double elapsed = std::chrono::duration<double>(now_throttle - start_time).count();
+                        if (elapsed > 0.05) {
+                            double current_rate = static_cast<double>(downloaded_bytes.load()) / elapsed;
+                            if (current_rate > static_cast<double>(max_bytes_per_sec)) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                            }
+                        }
+                    }
                 }
 
                 {
@@ -1479,6 +1809,228 @@ bool DownloadAndAssembleTrack(
         std::ifstream ifs(init_file, std::ios::binary);
         out_f << ifs.rdbuf();
     }
+
+    if (track.media_type == "SUBTITLES") {
+        bool first_sub = true;
+        for (const auto& sf : seg_files) {
+            std::ifstream ifs(sf, std::ios::binary);
+            if (first_sub) {
+                out_f << ifs.rdbuf();
+                first_sub = false;
+            } else {
+                std::string sub_ln;
+                bool skipped_hdr = false;
+                while (std::getline(ifs, sub_ln)) {
+                    std::string t = Trim(sub_ln);
+                    if (!skipped_hdr && (t == "WEBVTT" || t.rfind("WEBVTT", 0) == 0 || t.rfind("X-TIMESTAMP-MAP", 0) == 0)) {
+                        continue;
+                    }
+                    skipped_hdr = true;
+                    out_f << sub_ln << "\n";
+                }
+            }
+        }
+    } else {
+        for (const auto& sf : seg_files) {
+            std::ifstream ifs(sf, std::ios::binary);
+            out_f << ifs.rdbuf();
+        }
+    }
+    out_f.close();
+    return true;
+}
+
+static std::atomic<bool> g_live_stop_requested{false};
+
+#ifdef _WIN32
+static BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType) {
+    if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT || dwCtrlType == CTRL_CLOSE_EVENT) {
+        g_live_stop_requested.store(true);
+        return TRUE;
+    }
+    return FALSE;
+}
+#else
+static void SignalHandler(int) {
+    g_live_stop_requested.store(true);
+}
+#endif
+
+bool DownloadAndAssembleLiveTrack(
+    TrackItem& track,
+    const WorkerOptions& opts,
+    const std::filesystem::path& track_dir,
+    std::filesystem::path& out_assembled) {
+
+    std::error_code ec;
+    std::filesystem::create_directories(track_dir, ec);
+
+#ifdef _WIN32
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+#else
+    struct sigaction sa{};
+    sa.sa_handler = SignalHandler;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+#endif
+
+    std::filesystem::path init_file;
+    if (!track.init_url.empty()) {
+        init_file = track_dir / "_init.mp4";
+        if (!std::filesystem::exists(init_file, ec)) {
+            std::vector<uint8_t> ibytes;
+            std::string rurl;
+            if (FetchBytesWithRetry(track.init_url, opts.headers, ibytes, rurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback)) {
+                std::ofstream ofs(init_file, std::ios::binary);
+                ofs.write(reinterpret_cast<const char*>(ibytes.data()), static_cast<std::streamsize>(ibytes.size()));
+            }
+        }
+    }
+
+    std::set<std::string> seen_urls;
+    std::vector<std::filesystem::path> seg_files;
+    double total_recorded_sec = 0.0;
+    std::map<std::string, std::vector<uint8_t>> key_cache;
+    size_t seg_file_counter = 0;
+
+    std::cout << "[Live] Recording dynamic stream: " << track.id << " ("
+              << (track.resolution.empty() ? track.language : track.resolution) << ")\n" << std::flush;
+
+    while (!g_live_stop_requested.load()) {
+        for (const auto& seg : track.segments) {
+            if (seen_urls.count(seg.url)) continue;
+            seen_urls.insert(seg.url);
+
+            std::string ext = (track.media_type == "SUBTITLES") ? ".vtt" : ".ts";
+            char name_buf[32];
+            std::snprintf(name_buf, sizeof(name_buf), "live_seg_%05zu%s", seg_file_counter++, ext.c_str());
+            std::filesystem::path seg_path = track_dir / name_buf;
+
+            std::vector<uint8_t> raw;
+            std::string rurl;
+            if (!FetchBytesWithRetry(seg.url, opts.headers, raw, rurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false, &g_live_stop_requested)) {
+                continue;
+            }
+
+            if (seg.encrypted && seg.method == "AES_128") {
+                std::vector<uint8_t> key_bytes;
+                if (!opts.custom_hls_key.empty()) {
+                    key_bytes = HexToBytes(opts.custom_hls_key);
+                } else {
+                    if (key_cache.count(seg.key_uri)) {
+                        key_bytes = key_cache[seg.key_uri];
+                    } else {
+                        std::string krurl;
+                        if (FetchBytesWithRetry(seg.key_uri, opts.headers, key_bytes, krurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false, &g_live_stop_requested) && key_bytes.size() == 16) {
+                            key_cache[seg.key_uri] = key_bytes;
+                        }
+                    }
+                }
+                if (key_bytes.size() == 16) {
+                    std::vector<uint8_t> iv_bytes(16, 0);
+                    if (!seg.iv_hex.empty()) {
+                        auto parsed_iv = HexToBytes(seg.iv_hex);
+                        if (parsed_iv.size() >= 16) {
+                            std::memcpy(iv_bytes.data(), parsed_iv.data() + (parsed_iv.size() - 16), 16);
+                        } else if (!parsed_iv.empty()) {
+                            std::memcpy(iv_bytes.data() + (16 - parsed_iv.size()), parsed_iv.data(), parsed_iv.size());
+                        }
+                    } else {
+                        uint64_t seq = seg.index;
+                        for (int b = 15; b >= 8; --b) {
+                            iv_bytes[b] = static_cast<uint8_t>(seq & 0xFF);
+                            seq >>= 8;
+                        }
+                    }
+                    std::vector<uint8_t> decrypted;
+                    if (DecryptAes128Cbc(raw, key_bytes, iv_bytes, decrypted)) {
+                        raw = std::move(decrypted);
+                    }
+                }
+            }
+
+            std::ofstream ofs(seg_path, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+            ofs.close();
+
+            seg_files.push_back(seg_path);
+            total_recorded_sec += seg.duration;
+
+            std::cout << "[Live] Recorded " << std::fixed << std::setprecision(1) << total_recorded_sec
+                      << "s (" << seg_files.size() << " segments)\n" << std::flush;
+
+            if (opts.live_record_limit_sec > 0 && total_recorded_sec >= static_cast<double>(opts.live_record_limit_sec)) {
+                break;
+            }
+        }
+
+        if (opts.live_record_limit_sec > 0 && total_recorded_sec >= static_cast<double>(opts.live_record_limit_sec)) {
+            break;
+        }
+
+        if (track.playlist_url.empty() || g_live_stop_requested.load()) {
+            break;
+        }
+
+        // Poll interval: sleep up to 1.5s checking cancellation every 100ms
+        for (int p = 0; p < 15; ++p) {
+            if (g_live_stop_requested.load()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (g_live_stop_requested.load()) break;
+
+        // Re-fetch playlist for newly arrived sliding window segments
+        std::vector<uint8_t> pl_bytes;
+        std::string pl_res_url;
+        if (!FetchBytesWithRetry(track.playlist_url, opts.headers, pl_bytes, pl_res_url, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false, &g_live_stop_requested)) {
+            continue;
+        }
+        std::string pl_text(reinterpret_cast<const char*>(pl_bytes.data()), pl_bytes.size());
+        bool still_live = true;
+        TrackItem refreshed_track;
+        refreshed_track.id = track.id;
+        refreshed_track.media_type = track.media_type;
+        refreshed_track.playlist_url = track.playlist_url;
+        ParseHlsMediaPlaylist(pl_text, track.playlist_url, refreshed_track, still_live);
+        track.segments = std::move(refreshed_track.segments);
+
+        if (!still_live) {
+            // #EXT-X-ENDLIST was reached; process any final segments then break
+            for (const auto& seg : track.segments) {
+                if (seen_urls.count(seg.url)) continue;
+                seen_urls.insert(seg.url);
+
+                std::string ext = (track.media_type == "SUBTITLES") ? ".vtt" : ".ts";
+                char name_buf[32];
+                std::snprintf(name_buf, sizeof(name_buf), "live_seg_%05zu%s", seg_file_counter++, ext.c_str());
+                std::filesystem::path seg_path = track_dir / name_buf;
+
+                std::vector<uint8_t> raw;
+                std::string rurl;
+                if (FetchBytesWithRetry(seg.url, opts.headers, raw, rurl, opts.download_retry_count, opts.http_request_timeout_ms, opts.allow_loopback, false, &g_live_stop_requested)) {
+                    std::ofstream ofs(seg_path, std::ios::binary);
+                    ofs.write(reinterpret_cast<const char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+                    ofs.close();
+                    seg_files.push_back(seg_path);
+                    total_recorded_sec += seg.duration;
+                }
+            }
+            break;
+        }
+    }
+
+    if (seg_files.empty()) return false;
+
+    std::string assembled_ext = (track.media_type == "SUBTITLES") ? ".vtt" : ".mp4";
+    out_assembled = track_dir / ("assembled_" + track.id + assembled_ext);
+    std::ofstream out_f(out_assembled, std::ios::binary);
+    if (!out_f) return false;
+
+    if (!init_file.empty() && std::filesystem::exists(init_file, ec)) {
+        std::ifstream ifs(init_file, std::ios::binary);
+        out_f << ifs.rdbuf();
+    }
+
     for (const auto& sf : seg_files) {
         std::ifstream ifs(sf, std::ios::binary);
         out_f << ifs.rdbuf();
@@ -1616,10 +2168,16 @@ int main(int argc, char* argv[]) {
     }
 
     std::vector<std::pair<TrackItem, std::filesystem::path>> assembled_inputs;
-    for (const auto& tr : chosen) {
+    for (auto tr : chosen) {
         std::filesystem::path tdir = opts.tmp_dir / ("track_" + tr.id);
         std::filesystem::path assembled_path;
-        if (!DownloadAndAssembleTrack(tr, opts, tdir, assembled_path)) {
+        bool ok = false;
+        if (meta.is_live || opts.live_record_limit_sec > 0) {
+            ok = DownloadAndAssembleLiveTrack(tr, opts, tdir, assembled_path);
+        } else {
+            ok = DownloadAndAssembleTrack(tr, opts, tdir, assembled_path);
+        }
+        if (!ok) {
             std::cerr << "ERROR: Failed to download segments for track " << tr.id << "\n";
             return 4;
         }
@@ -1640,18 +2198,47 @@ int main(int argc, char* argv[]) {
         ff_args.push_back(std::to_string(idx));
     }
 
+    size_t a_idx = 0;
+    size_t s_idx = 0;
+    bool has_subs = false;
+    for (const auto& [tr, _] : assembled_inputs) {
+        if (tr.media_type == "AUDIO") {
+            if (!tr.language.empty() && tr.language != "und") {
+                ff_args.push_back("-metadata:s:a:" + std::to_string(a_idx));
+                ff_args.push_back("language=" + tr.language);
+            }
+            if (!tr.name.empty()) {
+                ff_args.push_back("-metadata:s:a:" + std::to_string(a_idx));
+                ff_args.push_back("title=" + tr.name);
+            }
+            ++a_idx;
+        } else if (tr.media_type == "SUBTITLES") {
+            has_subs = true;
+            if (!tr.language.empty() && tr.language != "und") {
+                ff_args.push_back("-metadata:s:s:" + std::to_string(s_idx));
+                ff_args.push_back("language=" + tr.language);
+            }
+            if (!tr.name.empty()) {
+                ff_args.push_back("-metadata:s:s:" + std::to_string(s_idx));
+                ff_args.push_back("title=" + tr.name);
+            }
+            ++s_idx;
+        }
+    }
+
     if (opts.mux_format == "m4a") {
         ff_args.insert(ff_args.end(), {"-c:a", "copy", "-vn"});
     } else if (opts.mux_format == "mp3") {
         ff_args.insert(ff_args.end(), {"-c:a", "libmp3lame", "-q:a", "2", "-vn"});
     } else if (opts.mux_format == "mp4") {
-        bool has_subs = false;
-        for (const auto& [tr, _] : assembled_inputs) {
-            if (tr.media_type == "SUBTITLES") has_subs = true;
-        }
         ff_args.insert(ff_args.end(), {"-c:v", "copy", "-c:a", "copy"});
         if (has_subs) {
             ff_args.insert(ff_args.end(), {"-c:s", "mov_text"});
+        }
+    } else if (opts.mux_format == "mkv") {
+        ff_args.insert(ff_args.end(), {"-c:v", "copy", "-c:a", "copy"});
+        if (has_subs) {
+            ff_args.insert(ff_args.end(), {"-c:s", (opts.sub_format == "VTT" ? "webvtt" : "subrip")});
         }
     } else {
         ff_args.insert(ff_args.end(), {"-c", "copy"});
@@ -1662,6 +2249,13 @@ int main(int argc, char* argv[]) {
     if (mux_rc != 0) {
         std::cerr << "ERROR: FFmpeg muxing failed with exit code " << mux_rc << "\n";
         return 5;
+    }
+
+    if (opts.del_after_done && !opts.live_keep_segments) {
+        for (const auto& [tr, apath] : assembled_inputs) {
+            std::filesystem::remove(apath, ec);
+            std::filesystem::remove_all(opts.tmp_dir / ("track_" + tr.id), ec);
+        }
     }
 
     std::cout << "Done: " << out_file.string() << "\n" << std::flush;

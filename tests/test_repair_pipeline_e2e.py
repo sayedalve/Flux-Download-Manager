@@ -39,6 +39,10 @@ os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
 
 def find_binary(name: str) -> Path:
+    if name == "ffmpeg":
+        backup = ROOT / "tools" / "win-x64" / f"ffmpeg{EXE_EXT}.pre-minimal-backup"
+        if backup.is_file():
+            return backup
     candidates = [
         ROOT / "dist" / f"{name}{EXE_EXT}",
         ROOT / "build" / "win-x64" / "Release" / f"{name}{EXE_EXT}",

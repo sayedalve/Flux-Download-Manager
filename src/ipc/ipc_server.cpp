@@ -585,11 +585,12 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
-        // For browser intercepted downloads, when a GUI window is attached (m_offer_cb != nullptr),
+        // For browser intercepted downloads in GUI mode (desktop app running or starting up with a UI):
         // the task must be queued without starting network transfer until the user confirms
         // choices in the Win32 New Download dialog.
-        // In headless daemon / automated test mode (m_offer_cb == nullptr), there is no window to prompt, so start directly.
-        bool auto_start = (m_offer_cb != nullptr) ? false : true;
+        // In headless daemon / automated test mode (m_is_headless == true), there is no GUI window
+        // to prompt the user, so start automatically.
+        bool auto_start = m_is_headless.load();
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             json::Value res = json::Object{};
@@ -598,8 +599,13 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             res["reason"] = add_res.error->code + ": " + add_res.error->message;
             return MakeRpcResult(id, std::move(res)).dump();
         }
-        if (m_offer_cb) {
-            m_offer_cb(*add_res.value);
+        if (!m_is_headless.load()) {
+            std::lock_guard<std::mutex> lock(m_offer_mutex);
+            if (m_offer_cb) {
+                m_offer_cb(*add_res.value);
+            } else {
+                m_pending_offers.push_back(*add_res.value);
+            }
         }
         json::Value res = json::Object{};
         res["accepted"] = true;
@@ -1130,20 +1136,37 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
+        if (params.contains("size")) {
+            t.total_bytes = static_cast<uint64_t>(params["size"].as_int64(0));
+        } else if (params.contains("fileSize")) {
+            t.total_bytes = static_cast<uint64_t>(params["fileSize"].as_int64(0));
+        } else if (params.contains("contentLength")) {
+            t.total_bytes = static_cast<uint64_t>(params["contentLength"].as_int64(0));
+        }
+
         t.stream_options.video_filter = params["videoFilter"].as_string("best");
-        t.stream_options.audio_filter = params["audioFilter"].as_string("all");
+        t.stream_options.audio_filter = params["audioFilter"].as_string("best");
         t.stream_options.subtitle_filter = params["subtitleFilter"].as_string("all");
         t.stream_options.output_format = out_fmt;
         t.stream_options.custom_hls_key_hex = params["customKeyHex"].as_string("");
         t.stream_options.cached_manifest_body = cached_body;
 
-        bool auto_start = m_controller.GetSettings().auto_start_downloads;
+        // For browser intercepted stream downloads in GUI mode:
+        // the task must be queued without starting network transfer until the user confirms
+        // choices in the Win32 New Download dialog.
+        // In headless daemon / automated test mode, start automatically.
+        bool auto_start = m_is_headless.load() ? params["autoStart"].as_bool(true) : false;
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             return MakeRpcError(id, -32602, add_res.error->code + ": " + add_res.error->message).dump();
         }
-        if (m_offer_cb) {
-            m_offer_cb(*add_res.value);
+        if (!m_is_headless.load()) {
+            std::lock_guard<std::mutex> lock(m_offer_mutex);
+            if (m_offer_cb) {
+                m_offer_cb(*add_res.value);
+            } else {
+                m_pending_offers.push_back(*add_res.value);
+            }
         }
         json::Value res = json::Object{};
         res["accepted"] = true;

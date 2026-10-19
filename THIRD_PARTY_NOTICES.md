@@ -46,11 +46,20 @@ SOFTWARE.
 
 ---
 
-## 4. FFmpeg
+## 4. FFmpeg (Minimal Stream Muxer)
 - **Website:** https://ffmpeg.org/
-- **License:** GNU General Public License v3.0 / LGPL-2.1
+- **Pinned Version:** 7.1 (`n7.1`, Commit: `04706f3`, Tarball: `ffmpeg-7.1.tar.xz`)
+- **License:** GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later) / GNU Lesser General Public License v3.0 (LGPL-3.0) via `--enable-version3`
 - **Copyright:** (C) 2000-2026 the FFmpeg developers
-- **Usage:** Out-of-process audio/video container muxing and remuxing.
+- **Usage:** Out-of-process audio/video container remuxing, bitstream filtering (`aac_adtstoasc`, `h264_mp4toannexb`), subtitle conversion (`mov_text`, `subrip`), and duration probing.
+- **Architectural Isolation:** Executed strictly as an isolated worker child process via Win32 `CreateProcessW` inside a restricted Windows Job Object. There is zero static or dynamic linking against `avcodec`, `avformat`, or `avutil` within `flux.exe` / `openidm.exe`.
+- **Minimal Configuration & Licensing Implications:**
+  - Configured without `--enable-gpl` and without `--enable-nonfree`, ensuring the binary operates strictly under the terms of the LGPL v2.1+ / v3.0.
+  - Network protocols are completely disabled (`--disable-network`) so FFmpeg has zero socket creation or network attack surface; all network I/O is handled securely in-process by Flux's WinHTTP engine.
+  - Heavy video encoders (`libx264`, `libx265`, `libvpx`, `svtav1`) are omitted, favoring fast stream copying (`-c copy`) without quality loss or excessive CPU utilization.
+- **Source Code Offer:**
+  - FFmpeg source code is available at https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz (SHA-256: `40973D44970DBC83EF302B0609F2E74982BE2D85916DD2EE7472D30678A7ABE6`).
+  - Full reproducible build instructions and configuration flags are provided in this repository in `scripts/ffmpeg-minimal.config`, `scripts/build-minimal-ffmpeg.ps1`, and `scripts/build-minimal-ffmpeg.sh`.
 
 ---
 

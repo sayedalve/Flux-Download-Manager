@@ -808,17 +808,24 @@ async function onDownloadCreatedHandler(
     return { intercepted: false, reason: "EXTENSION_OR_BLOB_URL", mechanism };
   }
 
-  // 4. In Chromium/Brave/Edge, onDeterminingFilename always fires to determine filename and hold progress.
-  // Defer the offer to onDeterminingFilename without prematurely calling pause(), preventing stuck paused downloads.
-  if (phase === "created" && typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
-    return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
+  // 4. In Chromium/Brave/Edge, onCreated fires first. Pause the download immediately so no bytes transfer
+  // before filename determination and Flux eligibility check!
+  if (phase === "created") {
+    if (G.enableCapture && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
+      try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+    }
+    if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
+      return { intercepted: false, reason: "DEFERRED_TO_FILENAME_DETERMINATION" };
+    }
   }
 
   // 5. Deduplication & State Synchronization: if an offer for this exact downloadId is currently in flight, await it!
   if (downloadStateMachine.inFlightOffers.has(rec.downloadId)) {
     try {
       const existingRes = await downloadStateMachine.inFlightOffers.get(rec.downloadId);
-      invokeSuggest();
+      if (!existingRes || !existingRes.intercepted) {
+        invokeSuggest();
+      }
       return existingRes;
     } catch (_) {
       invokeSuggest();
@@ -826,9 +833,8 @@ async function onDownloadCreatedHandler(
     }
   }
 
-  // If already accepted and handed off:
+  // If already accepted and handed off to Flux:
   if (rec.state === "HANDED_OFF" || rec.state === "ACCEPTED") {
-    invokeSuggest();
     return { intercepted: true, reason: "ALREADY_ACCEPTED", taskId: rec.taskId };
   }
   if (rec.state === "DECLINED" || rec.state === "FALLBACK" || rec.state === "IGNORED") {
@@ -945,11 +951,11 @@ async function onDownloadCreatedHandler(
   }
 
   // 8. In Chromium/Brave, pause the browser download shelf so no bytes transfer while dialog is showing!
+  // CRITICAL: We hold the onDeterminingFilename suggestCallback until the user makes a choice or fallback occurs.
+  // Calling suggest() prematurely allows Chromium to start writing bytes to disk in the browser's download shelf.
   if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
     try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
   }
-  // Invoke suggest so Chromium resolves filename determination and stays paused
-  invokeSuggest();
 
   // 9. Execute Offer Flow with safe handoff & browser fallback
   rec.state = "PROMPT_REQUESTED";
@@ -1064,130 +1070,66 @@ async function onDownloadCreatedHandler(
         G.handledDownloadUrls.set(normalizeCorrelationUrl(targetUrl), Date.now());
         G.handledDownloadUrls.set(normalizeCorrelationUrl(rec.originalUrl), Date.now());
 
-        // Monitor user decision in Flux New Download dialog
-        const pollStart = Date.now();
-        const maxWaitMs = 60000;
-        let userDecision = "TIMEOUT";
-
-        if (customTransport) {
-          // Unit tests / mocks pass decision immediately
-          userDecision = "ACCEPTED";
-        } else {
-          while (Date.now() - pollStart < maxWaitMs) {
-            await new Promise(r => setTimeout(r, 350));
-            try {
-              const decRes = await sendNativeRpc("download.getDecision", {
-                taskId: rec.taskId,
-                correlationId: rec.correlationId
-              });
-              if (decRes && decRes.decision) {
-                if (decRes.decision === "ACCEPTED") {
-                  userDecision = "ACCEPTED";
-                  break;
-                } else if (decRes.decision === "CANCELLED") {
-                  userDecision = "CANCELLED";
-                  break;
-                }
-              }
-            } catch (_) {
-              userDecision = "DESKTOP_DISCONNECTED";
-              break;
-            }
-          }
-        }
-
-        logPipelineStage(rec.correlationId, "USER_DECISION", {
+        // Hand off to Flux: cancel browser download cleanly and immediately now that Flux has accepted the task
+        // and is presenting the Win32 New Download dialog on the desktop.
+        rec.state = "HANDED_OFF";
+        logPipelineStage(rec.correlationId, "BROWSER_HANDOFF", {
           downloadId: rec.downloadId,
           taskId: rec.taskId,
-          decision: userDecision
+          status: "HANDED_OFF_TO_FLUX"
+        });
+        logPipelineStage(rec.correlationId, "HANDED_OFF", {
+          downloadId: rec.downloadId,
+          taskId: rec.taskId,
+          status: "HANDED_OFF_TO_FLUX"
         });
 
-        if (userDecision === "ACCEPTED") {
-          rec.state = "USER_ACCEPTED";
-          logPipelineStage(rec.correlationId, "USER_ACCEPTED", {
-            downloadId: rec.downloadId,
-            taskId: rec.taskId
-          });
+        // Cancel browser download shelf cleanly.
+        // CRITICAL: We NEVER call suggestCallback() when handed off to Flux, because calling suggest()
+        // signals Chromium to write bytes to disk in the native download shelf!
+        rec.suggestCallback = null;
 
-          // Hand off to Flux: cancel browser download cleanly
-          rec.state = "HANDED_OFF";
-          logPipelineStage(rec.correlationId, "BROWSER_HANDOFF", {
-            downloadId: rec.downloadId,
-            taskId: rec.taskId,
-            status: "HANDED_OFF_TO_FLUX"
-          });
-          logPipelineStage(rec.correlationId, "HANDED_OFF", {
-            downloadId: rec.downloadId,
-            taskId: rec.taskId,
-            status: "HANDED_OFF_TO_FLUX"
-          });
-
-          if (cancelBrowserDownloadFn) {
-            try {
-              await cancelBrowserDownloadFn(downloadItem.id);
-            } catch (cancelErr) {
-              logPipelineStage(rec.correlationId, "BROWSER_CANCEL_ERROR_RECOVERED", {
-                downloadId: downloadItem.id,
-                error: cancelErr ? cancelErr.message : String(cancelErr)
-              });
-            }
-          } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-            const tryCancel = (retries = 3) => {
-              chrome.downloads.cancel(downloadItem.id, () => {
-                if (chrome.runtime && chrome.runtime.lastError) {
-                  if (retries > 0) {
-                    setTimeout(() => tryCancel(retries - 1), 50);
-                    return;
-                  }
-                }
-                if (chrome.downloads.erase) {
-                  chrome.downloads.erase({ id: downloadItem.id }, () => {
+        if (cancelBrowserDownloadFn) {
+          try {
+            await cancelBrowserDownloadFn(downloadItem.id);
+          } catch (cancelErr) {
+            logPipelineStage(rec.correlationId, "BROWSER_CANCEL_ERROR_RECOVERED", {
+              downloadId: downloadItem.id,
+              error: cancelErr ? cancelErr.message : String(cancelErr)
+            });
+          }
+        } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
+          const tryCancel = (retries = 3) => {
+            chrome.downloads.cancel(downloadItem.id, () => {
+              const err = (chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError.message : "";
+              if (err) {
+                if (typeof chrome.downloads.resume === "function") {
+                  chrome.downloads.resume(downloadItem.id, () => {
                     if (chrome.runtime) void chrome.runtime.lastError;
+                    chrome.downloads.cancel(downloadItem.id, () => {
+                      if (chrome.runtime) void chrome.runtime.lastError;
+                      if (typeof chrome.downloads.erase === "function") {
+                        chrome.downloads.erase({ id: downloadItem.id }, () => {
+                          if (chrome.runtime) void chrome.runtime.lastError;
+                        });
+                      }
+                    });
                   });
+                } else if (retries > 0) {
+                  setTimeout(() => tryCancel(retries - 1), 60);
+                  return;
                 }
-              });
-            };
-            tryCancel();
-          }
-
-          return { intercepted: true, taskId: rec.taskId, fileName: result.fileName || cleanFilename, correlationId: rec.correlationId };
-        } else if (userDecision === "CANCELLED") {
-          // User clicked Cancel in Flux dialog: restore browser download safely
-          rec.state = "USER_CANCELLED";
-          logPipelineStage(rec.correlationId, "USER_CANCELLED", {
-            downloadId: rec.downloadId,
-            taskId: rec.taskId,
-            reason: "CANCELLED_IN_FLUX_DIALOG"
-          });
-          rec.state = "BROWSER_FALLBACK";
-          logPipelineStage(rec.correlationId, "FALLBACK", {
-            downloadId: rec.downloadId,
-            reason: "USER_CANCELLED_DECLINED_FLUX"
-          });
-          logPipelineStage(rec.correlationId, "BROWSER_FALLBACK", {
-            downloadId: rec.downloadId,
-            reason: "USER_CANCELLED_DECLINED_FLUX"
-          });
-          if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
-            try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
-          }
-          return { intercepted: false, fallbackToBrowser: true, userCancelled: true, correlationId: rec.correlationId };
-        } else {
-          // Timeout or desktop disconnected: fallback to browser
-          rec.state = "BROWSER_FALLBACK";
-          logPipelineStage(rec.correlationId, "FALLBACK", {
-            downloadId: rec.downloadId,
-            reason: userDecision
-          });
-          logPipelineStage(rec.correlationId, "BROWSER_FALLBACK", {
-            downloadId: rec.downloadId,
-            reason: userDecision
-          });
-          if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
-            try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
-          }
-          return { intercepted: false, fallbackToBrowser: true, reason: userDecision, correlationId: rec.correlationId };
+              } else if (typeof chrome.downloads.erase === "function") {
+                chrome.downloads.erase({ id: downloadItem.id }, () => {
+                  if (chrome.runtime) void chrome.runtime.lastError;
+                });
+              }
+            });
+          };
+          tryCancel();
         }
+
+        return { intercepted: true, taskId: rec.taskId, fileName: result.fileName || cleanFilename, correlationId: rec.correlationId };
       }
 
       // Flux declined: allow native browser download to continue seamlessly
@@ -1208,6 +1150,7 @@ async function onDownloadCreatedHandler(
         mechanism: rec.mechanism,
         stage: "STAGE_DESKTOP_ACCEPTANCE"
       });
+      invokeSuggest({ filename: cleanFilename });
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }
@@ -1233,6 +1176,7 @@ async function onDownloadCreatedHandler(
         mechanism: rec.mechanism,
         stage: "STAGE_FAILURE_RECOVERY"
       });
+      invokeSuggest({ filename: cleanFilename });
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }
@@ -1386,6 +1330,8 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     } catch (_) {}
   }
 
+  const isYtTarget = (sourceType === SourceType.YOUTUBE_EXTRACTION || sourceType === "YOUTUBE" || effectiveStreamType === "YOUTUBE" || isYouTubeWatchOrShortsUrl(targetManifestUrl));
+
   const params = {
     candidateId: candidate.candidateId || "",
     correlationId,
@@ -1411,7 +1357,7 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     audioFilter: options.videoOnly ? "none" : (options.audioFilter || (chosenQuality && chosenQuality.isAudioOnly ? "best" : "all")),
     subtitleFilter: options.subtitleFilter || "all",
     customKeyHex: options.customKeyHex || "",
-    cachedManifestBody: validCachedManifest || (sourceType === SourceType.YOUTUBE_EXTRACTION ? extractorJson : "") || "",
+    cachedManifestBody: validCachedManifest || (isYtTarget ? extractorJson : "") || "",
     headers
   };
 
@@ -1603,15 +1549,53 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
       }
 
       if (currentList.length === 0 && isYouTubeWatchOrShortsUrl(targetTabUrl) && !isSiteDisabled(targetTabUrl) && !(G.playerErrors && G.playerErrors.has(resolvedTabId))) {
+        const vidId = extractYouTubeVideoId(targetTabUrl);
+        const defaultQualities = [
+          { id: "1080p_mp4", res: "1080p", label: "1080p Full HD (MP4)", bw: 4200000, h: 1080, ext: "mp4" },
+          { id: "720p_mp4", res: "720p", label: "720p HD (MP4)", bw: 2200000, h: 720, ext: "mp4" },
+          { id: "480p_mp4", res: "480p", label: "480p SD (MP4)", bw: 1100000, h: 480, ext: "mp4" },
+          { id: "360p_mp4", res: "360p", label: "360p Standard (MP4)", bw: 650000, h: 360, ext: "mp4" },
+          { id: "audio-only", res: "Audio", label: "Audio Only (128 Kbps)", bw: 128000, h: 0, ext: "m4a", isAudioOnly: true }
+        ].map(p => ({
+          id: p.id,
+          label: p.label,
+          resolution: p.res,
+          width: p.h > 0 ? Math.round((p.h * 16) / 9) : 0,
+          height: p.h,
+          bandwidth: p.bw,
+          size: Math.round((p.bw / 8) * 180),
+          sizeEstimated: true,
+          isAudioOnly: Boolean(p.isAudioOnly),
+          ext: p.ext,
+          requiresCipherExtraction: true,
+          videoFilter: p.h > 0 ? `${p.h}p` : "audio"
+        }));
+
+        const ytDesc = {
+          fluxType: "YOUTUBE_STREAM",
+          sourceType: SourceType.YOUTUBE_EXTRACTION,
+          videoId: vidId,
+          title: "YouTube Video",
+          watchUrl: targetTabUrl,
+          resolution: "1080p",
+          requiresCipherExtraction: true,
+          size: defaultQualities[0].size,
+          qualities: defaultQualities
+        };
+
         addOrDeduplicateMediaCandidate(resolvedTabId, {
           url: targetTabUrl,
           ext: "mp4",
           streamType: "YOUTUBE",
           sourceType: SourceType.YOUTUBE_EXTRACTION,
-          videoId: extractYouTubeVideoId(targetTabUrl),
+          videoId: vidId,
           requiresCipherExtraction: true,
           pageTitle: "YouTube Video",
           tabUrl: targetTabUrl,
+          size: defaultQualities[0].size,
+          qualities: defaultQualities,
+          extractorJson: JSON.stringify(ytDesc),
+          cachedManifestBody: JSON.stringify(ytDesc),
           headers: { Referer: targetTabUrl }
         });
         updateTabBadge(resolvedTabId);

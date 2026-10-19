@@ -48,7 +48,7 @@ jobs:
         run: |
           $rawRef = "${{ github.ref_name }}"
           $refType = "${{ github.ref_type }}"
-          Write-Host "Triggered by $refType: '$rawRef'"
+          Write-Host "Triggered by ${refType} - '$rawRef'"
 
           # 1. Resolve canonical version
           if ($refType -eq "tag" -or $rawRef -match '^v?\d+\.\d+\.\d+') {

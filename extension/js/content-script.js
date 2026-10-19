@@ -422,12 +422,12 @@ function handleLinkClick(ev) {
       return;
     }
 
-    // Prevent duplicate click recordings from rapid multi-clicks
+    // Prevent duplicate click recordings from rapid multi-clicks (brief debounce)
     if (anchor.__fluxClickInFlight) {
       return;
     }
     anchor.__fluxClickInFlight = true;
-    setTimeout(() => { delete anchor.__fluxClickInFlight; }, 10000);
+    setTimeout(() => { delete anchor.__fluxClickInFlight; }, 800);
 
     // Record link click metadata for correlation in chrome.downloads.onDeterminingFilename.
     // User gesture is strictly preserved: we NEVER call ev.preventDefault() or ev.stopPropagation()
@@ -447,6 +447,13 @@ function handleLinkClick(ev) {
       });
     }
 
+    console.log(`[Flux Trace] [CLICK_OBSERVED] [${correlationId}]`, {
+      url: href,
+      filename: anchor.download || "",
+      hasDownloadAttr,
+      mechanism,
+      note: "Click observed and correlated with chrome.downloads.onDeterminingFilename; user gesture preserved"
+    });
     console.log(`[Flux Trace] [CLICK_RECORDED] [${correlationId}]`, {
       url: href,
       filename: anchor.download || "",

@@ -3350,12 +3350,31 @@ void ShowNewDownloadDialogWin32(
         CloseClipboard();
     }
 
+    RECT work_rc{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_rc, 0);
+    int screen_w = work_rc.right - work_rc.left;
+    int screen_h = work_rc.bottom - work_rc.top;
+    if (screen_w <= 0) screen_w = GetSystemMetrics(SM_CXSCREEN);
+    if (screen_h <= 0) screen_h = GetSystemMetrics(SM_CYSCREEN);
+
     RECT parent_rc{};
     GetWindowRect(hwnd_parent, &parent_rc);
     int dlg_w = 600;
     int dlg_h = 510;
-    int dlg_x = parent_rc.left + (parent_rc.right - parent_rc.left - dlg_w) / 2;
-    int dlg_y = parent_rc.top + (parent_rc.bottom - parent_rc.top - dlg_h) / 2;
+    int dlg_x = 0;
+    int dlg_y = 0;
+
+    if (parent_rc.left < -10000 || parent_rc.top < -10000 ||
+        (parent_rc.right - parent_rc.left) < 200 || (parent_rc.bottom - parent_rc.top) < 200 ||
+        IsIconic(hwnd_parent) || !IsWindowVisible(hwnd_parent)) {
+        dlg_x = work_rc.left + (screen_w - dlg_w) / 2;
+        dlg_y = work_rc.top + (screen_h - dlg_h) / 2;
+    } else {
+        dlg_x = parent_rc.left + (parent_rc.right - parent_rc.left - dlg_w) / 2;
+        dlg_y = parent_rc.top + (parent_rc.bottom - parent_rc.top - dlg_h) / 2;
+    }
+    if (dlg_x < work_rc.left) dlg_x = work_rc.left + 20;
+    if (dlg_y < work_rc.top) dlg_y = work_rc.top + 20;
 
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
@@ -3401,8 +3420,13 @@ void ShowNewDownloadDialogWin32(
     }
 
     EnableWindow(hwnd_parent, FALSE);
+    SetWindowPos(hDlg, HWND_TOPMOST, dlg_x, dlg_y, dlg_w, dlg_h, SWP_SHOWWINDOW);
+    ShowWindow(hDlg, SW_SHOWNORMAL);
+    BringWindowToTop(hDlg);
     SetForegroundWindow(hDlg);
+    SetActiveWindow(hDlg);
     SetFocus(ctx.hUrlEdit);
+    OPENIDM_LOG_INFO("UI", "NEW_DOWNLOAD_DIALOG_SHOWN: taskId=" + existing_task_id + " url=" + candidate_url + " filename=" + suggested_filename);
 
     MSG msg{};
     while (IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0)) {
@@ -5697,6 +5721,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_OPENIDM_SHOW_NEW_DOWNLOAD: {
             auto* offer = reinterpret_cast<OfferNotificationData*>(lParam);
             if (offer) {
+                OPENIDM_LOG_INFO("UI", "NEW_DOWNLOAD_DIALOG_REQUESTED: taskId=" + offer->task_id + " url=" + offer->url + " filename=" + offer->file_name);
                 if (IsIconic(hwnd)) {
                     ShowWindow(hwnd, SW_RESTORE);
                 } else if (!IsWindowVisible(hwnd)) {
@@ -5893,13 +5918,10 @@ int DesktopView::RunWin32MessageLoop() {
     if (m_ipc_server) {
         m_ipc_server->SetOfferNotificationCallback(
             [hwnd, this](const TaskModel& task) {
-                if (!m_controller.GetSettings().auto_start_downloads) {
-                    auto* offer = new OfferNotificationData{task.task_id, task.url, task.file_name, task.save_dir, task.total_bytes};
-                    PostMessageW(hwnd, WM_OPENIDM_SHOW_NEW_DOWNLOAD, 0, reinterpret_cast<LPARAM>(offer));
-                } else {
-                    PostMessageW(hwnd, WM_TIMER, IDT_UI_REFRESH, 0);
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+                // Every browser intercepted download MUST display the Flux New Download window
+                // before the actual download begins, regardless of whether the global auto_start_downloads setting is enabled.
+                auto* offer = new OfferNotificationData{task.task_id, task.url, task.file_name, task.save_dir, task.total_bytes};
+                PostMessageW(hwnd, WM_OPENIDM_SHOW_NEW_DOWNLOAD, 0, reinterpret_cast<LPARAM>(offer));
             });
     }
 

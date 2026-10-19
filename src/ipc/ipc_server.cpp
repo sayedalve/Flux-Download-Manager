@@ -585,9 +585,11 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         ExtractHeadersMap(params["headers"], t.headers, t.auth_headers);
 
-        bool auto_start = params.contains("autoStart")
-            ? params["autoStart"].as_bool(true)
-            : m_controller.GetSettings().auto_start_downloads;
+        // For browser intercepted downloads, when a GUI window is attached (m_offer_cb != nullptr),
+        // the task must be queued without starting network transfer until the user confirms
+        // choices in the Win32 New Download dialog.
+        // In headless daemon / automated test mode (m_offer_cb == nullptr), there is no window to prompt, so start directly.
+        bool auto_start = m_offer_cb ? false : (params.contains("autoStart") ? params["autoStart"].as_bool(true) : true);
         auto add_res = m_controller.AddTask(std::move(t), auto_start, false);
         if (!add_res.ok()) {
             json::Value res = json::Object{};
@@ -605,10 +607,43 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         res["status"] = auto_start ? "started" : "queued";
         res["taskId"] = add_res.value->task_id;
         res["fileName"] = add_res.value->file_name;
+        res["correlationId"] = add_res.value->correlation_id;
         return MakeRpcResult(id, std::move(res)).dump();
     }
 
-    // 2b. download.startChunkedTransfer
+    // 2b. download.getDecision (Query whether user confirmed or cancelled dialog in Flux)
+    if (method == "download.getDecision") {
+        std::string tid = params["taskId"].as_string();
+        auto task_opt = m_controller.GetTask(tid);
+        json::Value res = json::Object{};
+        res["taskId"] = tid;
+        if (!task_opt.has_value()) {
+            // Task was removed from controller (User clicked Cancel in New Download dialog)
+            res["decision"] = "CANCELLED";
+            res["state"] = "CANCELLED";
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+        auto state = task_opt->state;
+        if (state == TaskState::kCanceled || state == TaskState::kFailed) {
+            res["decision"] = "CANCELLED";
+            res["state"] = TaskStateToString(state);
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+        if (state == TaskState::kDownloading || state == TaskState::kProbing ||
+            state == TaskState::kMuxing || state == TaskState::kVerifying ||
+            state == TaskState::kCompleted) {
+            // User clicked Download in New Download dialog! Task has started
+            res["decision"] = "ACCEPTED";
+            res["state"] = TaskStateToString(state);
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+        // Still awaiting user decision in dialog (kQueued / kPaused)
+        res["decision"] = "PENDING";
+        res["state"] = TaskStateToString(state);
+        return MakeRpcResult(id, std::move(res)).dump();
+    }
+
+    // 2c. download.startChunkedTransfer
     if (method == "download.startChunkedTransfer") {
         if (!m_capture_enabled.load()) {
             json::Value res = json::Object{};

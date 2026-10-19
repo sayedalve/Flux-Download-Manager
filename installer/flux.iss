@@ -200,7 +200,7 @@ end;
 // Uninstaller safety: preserve user databases and downloaded files
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = ssUninstall then
+  if CurUninstallStep = usUninstall then
   begin
     // Note: Inno Setup uninstalls only files listed in [Files] or explicitly registered.
     // User task state in %LOCALAPPDATA%\Flux\state.db and %USERPROFILE%\Downloads\Flux

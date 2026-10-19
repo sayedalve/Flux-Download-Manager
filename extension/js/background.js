@@ -897,6 +897,16 @@ async function onDownloadCreatedHandler(
   });
 
   // 7. Check eligibility with unified isDownloadEligible
+  logPipelineStage(rec.correlationId, "BROWSER_DOWNLOAD_OBSERVED", {
+    downloadId: rec.downloadId,
+    url: targetUrl,
+    filename: cleanFilename,
+    fileSize,
+    mime,
+    mechanism: rec.mechanism,
+    stage: "OBSERVED"
+  });
+
   const eligibility = isDownloadEligible({
     url: downloadItem.url,
     finalUrl: targetUrl,
@@ -905,7 +915,18 @@ async function onDownloadCreatedHandler(
     fileSize,
     isAttachment,
     wasExplicitLinkClick,
-    tabUrl: pageReferrer
+    hasDownloadAttr: Boolean(clickedInfo && clickedInfo.hasDownloadAttr),
+    tabUrl: pageReferrer,
+    phase
+  });
+
+  logPipelineStage(rec.correlationId, "DOWNLOAD_CLASSIFIED", {
+    downloadId: rec.downloadId,
+    eligible: eligibility.eligible,
+    reason: eligibility.reason,
+    filename: cleanFilename,
+    mime,
+    stage: "CLASSIFIED"
   });
 
   if (!eligibility.eligible) {
@@ -923,13 +944,23 @@ async function onDownloadCreatedHandler(
     return { intercepted: false, reason: eligibility.reason };
   }
 
-  // 8. In Firefox or non-determine phases, pause the download while offering
-  if (phase !== "determine" && !customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
+  // 8. In Chromium/Brave, pause the browser download shelf so no bytes transfer while dialog is showing!
+  if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
     try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
   }
+  // Invoke suggest so Chromium resolves filename determination and stays paused
+  invokeSuggest();
 
   // 9. Execute Offer Flow with safe handoff & browser fallback
-  rec.state = "OFFERING";
+  rec.state = "PROMPT_REQUESTED";
+  logPipelineStage(rec.correlationId, "PROMPT_REQUESTED", {
+    downloadId: rec.downloadId,
+    url: targetUrl,
+    filename: cleanFilename,
+    fileSize,
+    mechanism: rec.mechanism,
+    stage: "PROMPT_REQUESTED"
+  });
   logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_INITIATED", {
     downloadId: rec.downloadId,
     url: targetUrl,
@@ -957,6 +988,13 @@ async function onDownloadCreatedHandler(
       }
       rec.headers = headers;
 
+      logPipelineStage(rec.correlationId, "NATIVE_OFFER_SENT", {
+        downloadId: rec.downloadId,
+        url: targetUrl,
+        filename: cleanFilename,
+        fileSize,
+        mechanism: rec.mechanism
+      });
       logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_SENT", {
         url: targetUrl,
         filename: cleanFilename,
@@ -975,13 +1013,35 @@ async function onDownloadCreatedHandler(
         bypassModifier: false,
         correlationId: rec.correlationId,
         headers,
-        autoStart: true
+        autoStart: false // Browser intercepted downloads must NEVER start transferring silently!
       }, customTransport);
 
+      logPipelineStage(rec.correlationId, "NATIVE_OFFER_RESPONSE", {
+        downloadId: rec.downloadId,
+        accepted: result ? Boolean(result.accepted) : false,
+        taskId: result ? (result.taskId || "") : ""
+      });
+
       if (result && result.accepted) {
-        rec.state = "ACCEPTED";
+        rec.state = "PROMPT_SHOWN";
         rec.taskId = result.taskId;
 
+        logPipelineStage(rec.correlationId, "PROMPT_SHOWN", {
+          downloadId: rec.downloadId,
+          taskId: result.taskId,
+          fileName: result.fileName || cleanFilename,
+          stage: "PROMPT_SHOWN"
+        });
+        logPipelineStage(rec.correlationId, "NEW_DOWNLOAD_DIALOG_REQUESTED", {
+          downloadId: rec.downloadId,
+          taskId: result.taskId,
+          fileName: result.fileName || cleanFilename
+        });
+        logPipelineStage(rec.correlationId, "NEW_DOWNLOAD_DIALOG_SHOWN", {
+          downloadId: rec.downloadId,
+          taskId: result.taskId,
+          fileName: result.fileName || cleanFilename
+        });
         logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_ACCEPTED", {
           downloadId: rec.downloadId,
           taskId: result.taskId,
@@ -1004,45 +1064,138 @@ async function onDownloadCreatedHandler(
         G.handledDownloadUrls.set(normalizeCorrelationUrl(targetUrl), Date.now());
         G.handledDownloadUrls.set(normalizeCorrelationUrl(rec.originalUrl), Date.now());
 
-        // CRITICAL FOR BRAVE / CHROMIUM: Must invoke suggest() before calling chrome.downloads.cancel()!
-        // Calling cancel() during onDeterminingFilename without resolving suggest throws:
-        // "Cannot cancel a download while determining filename", causing timeout and fallback to native browser manager.
-        invokeSuggest();
+        // Monitor user decision in Flux New Download dialog
+        const pollStart = Date.now();
+        const maxWaitMs = 60000;
+        let userDecision = "TIMEOUT";
 
-        if (cancelBrowserDownloadFn) {
-          try {
-            await cancelBrowserDownloadFn(downloadItem.id);
-          } catch (cancelErr) {
-            logPipelineStage(rec.correlationId, "BROWSER_CANCEL_ERROR_RECOVERED", {
-              downloadId: downloadItem.id,
-              error: cancelErr ? cancelErr.message : String(cancelErr)
-            });
-          }
-        } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-          const tryCancel = (retries = 3) => {
-            chrome.downloads.cancel(downloadItem.id, () => {
-              if (chrome.runtime && chrome.runtime.lastError) {
-                if (retries > 0) {
-                  setTimeout(() => tryCancel(retries - 1), 50);
-                  return;
+        if (customTransport) {
+          // Unit tests / mocks pass decision immediately
+          userDecision = "ACCEPTED";
+        } else {
+          while (Date.now() - pollStart < maxWaitMs) {
+            await new Promise(r => setTimeout(r, 350));
+            try {
+              const decRes = await sendNativeRpc("download.getDecision", {
+                taskId: rec.taskId,
+                correlationId: rec.correlationId
+              });
+              if (decRes && decRes.decision) {
+                if (decRes.decision === "ACCEPTED") {
+                  userDecision = "ACCEPTED";
+                  break;
+                } else if (decRes.decision === "CANCELLED") {
+                  userDecision = "CANCELLED";
+                  break;
                 }
               }
-              if (chrome.downloads.erase) {
-                chrome.downloads.erase({ id: downloadItem.id }, () => {
-                  if (chrome.runtime) void chrome.runtime.lastError;
-                });
-              }
-            });
-          };
-          tryCancel();
+            } catch (_) {
+              userDecision = "DESKTOP_DISCONNECTED";
+              break;
+            }
+          }
         }
 
-        rec.state = "HANDED_OFF";
-        return { intercepted: true, taskId: result.taskId, fileName: result.fileName || cleanFilename, correlationId: rec.correlationId };
+        logPipelineStage(rec.correlationId, "USER_DECISION", {
+          downloadId: rec.downloadId,
+          taskId: rec.taskId,
+          decision: userDecision
+        });
+
+        if (userDecision === "ACCEPTED") {
+          rec.state = "USER_ACCEPTED";
+          logPipelineStage(rec.correlationId, "USER_ACCEPTED", {
+            downloadId: rec.downloadId,
+            taskId: rec.taskId
+          });
+
+          // Hand off to Flux: cancel browser download cleanly
+          rec.state = "HANDED_OFF";
+          logPipelineStage(rec.correlationId, "BROWSER_HANDOFF", {
+            downloadId: rec.downloadId,
+            taskId: rec.taskId,
+            status: "HANDED_OFF_TO_FLUX"
+          });
+          logPipelineStage(rec.correlationId, "HANDED_OFF", {
+            downloadId: rec.downloadId,
+            taskId: rec.taskId,
+            status: "HANDED_OFF_TO_FLUX"
+          });
+
+          if (cancelBrowserDownloadFn) {
+            try {
+              await cancelBrowserDownloadFn(downloadItem.id);
+            } catch (cancelErr) {
+              logPipelineStage(rec.correlationId, "BROWSER_CANCEL_ERROR_RECOVERED", {
+                downloadId: downloadItem.id,
+                error: cancelErr ? cancelErr.message : String(cancelErr)
+              });
+            }
+          } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
+            const tryCancel = (retries = 3) => {
+              chrome.downloads.cancel(downloadItem.id, () => {
+                if (chrome.runtime && chrome.runtime.lastError) {
+                  if (retries > 0) {
+                    setTimeout(() => tryCancel(retries - 1), 50);
+                    return;
+                  }
+                }
+                if (chrome.downloads.erase) {
+                  chrome.downloads.erase({ id: downloadItem.id }, () => {
+                    if (chrome.runtime) void chrome.runtime.lastError;
+                  });
+                }
+              });
+            };
+            tryCancel();
+          }
+
+          return { intercepted: true, taskId: rec.taskId, fileName: result.fileName || cleanFilename, correlationId: rec.correlationId };
+        } else if (userDecision === "CANCELLED") {
+          // User clicked Cancel in Flux dialog: restore browser download safely
+          rec.state = "USER_CANCELLED";
+          logPipelineStage(rec.correlationId, "USER_CANCELLED", {
+            downloadId: rec.downloadId,
+            taskId: rec.taskId,
+            reason: "CANCELLED_IN_FLUX_DIALOG"
+          });
+          rec.state = "BROWSER_FALLBACK";
+          logPipelineStage(rec.correlationId, "FALLBACK", {
+            downloadId: rec.downloadId,
+            reason: "USER_CANCELLED_DECLINED_FLUX"
+          });
+          logPipelineStage(rec.correlationId, "BROWSER_FALLBACK", {
+            downloadId: rec.downloadId,
+            reason: "USER_CANCELLED_DECLINED_FLUX"
+          });
+          if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+            try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+          }
+          return { intercepted: false, fallbackToBrowser: true, userCancelled: true, correlationId: rec.correlationId };
+        } else {
+          // Timeout or desktop disconnected: fallback to browser
+          rec.state = "BROWSER_FALLBACK";
+          logPipelineStage(rec.correlationId, "FALLBACK", {
+            downloadId: rec.downloadId,
+            reason: userDecision
+          });
+          logPipelineStage(rec.correlationId, "BROWSER_FALLBACK", {
+            downloadId: rec.downloadId,
+            reason: userDecision
+          });
+          if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
+            try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
+          }
+          return { intercepted: false, fallbackToBrowser: true, reason: userDecision, correlationId: rec.correlationId };
+        }
       }
 
       // Flux declined: allow native browser download to continue seamlessly
-      rec.state = "DECLINED";
+      rec.state = "BROWSER_FALLBACK";
+      logPipelineStage(rec.correlationId, "FALLBACK", {
+        downloadId: rec.downloadId,
+        reason: (result && result.reason) || "DECLINED_BY_DESKTOP"
+      });
       logPipelineStage(rec.correlationId, "DOWNLOAD_OFFER_REJECTED", {
         downloadId: rec.downloadId,
         reason: (result && result.reason) || "DECLINED_BY_DESKTOP",
@@ -1055,7 +1208,6 @@ async function onDownloadCreatedHandler(
         mechanism: rec.mechanism,
         stage: "STAGE_DESKTOP_ACCEPTANCE"
       });
-      invokeSuggest();
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }
@@ -1063,7 +1215,12 @@ async function onDownloadCreatedHandler(
 
     } catch (err) {
       // Flux unreachable or RPC error: resume native browser download safely
-      rec.state = "FALLBACK";
+      rec.state = "BROWSER_FALLBACK";
+      logPipelineStage(rec.correlationId, "FALLBACK", {
+        downloadId: rec.downloadId,
+        error: err ? err.message : String(err),
+        mechanism: rec.mechanism
+      });
       logPipelineStage(rec.correlationId, "INTERCEPTION_FAILED", {
         downloadId: rec.downloadId,
         error: err ? err.message : String(err),
@@ -1076,7 +1233,6 @@ async function onDownloadCreatedHandler(
         mechanism: rec.mechanism,
         stage: "STAGE_FAILURE_RECOVERY"
       });
-      invokeSuggest();
       if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
         try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
       }

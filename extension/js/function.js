@@ -150,7 +150,9 @@ function isDownloadEligible(params = {}) {
     fileSize = 0,
     isAttachment = false,
     wasExplicitLinkClick = false,
-    tabUrl = ""
+    hasDownloadAttr = false,
+    tabUrl = "",
+    phase = "determine"
   } = params;
 
   const targetUrl = finalUrl || url;
@@ -174,8 +176,8 @@ function isDownloadEligible(params = {}) {
   }
 
   const cleanMime = (mime || "").split(";")[0].trim().toLowerCase();
-  // Exclude plain HTML page navigations unless explicitly marked as attachment
-  if ((cleanMime === "text/html" || cleanMime === "application/xhtml+xml") && !isAttachment) {
+  // Exclude plain HTML page navigations unless explicitly marked as attachment or download attribute
+  if ((cleanMime === "text/html" || cleanMime === "application/xhtml+xml") && !isAttachment && !hasDownloadAttr) {
     return { eligible: false, reason: "HTML_PAGE_NAVIGATION" };
   }
 
@@ -203,17 +205,32 @@ function isDownloadEligible(params = {}) {
   }
 
   // 8. Explicit user link click (with download attribute or user-clicked anchor)
-  if (wasExplicitLinkClick) {
-    if (fileSize > 0 || ext || (cleanMime && cleanMime !== "text/html")) {
+  if (wasExplicitLinkClick || hasDownloadAttr) {
+    if (fileSize > 0 || ext || (cleanMime && cleanMime !== "text/html") || hasDownloadAttr) {
       return { eligible: true, reason: "EXPLICIT_LINK_CLICK", ext, mime: cleanMime, filename: cleanFilename };
     }
   }
 
-  // 9. Size threshold fallback (>= 1 MiB and not HTML/CSS/JS)
+  // 9. Non-web-code file extensions on the determined filename or URL
+  const webCodeExts = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "jsx", "ts", "tsx"]);
+  if (ext && !webCodeExts.has(ext)) {
+    return { eligible: true, reason: "VALID_DOWNLOAD_EXTENSION", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  // 10. Size threshold fallback (>= 1 MiB and not HTML/CSS/JS)
   const sizeNum = Number(fileSize) || 0;
   if (sizeNum >= G.minFileSizeBytes &&
       cleanMime !== "text/html" && cleanMime !== "text/css" && cleanMime !== "application/javascript") {
     return { eligible: true, reason: "FILE_SIZE_THRESHOLD", ext, mime: cleanMime, filename: cleanFilename };
+  }
+
+  // 11. Authoritative fallback for browser-confirmed downloads (onDeterminingFilename)
+  // When Chromium/Brave fires onDeterminingFilename for an HTTP/HTTPS resource,
+  // the browser has already verified it is a downloadable file, not a page navigation.
+  if (phase === "determine" &&
+      cleanMime !== "text/html" && cleanMime !== "application/xhtml+xml" &&
+      cleanMime !== "text/css" && cleanMime !== "application/javascript") {
+    return { eligible: true, reason: "BROWSER_DETERMINED_DOWNLOAD", ext, mime: cleanMime, filename: cleanFilename };
   }
 
   return { eligible: false, reason: "BELOW_SIZE_OR_EXT_FILTER" };
@@ -1104,7 +1121,7 @@ function recordClickedLink(tabId, msg) {
     url: msg.url,
     normalizedUrl: normUrl,
     filename: msg.filename || "",
-    hasDownloadAttr: Boolean(msg.hasDownloadAttr || msg.filename),
+    hasDownloadAttr: Boolean(msg.hasDownloadAttr),
     referrer: msg.referrer || "",
     pageTitle: msg.pageTitle || "",
     correlationId: msg.correlationId || generateCorrelationId("click"),
@@ -1278,12 +1295,6 @@ function findCorrelatedClick(tabId, downloadItem) {
         return rec;
       }
     }
-    // If the tab had a recent explicit click within 10 seconds, correlate with that click
-    for (const rec of tabClicks) {
-      if ((now - rec.time) < 10000) {
-        return rec;
-      }
-    }
   }
 
   // 2b. If effectiveTabId is not available (e.g., cross-origin or sandboxed iframe), search recent clicks across all tabs
@@ -1300,13 +1311,12 @@ function findCorrelatedClick(tabId, downloadItem) {
     }
   }
 
-  // 3. Fallback to G.lastClickedLink if within 15s and matching URL, referrer, or recent click
+  // 3. Fallback to G.lastClickedLink if matching candidate URL or exact referrer
   if (G.lastClickedLink && (now - G.lastClickedLink.time) < 15000) {
     const lastNorm = normalizeCorrelationUrl(G.lastClickedLink.url);
     if (candidateUrls.includes(lastNorm) ||
         candidateUrls.some(u => u.split("?")[0] === lastNorm.split("?")[0]) ||
-        (downloadItem.referrer && G.lastClickedLink.referrer === downloadItem.referrer) ||
-        (now - G.lastClickedLink.time < 5000)) {
+        (downloadItem.referrer && G.lastClickedLink.referrer && normalizeCorrelationUrl(downloadItem.referrer) === normalizeCorrelationUrl(G.lastClickedLink.referrer))) {
       return G.lastClickedLink;
     }
   }

@@ -182,7 +182,8 @@ private:
 
     void ScheduleLoop();
     void RunTaskWorker(std::string task_id, std::shared_ptr<ActiveTaskControl> ctrl);
-    std::filesystem::path ResolveCategorySaveDir(const std::string& category) const;
+    static std::string DetermineCategoryImpl(const AppSettings& settings, const std::string& filename, const std::string& url);
+    static std::filesystem::path ResolveCategorySaveDirImpl(const AppSettings& settings, const std::filesystem::path& default_dir, const std::string& category, const std::string& url);
     void LoadPersistedSettingsLocked();
     Result<void> SaveSettingsLocked();
 

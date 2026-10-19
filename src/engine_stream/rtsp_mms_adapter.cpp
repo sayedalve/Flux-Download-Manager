@@ -150,6 +150,7 @@ Result<std::filesystem::path> RtspMmsAdapter::ExecuteStreamCapture(
     DWORD bytesRead = 0;
     std::string line_accum;
 
+    DWORD exit_code = 0;
     while (true) {
         if (pause_requested.load() || cancel_requested.load()) {
             TerminateProcess(pi.hProcess, 1);
@@ -193,22 +194,19 @@ Result<std::filesystem::path> RtspMmsAdapter::ExecuteStreamCapture(
             }
         }
 
-        DWORD exit_code = 0;
         if (GetExitCodeProcess(pi.hProcess, &exit_code) && exit_code != STILL_ACTIVE) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
+    WaitForSingleObject(pi.hProcess, 1000);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+
     CloseHandle(hStdErrRead);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     if (hJob) CloseHandle(hJob);
-
-#else
-    // POSIX fork / exec stub
-    task.state = TaskState::kCompleted;
-#endif
 
     if (cancel_requested.load()) {
         std::filesystem::remove(temp_part, ec);
@@ -223,6 +221,16 @@ Result<std::filesystem::path> RtspMmsAdapter::ExecuteStreamCapture(
         return Result<std::filesystem::path>::Err("ERR_PAUSED", "Stream capture paused");
     }
 
+    if (exit_code != 0) {
+        std::error_code ec_rem;
+        std::filesystem::remove(temp_part, ec_rem);
+        task.state = TaskState::kFailed;
+        task.error_code = "ERR_FFMPEG_FAILED";
+        task.error_message = "FFmpeg process failed with exit code " + std::to_string(exit_code);
+        task.status_detail = task.error_message;
+        return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
+    }
+
     if (std::filesystem::exists(temp_part, ec) && std::filesystem::file_size(temp_part, ec) > 0) {
         std::filesystem::rename(temp_part, final_output, ec);
         task.state = TaskState::kCompleted;
@@ -235,7 +243,21 @@ Result<std::filesystem::path> RtspMmsAdapter::ExecuteStreamCapture(
     task.state = TaskState::kFailed;
     task.error_code = "ERR_STREAM_EMPTY";
     task.error_message = "Stream capture produced empty file";
+    task.status_detail = task.error_message;
     return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
+
+#else
+    (void)pause_requested;
+    (void)cancel_requested;
+    (void)on_progress;
+    (void)final_output;
+    (void)temp_part;
+    task.state = TaskState::kFailed;
+    task.error_code = "ERR_UNSUPPORTED_PLATFORM";
+    task.error_message = "RTSP/MMS stream capture is unsupported on this platform";
+    task.status_detail = task.error_message;
+    return Result<std::filesystem::path>::Err(task.error_code, task.error_message);
+#endif
 }
 
 } // namespace openidm::stream

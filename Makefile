@@ -14,6 +14,14 @@ CORE_SRCS := \
 	src/common/logger.cpp \
 	src/common/crypto_utils.cpp \
 	src/storage/sqlite_store.cpp \
+	src/storage/import_export.cpp \
+	src/archive/zip_preview.cpp \
+	src/security/antivirus_scanner.cpp \
+	src/crawler/site_grabber.cpp \
+	src/engine_ftp/ftp_client.cpp \
+	src/engine_torrent/torrent_parser.cpp \
+	src/engine_torrent/torrent_engine.cpp \
+	src/engine_stream/rtsp_mms_adapter.cpp \
 	src/brisk_engine/segment_scheduler.cpp \
 	src/brisk_engine/http_client.cpp \
 	src/brisk_engine/http_download_engine.cpp \
@@ -42,9 +50,9 @@ $(BUILD_DIR)/openidm-nmh: $(CORE_OBJS) src/nmh/main.cpp $(HEADERS)
 	strip -s $@
 	cp -f $@ $(BUILD_DIR)/flux-nmh
 
-$(BUILD_DIR)/N_m3u8DL-RE: $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker_stream/nm3u8dl_re_worker.cpp $(HEADERS)
+$(BUILD_DIR)/N_m3u8DL-RE: $(BUILD_DIR)/obj/common/crypto_utils.o $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker_stream/nm3u8dl_re_worker.cpp $(HEADERS)
 	@mkdir -p tools
-	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker_stream/nm3u8dl_re_worker.cpp -o $@ -pthread -lssl -lcrypto
+	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/obj/common/crypto_utils.o $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker_stream/nm3u8dl_re_worker.cpp -o $@ -pthread -lssl -lcrypto
 	strip -s $@
 	cp -f $@ tools/N_m3u8DL-RE
 	chmod +x tools/N_m3u8DL-RE

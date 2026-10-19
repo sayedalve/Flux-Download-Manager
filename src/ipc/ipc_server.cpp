@@ -561,7 +561,21 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         if (params.contains("saveDir")) {
             std::string sd = params["saveDir"].as_string();
-            if (sd.find("..") != std::string::npos) {
+            bool safe = !sd.empty() && sd.find("..") == std::string::npos;
+#ifdef _WIN32
+            for (size_t i = 0; safe && i < sd.size(); ++i) {
+                if (sd[i] == ':') {
+                    if (i != 1 || !std::isalpha(static_cast<unsigned char>(sd[0]))) {
+                        safe = false;
+                    }
+                }
+            }
+#else
+            if (safe && sd.find(':') != std::string::npos) {
+                safe = false;
+            }
+#endif
+            if (!safe) {
                 json::Value res = json::Object{};
                 res["accepted"] = false;
                 res["reason"] = "ERR_PATH_TRAVERSAL_REJECTED";
@@ -617,6 +631,31 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         int64_t total_bytes = params["totalBytes"].as_int64(0);
         std::string page_url = params["pageUrl"].as_string();
         std::string correlation_id = params["correlationId"].as_string();
+        std::string custom_save_dir;
+        if (params.contains("saveDir")) {
+            std::string sd = params["saveDir"].as_string();
+            bool safe = !sd.empty() && sd.find("..") == std::string::npos;
+#ifdef _WIN32
+            for (size_t i = 0; safe && i < sd.size(); ++i) {
+                if (sd[i] == ':') {
+                    if (i != 1 || !std::isalpha(static_cast<unsigned char>(sd[0]))) {
+                        safe = false;
+                    }
+                }
+            }
+#else
+            if (safe && sd.find(':') != std::string::npos) {
+                safe = false;
+            }
+#endif
+            if (!safe) {
+                json::Value res = json::Object{};
+                res["accepted"] = false;
+                res["reason"] = "ERR_PATH_TRAVERSAL_REJECTED";
+                return MakeRpcResult(id, std::move(res)).dump();
+            }
+            custom_save_dir = sd;
+        }
 
         std::filesystem::path staging_dir = m_controller.GetConfig().temp_root_dir;
         std::error_code ec;
@@ -661,6 +700,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             sess.filename = filename;
             sess.page_url = page_url;
             sess.correlation_id = correlation_id.empty() ? task_id : correlation_id;
+            sess.save_dir = custom_save_dir;
             sess.expected_total_bytes = static_cast<uint64_t>(std::max<int64_t>(0, total_bytes));
             sess.bytes_written = 0;
             sess.next_chunk_index = 0;
@@ -694,6 +734,14 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
                 res["error"] = "ERR_STAGING_SESSION_NOT_FOUND";
                 return MakeRpcResult(id, std::move(res)).dump();
             }
+
+            if (chunk_index < 0 || static_cast<uint32_t>(chunk_index) != it->second.next_chunk_index) {
+                json::Value res = json::Object{};
+                res["received"] = false;
+                res["error"] = "ERR_CHUNK_OUT_OF_ORDER";
+                return MakeRpcResult(id, std::move(res)).dump();
+            }
+
             stream = it->second.file_stream;
             if (!stream || !stream->is_open()) {
                 json::Value res = json::Object{};
@@ -705,7 +753,27 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             std::vector<uint8_t> decoded = Base64Decode(data_b64);
             if (!decoded.empty()) {
                 stream->write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                if (!stream->good()) {
+                    stream->close();
+                    std::error_code ec;
+                    std::filesystem::remove(it->second.staging_path, ec);
+                    m_staging_sessions.erase(it);
+                    json::Value res = json::Object{};
+                    res["received"] = false;
+                    res["error"] = "ERR_DISK_WRITE_FAILED";
+                    return MakeRpcResult(id, std::move(res)).dump();
+                }
                 stream->flush();
+                if (!stream->good()) {
+                    stream->close();
+                    std::error_code ec;
+                    std::filesystem::remove(it->second.staging_path, ec);
+                    m_staging_sessions.erase(it);
+                    json::Value res = json::Object{};
+                    res["received"] = false;
+                    res["error"] = "ERR_DISK_WRITE_FAILED";
+                    return MakeRpcResult(id, std::move(res)).dump();
+                }
                 it->second.bytes_written += decoded.size();
             }
             it->second.next_chunk_index = static_cast<uint32_t>(chunk_index + 1);
@@ -739,19 +807,41 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
 
         if (sess.file_stream && sess.file_stream->is_open()) {
+            sess.file_stream->flush();
             sess.file_stream->close();
+        }
+
+        if (sess.expected_total_bytes > 0 && sess.bytes_written != sess.expected_total_bytes) {
+            std::error_code ec;
+            std::filesystem::remove(sess.staging_path, ec);
+            json::Value res = json::Object{};
+            res["success"] = false;
+            res["error"] = "ERR_CHUNKED_TRANSFER_SIZE_MISMATCH";
+            return MakeRpcResult(id, std::move(res)).dump();
+        }
+
+        if (reported_bytes > 0 && sess.bytes_written != static_cast<uint64_t>(reported_bytes)) {
+            std::error_code ec;
+            std::filesystem::remove(sess.staging_path, ec);
+            json::Value res = json::Object{};
+            res["success"] = false;
+            res["error"] = "ERR_CHUNKED_TRANSFER_SIZE_MISMATCH";
+            return MakeRpcResult(id, std::move(res)).dump();
         }
 
         TaskModel t;
         t.task_id = sess.task_id;
         t.file_name = sess.filename;
         t.page_url = sess.page_url;
+        t.save_dir = sess.save_dir;
         t.url = "blob:" + (sess.page_url.empty() ? "browser" : sess.page_url) + "#" + sess.task_id;
         t.correlation_id = sess.correlation_id;
-        t.total_bytes = sess.bytes_written > 0 ? sess.bytes_written : static_cast<uint64_t>(std::max<int64_t>(0, reported_bytes));
+        t.total_bytes = sess.bytes_written;
 
         auto ingest_res = m_controller.IngestCompletedTask(std::move(t), sess.staging_path);
         if (!ingest_res.ok()) {
+            std::error_code ec;
+            std::filesystem::remove(sess.staging_path, ec);
             json::Value res = json::Object{};
             res["success"] = false;
             res["error"] = ingest_res.error->code + ": " + ingest_res.error->message;

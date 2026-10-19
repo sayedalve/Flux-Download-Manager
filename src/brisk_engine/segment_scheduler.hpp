@@ -22,6 +22,7 @@ struct LiveSegment {
     std::atomic<uint64_t> end_offset{0};
     std::atomic<bool> completed{false};
     std::atomic<bool> active_worker{false};
+    mutable std::mutex write_mu;
 
     LiveSegment(uint32_t id, uint64_t start, uint64_t curr, uint64_t end, bool comp = false)
         : segment_id(id), start_offset(start), current_offset(curr), end_offset(end), completed(comp) {}

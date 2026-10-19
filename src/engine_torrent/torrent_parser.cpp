@@ -10,8 +10,39 @@
 
 #include "common/crypto_utils.hpp"
 #include "common/path_sanitizer.hpp"
+#include "brisk_engine/http_client.hpp"
 
 namespace openidm::torrent {
+
+bool TorrentParser::GetBencodeValueRange(std::string_view s, size_t& pos, size_t depth) {
+    if (depth > 64 || pos >= s.size()) return false;
+    char c = s[pos];
+    if (c == 'i') {
+        size_t e = s.find('e', pos + 1);
+        if (e == std::string_view::npos) return false;
+        pos = e + 1;
+        return true;
+    } else if (c == 'l' || c == 'd') {
+        ++pos;
+        while (pos < s.size() && s[pos] != 'e') {
+            if (!GetBencodeValueRange(s, pos, depth + 1)) return false;
+        }
+        if (pos >= s.size() || s[pos] != 'e') return false;
+        ++pos; // skip 'e'
+        return true;
+    } else if (std::isdigit(static_cast<unsigned char>(c))) {
+        size_t colon = s.find(':', pos);
+        if (colon == std::string_view::npos) return false;
+        std::string_view len_str = s.substr(pos, colon - pos);
+        char* end_ptr = nullptr;
+        unsigned long long u_len = std::strtoull(std::string(len_str).c_str(), &end_ptr, 10);
+        pos = colon + 1;
+        if (u_len > (s.size() - pos)) return false;
+        pos += static_cast<size_t>(u_len);
+        return true;
+    }
+    return false;
+}
 
 namespace {
 
@@ -79,6 +110,40 @@ std::string BytesToHex(const uint8_t* data, size_t len) {
 } // namespace
 
 Result<TorrentInfo> TorrentParser::ParseTorrentFile(const std::filesystem::path& file_path) {
+    std::string path_str = file_path.string();
+    if (path_str.find("magnet:?") == 0) {
+        return Result<TorrentInfo>::Err("ERR_TORRENT_MAGNET_METADATA",
+            "Magnet link requires metadata exchange; cannot parse directly as static torrent file");
+    }
+    if (path_str.find("http://") == 0 || path_str.find("https://") == 0) {
+        std::string torrent_bytes;
+        std::atomic<bool> cancel{false};
+        std::map<std::string, std::string> headers = {
+            {"User-Agent", "Flux/0.3.0"}
+        };
+        auto get_res = brisk::HttpClient::PerformGet(
+            path_str,
+            headers,
+            std::nullopt,
+            std::nullopt,
+            15000,
+            false,
+            cancel,
+            [&](const brisk::HttpResponseMeta& meta) -> brisk::HeaderAction {
+                if (meta.status_code != 200) return brisk::HeaderAction::kAbort;
+                return brisk::HeaderAction::kContinue;
+            },
+            [&](const uint8_t* data, size_t len) -> bool {
+                if (torrent_bytes.size() + len > 10 * 1024 * 1024) return false;
+                torrent_bytes.append(reinterpret_cast<const char*>(data), len);
+                return true;
+            });
+        if (!get_res.ok()) {
+            return Result<TorrentInfo>::Err(get_res.error->code, "Failed to download remote torrent file: " + get_res.error->message);
+        }
+        return ParseTorrentBuffer(torrent_bytes);
+    }
+
     std::ifstream ifs(file_path, std::ios::binary);
     if (!ifs) {
         return Result<TorrentInfo>::Err("ERR_TORRENT_FILE_OPEN", "Cannot open torrent file: " + file_path.string());
@@ -138,9 +203,25 @@ Result<TorrentInfo> TorrentParser::ParseTorrentBuffer(std::string_view data) {
         return Result<TorrentInfo>::Err("ERR_TORRENT_MALFORMED", "'info' must be a bencode dictionary");
     }
 
-    // Compute info_hash by re-encoding info dict (or finding raw slice)
-    std::string encoded_info = BencodeParser::Encode(info_dict);
-    info.info_hash_raw = CryptoUtils::ComputeBufferSha1Raw(reinterpret_cast<const uint8_t*>(encoded_info.data()), encoded_info.size());
+    // Compute info_hash from raw slice of original bencoded torrent file
+    std::string_view info_raw_slice;
+    size_t info_key = data.find("4:info");
+    if (info_key != std::string_view::npos) {
+        size_t val_start = info_key + 6;
+        size_t val_end = val_start;
+        if (val_start < data.size() && data[val_start] == 'd' && GetBencodeValueRange(data, val_end)) {
+            info_raw_slice = data.substr(val_start, val_end - val_start);
+        }
+    }
+
+    if (!info_raw_slice.empty()) {
+        info.info_hash_raw = CryptoUtils::ComputeBufferSha1Raw(
+            reinterpret_cast<const uint8_t*>(info_raw_slice.data()), info_raw_slice.size());
+    } else {
+        std::string encoded_info = BencodeParser::Encode(info_dict);
+        info.info_hash_raw = CryptoUtils::ComputeBufferSha1Raw(
+            reinterpret_cast<const uint8_t*>(encoded_info.data()), encoded_info.size());
+    }
     info.info_hash_hex = ToLower(BytesToHex(info.info_hash_raw.data(), info.info_hash_raw.size()));
 
     if (info_dict.contains("name") && info_dict["name"].is_string()) {

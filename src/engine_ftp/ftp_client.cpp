@@ -485,6 +485,13 @@ Result<uint64_t> FtpClient::DownloadFile(
         }
 
         ofs.write(buf.data(), n);
+        if (!ofs.good()) {
+            ofs.close();
+            data_sock.Close();
+            SendFtpCommand(ctrl.Get(), "ABOR");
+            SendFtpCommand(ctrl.Get(), "QUIT");
+            return Result<uint64_t>::Err("ERR_DISK_FULL", "Failed to write FTP data to disk");
+        }
         total_written += static_cast<uint64_t>(n);
 
         auto now = std::chrono::steady_clock::now();
@@ -504,6 +511,13 @@ Result<uint64_t> FtpClient::DownloadFile(
     }
 
     ofs.flush();
+    if (!ofs.good()) {
+        ofs.close();
+        data_sock.Close();
+        SendFtpCommand(ctrl.Get(), "ABOR");
+        SendFtpCommand(ctrl.Get(), "QUIT");
+        return Result<uint64_t>::Err("ERR_DISK_FULL", "Failed to flush FTP data to disk");
+    }
     ofs.close();
     data_sock.Close();
 
@@ -524,6 +538,13 @@ Result<uint64_t> FtpClient::DownloadFile(
     if (!comp_res.ok() || (comp_res.value->first != 226 && comp_res.value->first != 250)) {
         return Result<uint64_t>::Err("ERR_FTP_TRANSFER", "FTP transfer did not complete cleanly: " + (comp_res.ok() ? comp_res.value->second : comp_res.error->message));
     }
+
+    if (total_size > 0 && total_written != total_size) {
+        return Result<uint64_t>::Err("ERR_FTP_SIZE_MISMATCH",
+            "FTP downloaded size mismatch: expected " + std::to_string(total_size) +
+            " bytes, got " + std::to_string(total_written));
+    }
+
     return Result<uint64_t>::Ok(total_written);
 }
 

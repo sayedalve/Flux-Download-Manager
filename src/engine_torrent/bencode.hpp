@@ -103,8 +103,28 @@ private:
             }
             std::string_view num_str = s.substr(pos, end_pos - pos);
             pos = end_pos + 1;
+            if (num_str.empty()) {
+                return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Empty bencode integer");
+            }
+            if (num_str == "-0") {
+                return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Negative zero is not allowed in bencode");
+            }
+            if (num_str.size() > 1 && num_str[0] == '0') {
+                return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Leading zero in positive bencode integer");
+            }
+            if (num_str.size() > 2 && num_str[0] == '-' && num_str[1] == '0') {
+                return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Leading zero in negative bencode integer");
+            }
+            if (num_str.size() == 1 && num_str[0] == '-') {
+                return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Standalone minus sign in bencode integer");
+            }
+
             char* end_ptr = nullptr;
+            errno = 0;
             int64_t val = std::strtoll(std::string(num_str).c_str(), &end_ptr, 10);
+            if (errno == ERANGE || end_ptr != std::string(num_str).c_str() + num_str.size()) {
+                return Result<BencodeValue>::Err("ERR_BENCODE_INT", "Integer overflow or invalid digits in bencode");
+            }
             return Result<BencodeValue>::Ok(BencodeValue(val));
         } else if (c == 'l') {
             // List: l<items>e
@@ -146,11 +166,20 @@ private:
                 return Result<BencodeValue>::Err("ERR_BENCODE_STR", "Missing colon in bencode string length");
             }
             std::string_view len_str = s.substr(pos, colon - pos);
-            size_t len = static_cast<size_t>(std::strtoull(std::string(len_str).c_str(), nullptr, 10));
+            if (len_str.size() > 1 && len_str[0] == '0') {
+                return Result<BencodeValue>::Err("ERR_BENCODE_STR", "Leading zero in string length");
+            }
+            char* end_ptr = nullptr;
+            errno = 0;
+            unsigned long long u_len = std::strtoull(std::string(len_str).c_str(), &end_ptr, 10);
+            if (errno == ERANGE || end_ptr != std::string(len_str).c_str() + len_str.size()) {
+                return Result<BencodeValue>::Err("ERR_BENCODE_STR", "Invalid string length in bencode");
+            }
             pos = colon + 1;
-            if (pos + len > s.size()) {
+            if (u_len > (s.size() - pos)) {
                 return Result<BencodeValue>::Err("ERR_BENCODE_STR_BOUNDS", "String length exceeds buffer boundaries");
             }
+            size_t len = static_cast<size_t>(u_len);
             std::string str(s.substr(pos, len));
             pos += len;
             return Result<BencodeValue>::Ok(BencodeValue(std::move(str)));

@@ -298,13 +298,13 @@ void DownloadController::Shutdown() {
     m_store.Close();
 }
 
-std::string DownloadController::DetermineCategory(const std::string& filename, const std::string& url) const {
+std::string DownloadController::DetermineCategoryImpl(const AppSettings& settings, const std::string& filename, const std::string& url) {
     // 1. Site rules: Domain -> Category check
     if (!url.empty()) {
         std::string host = ExtractHostFromUrl(url);
         if (!host.empty()) {
-            auto it = m_settings.site_rules.find(host);
-            if (it != m_settings.site_rules.end()) {
+            auto it = settings.site_rules.find(host);
+            if (it != settings.site_rules.end()) {
                 const std::string& val = it->second;
                 if (val == "Video" || val == "Audio" || val == "Compressed" ||
                     val == "Documents" || val == "Programs" || val == "General") {
@@ -317,8 +317,8 @@ std::string DownloadController::DetermineCategory(const std::string& filename, c
     // 2. Custom extension mapping
     std::string ext = ExtractExtensionLower(filename);
     if (!ext.empty()) {
-        auto it = m_settings.custom_extension_categories.find(ext);
-        if (it != m_settings.custom_extension_categories.end() && !it->second.empty()) {
+        auto it = settings.custom_extension_categories.find(ext);
+        if (it != settings.custom_extension_categories.end() && !it->second.empty()) {
             return it->second;
         }
     }
@@ -327,15 +327,21 @@ std::string DownloadController::DetermineCategory(const std::string& filename, c
     return InferCategoryFromFilename(filename);
 }
 
-std::filesystem::path DownloadController::ResolveCategorySaveDir(const std::string& category, const std::string& url) const {
+std::string DownloadController::DetermineCategory(const std::string& filename, const std::string& url) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return DetermineCategoryImpl(m_settings, filename, url);
+}
+
+std::filesystem::path DownloadController::ResolveCategorySaveDirImpl(
+    const AppSettings& settings, const std::filesystem::path& default_dir, const std::string& category, const std::string& url) {
     // Priority: Site rule (directory) > Category folder > Subfolder > Default dir
 
     // 1. Site rules (domain -> custom directory)
     if (!url.empty()) {
         std::string host = ExtractHostFromUrl(url);
         if (!host.empty()) {
-            auto it = m_settings.site_rules.find(host);
-            if (it != m_settings.site_rules.end()) {
+            auto it = settings.site_rules.find(host);
+            if (it != settings.site_rules.end()) {
                 const std::string& val = it->second;
                 if (val.find('/') != std::string::npos || val.find('\\') != std::string::npos) {
                     return std::filesystem::path(val);
@@ -346,19 +352,24 @@ std::filesystem::path DownloadController::ResolveCategorySaveDir(const std::stri
 
     // 2. Configurable category folders
     if (!category.empty()) {
-        auto it = m_settings.category_folders.find(category);
-        if (it != m_settings.category_folders.end() && !it->second.empty()) {
+        auto it = settings.category_folders.find(category);
+        if (it != settings.category_folders.end() && !it->second.empty()) {
             return std::filesystem::path(it->second);
         }
     }
 
     // 3. Subfolder
-    if (m_settings.category_subfolders_enabled && !category.empty() && category != "General") {
-        return m_cfg.default_download_dir / category;
+    if (settings.category_subfolders_enabled && !category.empty() && category != "General") {
+        return default_dir / category;
     }
 
     // 4. Default download directory
-    return m_cfg.default_download_dir;
+    return default_dir;
+}
+
+std::filesystem::path DownloadController::ResolveCategorySaveDir(const std::string& category, const std::string& url) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return ResolveCategorySaveDirImpl(m_settings, m_cfg.default_download_dir, category, url);
 }
 
 Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immediately, bool force_duplicate) {
@@ -442,10 +453,10 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
         task.file_name = PathSanitizer::SanitizeFileName(task.file_name);
     }
     if (task.category.empty() || task.category == "General") {
-        task.category = DetermineCategory(task.file_name, task.url);
+        task.category = DetermineCategoryImpl(m_settings, task.file_name, task.url);
     }
     if (task.save_dir.empty()) {
-        task.save_dir = ResolveCategorySaveDir(task.category, task.url).string();
+        task.save_dir = ResolveCategorySaveDirImpl(m_settings, m_cfg.default_download_dir, task.category, task.url).string();
     }
     if (task.max_connections == 0) {
         task.max_connections = m_settings.default_connections_per_task;
@@ -492,6 +503,14 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
     }
     uint64_t file_size = std::filesystem::file_size(staged_file_path, ec);
 
+    AppSettings settings_snapshot;
+    std::filesystem::path default_dir;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        settings_snapshot = m_settings;
+        default_dir = m_cfg.default_download_dir;
+    }
+
     if (task.file_name.empty()) {
         task.file_name = "browser_file_" + GenerateUuidV4().substr(0, 8);
     } else {
@@ -502,10 +521,10 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
     }
     task.task_type = TaskType::kHttpFile;
     if (task.category.empty() || task.category == "General") {
-        task.category = DetermineCategory(task.file_name, task.url);
+        task.category = DetermineCategoryImpl(settings_snapshot, task.file_name, task.url);
     }
     if (task.save_dir.empty()) {
-        task.save_dir = ResolveCategorySaveDir(task.category, task.url).string();
+        task.save_dir = ResolveCategorySaveDirImpl(settings_snapshot, default_dir, task.category, task.url).string();
     }
     std::filesystem::create_directories(task.save_dir, ec);
 
@@ -513,7 +532,7 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
 
     // Conflict resolution
     if (std::filesystem::exists(dest_path, ec)) {
-        if (m_settings.conflict_policy == ConflictPolicy::kAutoRename) {
+        if (settings_snapshot.conflict_policy == ConflictPolicy::kAutoRename) {
             std::string stem = dest_path.stem().string();
             std::string ext = dest_path.extension().string();
             int counter = 1;
@@ -522,7 +541,7 @@ Result<TaskModel> DownloadController::IngestCompletedTask(TaskModel task, const 
                 counter++;
             }
             task.file_name = dest_path.filename().string();
-        } else if (m_settings.conflict_policy == ConflictPolicy::kFailIfExists) {
+        } else if (settings_snapshot.conflict_policy == ConflictPolicy::kFailIfExists) {
             return Result<TaskModel>::Err("ERR_FILE_EXISTS", "Target file already exists: " + dest_path.string());
         }
     }
@@ -897,6 +916,9 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                 ctrl->task_speed_limit_bps,
                 [&](const ftp::FtpProgress& fp) {
                     if (ctrl->cancel_requested.load() || ctrl->pause_requested.load()) return;
+                    local_task.downloaded_bytes = fp.downloaded_bytes;
+                    local_task.total_bytes = fp.total_bytes;
+                    local_task.speed_bps = fp.speed_bps;
                     {
                         std::lock_guard<std::mutex> lock(m_mutex);
                         auto it = m_tasks.find(task_id);
@@ -918,7 +940,14 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             if (dl_res.ok()) {
                 uint64_t final_size = dl_res.value.value();
                 bool checksum_ok = true;
-                if (!local_task.expected_sha256.empty()) {
+                if (local_task.total_bytes > 0 && final_size != local_task.total_bytes) {
+                    checksum_ok = false;
+                    local_task.state = TaskState::kFailed;
+                    local_task.error_code = "ERR_FTP_SIZE_MISMATCH";
+                    local_task.error_message = "Downloaded FTP size (" + std::to_string(final_size) +
+                        ") did not match expected size (" + std::to_string(local_task.total_bytes) + ")";
+                    local_task.status_detail = "Failed: Size mismatch";
+                } else if (!local_task.expected_sha256.empty()) {
                     auto calc_sha = CryptoUtils::ComputeFileSha256Hex(part_p);
                     auto to_low = [](std::string s) {
                         for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -1051,19 +1080,31 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
         ecfg.min_split_bytes = min_split_bytes;
         ecfg.allow_loopback_redirect = m_cfg.allow_loopback;
 
-        // Apply proxy & network options
-        ecfg.net_opts.proxy_mode = m_settings.proxy_mode;
-        ecfg.net_opts.proxy_server = m_settings.proxy_server;
-        ecfg.net_opts.proxy_bypass = m_settings.proxy_bypass;
-        ecfg.net_opts.proxy_username = m_settings.proxy_username;
-        if (!m_settings.proxy_password_encrypted.empty()) {
-            auto raw = HexStrToBytes(m_settings.proxy_password_encrypted);
+        // Snapshot network & proxy settings under lock
+        std::string p_mode, p_serv, p_by, p_user, p_pass_enc, s_user, s_pass_enc;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            p_mode = m_settings.proxy_mode;
+            p_serv = m_settings.proxy_server;
+            p_by = m_settings.proxy_bypass;
+            p_user = m_settings.proxy_username;
+            p_pass_enc = m_settings.proxy_password_encrypted;
+            s_user = m_settings.server_auth_username;
+            s_pass_enc = m_settings.server_auth_password_encrypted;
+        }
+
+        ecfg.net_opts.proxy_mode = p_mode;
+        ecfg.net_opts.proxy_server = p_serv;
+        ecfg.net_opts.proxy_bypass = p_by;
+        ecfg.net_opts.proxy_username = p_user;
+        if (!p_pass_enc.empty()) {
+            auto raw = HexStrToBytes(p_pass_enc);
             auto unp = CryptoUtils::UnprotectSecret(raw);
             if (unp.ok()) ecfg.net_opts.proxy_password = *unp.value;
         }
-        ecfg.net_opts.server_auth_username = m_settings.server_auth_username;
-        if (!m_settings.server_auth_password_encrypted.empty()) {
-            auto raw = HexStrToBytes(m_settings.server_auth_password_encrypted);
+        ecfg.net_opts.server_auth_username = s_user;
+        if (!s_pass_enc.empty()) {
+            auto raw = HexStrToBytes(s_pass_enc);
             auto unp = CryptoUtils::UnprotectSecret(raw);
             if (unp.ok()) ecfg.net_opts.server_auth_password = *unp.value;
         }

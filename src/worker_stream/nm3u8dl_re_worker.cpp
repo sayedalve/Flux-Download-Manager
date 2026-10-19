@@ -486,7 +486,7 @@ std::string ExtractXmlAttr(const std::string& tag_text, const std::string& attr_
     return "";
 }
 
-std::string ExpandDashTemplate(std::string tmpl, const std::string& rep_id, uint64_t number, uint64_t bandwidth) {
+std::string ExpandDashTemplate(std::string tmpl, const std::string& rep_id, uint64_t number, uint64_t bandwidth, uint64_t time_val = 0) {
     size_t pos = 0;
     while ((pos = tmpl.find("$RepresentationID$", pos)) != std::string::npos) {
         tmpl.replace(pos, 18, rep_id);
@@ -507,6 +507,16 @@ std::string ExpandDashTemplate(std::string tmpl, const std::string& rep_id, uint
         }
         std::ostringstream ss;
         ss << std::setw(width) << std::setfill('0') << number;
+        tmpl.replace(m.position(), m.length(), ss.str());
+    }
+    static const std::regex kTimeRe(R"(\$Time(?:%0?(\d+)d)?\$)");
+    while (std::regex_search(tmpl, m, kTimeRe)) {
+        int width = 1;
+        if (m[1].matched) {
+            try { width = std::stoi(m[1].str()); } catch (...) {}
+        }
+        std::ostringstream ss;
+        ss << std::setw(width) << std::setfill('0') << time_val;
         tmpl.replace(m.position(), m.length(), ss.str());
     }
     return tmpl;
@@ -1058,57 +1068,108 @@ bool ExtractManifestInfo(const WorkerOptions& opts, ManifestMeta& meta) {
                         if (!sc.empty()) count = std::stoi(sc);
                     } catch (...) {}
 
-                    int timeline_count = 0;
+                    uint64_t timescale = 1;
+                    std::string ts_str = ExtractXmlAttr(tmpl_attrs, "timescale");
+                    if (!ts_str.empty()) {
+                        try { timescale = std::stoull(ts_str); } catch (...) {}
+                    }
+                    if (timescale == 0) timescale = 1;
+
+                    struct TimelineEntry {
+                        uint64_t number;
+                        uint64_t time;
+                        double duration_sec;
+                    };
+                    std::vector<TimelineEntry> timeline_segments;
+
                     if (!tmpl_body.empty()) {
+                        uint64_t current_time = 0;
+                        uint64_t cur_num = static_cast<uint64_t>(start_num);
                         for (auto sit = std::sregex_iterator(tmpl_body.begin(), tmpl_body.end(), kSTagRe); sit != std::sregex_iterator(); ++sit) {
                             std::string s_attrs = (*sit)[1].str();
+                            std::string t_str = ExtractXmlAttr(s_attrs, "t");
+                            if (!t_str.empty()) {
+                                try { current_time = std::stoull(t_str); } catch (...) {}
+                            }
+                            uint64_t d = 0;
+                            std::string d_str = ExtractXmlAttr(s_attrs, "d");
+                            if (!d_str.empty()) {
+                                try { d = std::stoull(d_str); } catch (...) {}
+                            }
                             int r = 0;
                             std::string r_str = ExtractXmlAttr(s_attrs, "r");
                             if (!r_str.empty()) {
                                 try { r = std::stoi(r_str); } catch (...) {}
                             }
-                            timeline_count += 1 + (r > 0 ? r : 0);
+                            int repeat_count = (r >= 0) ? r : 0;
+                            double dur_sec = (d > 0) ? (static_cast<double>(d) / static_cast<double>(timescale)) : 2.0;
+
+                            for (int k = 0; k <= repeat_count; ++k) {
+                                timeline_segments.push_back({cur_num++, current_time, dur_sec});
+                                current_time += d;
+                            }
                         }
-                    }
-                    if (timeline_count > 0) {
-                        count = timeline_count;
                     }
 
-                    if (count <= 0) {
-                        uint64_t timescale = 1;
-                        std::string ts_str = ExtractXmlAttr(tmpl_attrs, "timescale");
-                        if (!ts_str.empty()) {
-                            try { timescale = std::stoull(ts_str); } catch (...) {}
+                    if (!init_pat.empty()) {
+                        uint64_t init_time = timeline_segments.empty() ? 0 : timeline_segments.front().time;
+                        tr.init_url = ResolveUrl(base_url, ExpandDashTemplate(init_pat, rep_id, start_num, bw, init_time));
+                    }
+
+                    if (!timeline_segments.empty()) {
+                        double total_dur = 0.0;
+                        for (const auto& ts : timeline_segments) {
+                            std::string m_rel = ExpandDashTemplate(media_pat, rep_id, ts.number, bw, ts.time);
+                            SegmentItem seg;
+                            seg.index = static_cast<uint32_t>(tr.segments.size());
+                            seg.url = ResolveUrl(base_url, m_rel);
+                            seg.duration = ts.duration_sec;
+                            seg.encrypted = meta.drm_protected;
+                            seg.method = meta.drm_protected ? "CENC" : "NONE";
+                            tr.segments.push_back(std::move(seg));
+                            total_dur += ts.duration_sec;
                         }
-                        if (timescale == 0) timescale = 1;
+                        if (mpd_duration_sec <= 0.0) {
+                            tr.duration_sec = total_dur;
+                        }
+                    } else {
+                        if (count <= 0) {
+                            uint64_t seg_dur = 0;
+                            std::string dur_str = ExtractXmlAttr(tmpl_attrs, "duration");
+                            if (!dur_str.empty()) {
+                                try { seg_dur = std::stoull(dur_str); } catch (...) {}
+                            }
+
+                            if (mpd_duration_sec > 0.0 && seg_dur > 0) {
+                                double seg_duration_sec = static_cast<double>(seg_dur) / static_cast<double>(timescale);
+                                if (seg_duration_sec > 0.0) {
+                                    count = static_cast<int>(std::ceil(mpd_duration_sec / seg_duration_sec));
+                                }
+                            }
+                        }
+                        if (count <= 0) count = 3;
 
                         uint64_t seg_dur = 0;
                         std::string dur_str = ExtractXmlAttr(tmpl_attrs, "duration");
                         if (!dur_str.empty()) {
                             try { seg_dur = std::stoull(dur_str); } catch (...) {}
                         }
+                        double seg_duration_sec = (seg_dur > 0) ? (static_cast<double>(seg_dur) / static_cast<double>(timescale)) : 2.0;
 
-                        if (mpd_duration_sec > 0.0 && seg_dur > 0) {
-                            double seg_duration_sec = static_cast<double>(seg_dur) / static_cast<double>(timescale);
-                            if (seg_duration_sec > 0.0) {
-                                count = static_cast<int>(std::ceil(mpd_duration_sec / seg_duration_sec));
-                            }
+                        for (int n = start_num; n < start_num + count; ++n) {
+                            uint64_t seg_time = static_cast<uint64_t>(n - start_num) * seg_dur;
+                            std::string m_rel = ExpandDashTemplate(media_pat, rep_id, n, bw, seg_time);
+                            SegmentItem seg;
+                            seg.index = static_cast<uint32_t>(tr.segments.size());
+                            seg.url = ResolveUrl(base_url, m_rel);
+                            seg.duration = seg_duration_sec;
+                            seg.encrypted = meta.drm_protected;
+                            seg.method = meta.drm_protected ? "CENC" : "NONE";
+                            tr.segments.push_back(std::move(seg));
                         }
-                    }
-                    if (count <= 0) count = 3;
-
-                    if (!init_pat.empty()) {
-                        tr.init_url = ResolveUrl(base_url, ExpandDashTemplate(init_pat, rep_id, start_num, bw));
-                    }
-                    for (int n = start_num; n < start_num + count; ++n) {
-                        std::string m_rel = ExpandDashTemplate(media_pat, rep_id, n, bw);
-                        SegmentItem seg;
-                        seg.index = static_cast<uint32_t>(tr.segments.size());
-                        seg.url = ResolveUrl(base_url, m_rel);
-                        seg.duration = 2.0;
-                        seg.encrypted = meta.drm_protected;
-                        seg.method = meta.drm_protected ? "CENC" : "NONE";
-                        tr.segments.push_back(std::move(seg));
+                        if (mpd_duration_sec <= 0.0) {
+                            tr.duration_sec = tr.segments.size() * seg_duration_sec;
+                        }
                     }
                 } else if (std::regex_search(rep_body, bm, kBaseUrlRe)) {
                     SegmentItem seg;

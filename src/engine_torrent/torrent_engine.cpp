@@ -259,19 +259,21 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
         bool peer_choked_us = true;
         std::vector<uint8_t> recv_buf;
         recv_buf.reserve(65536);
+        std::vector<BlockRequest> in_flight_requests;
+        auto task_limiter = std::make_shared<brisk::TokenBucketLimiter>();
 
         while (!cancel_requested.load() && !pause_requested.load() && !piece_mgr->IsAllCompleted()) {
-            // Apply speed limit throttling if enabled
-            uint64_t limit = speed_limit_bps.load();
-            if (limit > 0 || global_limiter) {
-                // Rate limit token bucket application
-                if (global_limiter) global_limiter->Consume(kBlockLength, speed_limit_bps, cancel_requested);
-            }
-
             // Receive messages
             uint8_t temp[16384];
             int r = recv(sock.s, reinterpret_cast<char*>(temp), sizeof(temp), 0);
             if (r <= 0) break;
+
+            // Apply rate limiting throttling on socket read
+            task_limiter->Consume(static_cast<size_t>(r), speed_limit_bps, cancel_requested);
+            if (global_limiter) {
+                global_limiter->Consume(static_cast<size_t>(r), speed_limit_bps, cancel_requested);
+            }
+
             recv_buf.insert(recv_buf.end(), temp, temp + r);
 
             // Process all framed messages in recv_buf
@@ -309,6 +311,14 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
                         }
                     }
                 } else if (msg.id == BtMessageId::kPiece) {
+                    auto fit = std::find_if(in_flight_requests.begin(), in_flight_requests.end(),
+                        [&](const BlockRequest& br) {
+                            return br.piece_index == msg.piece_index && br.begin == msg.block_begin;
+                        });
+                    if (fit != in_flight_requests.end()) {
+                        in_flight_requests.erase(fit);
+                    }
+
                     bool verified = false;
                     bool corrupt = false;
                     piece_mgr->ProcessBlock(msg.piece_index, msg.block_begin, msg.payload.data(), msg.payload.size(), verified, corrupt);
@@ -382,12 +392,23 @@ Result<void> TorrentEngine::ExecuteTorrentDownload(
 
             // If unchoked, request next block batch
             if (!peer_choked_us && !piece_mgr->IsAllCompleted()) {
-                auto reqs = piece_mgr->GetNextRequestsForPeer(peer_have, kDefaultMaxOutstandingRequests);
-                for (const auto& rq : reqs) {
-                    auto req_bytes = PeerWireProtocol::CreateRequest(rq.piece_index, rq.begin, rq.length);
-                    send(sock.s, reinterpret_cast<const char*>(req_bytes.data()), static_cast<int>(req_bytes.size()), 0);
+                size_t slots = (kDefaultMaxOutstandingRequests > in_flight_requests.size())
+                    ? (kDefaultMaxOutstandingRequests - in_flight_requests.size()) : 0;
+                if (slots > 0) {
+                    auto reqs = piece_mgr->GetNextRequestsForPeer(peer_have, slots);
+                    for (const auto& rq : reqs) {
+                        auto req_bytes = PeerWireProtocol::CreateRequest(rq.piece_index, rq.begin, rq.length);
+                        send(sock.s, reinterpret_cast<const char*>(req_bytes.data()), static_cast<int>(req_bytes.size()), 0);
+                        in_flight_requests.push_back(rq);
+                    }
                 }
             }
+        }
+
+        // Cancel any pending unreceived requests for this peer upon disconnection
+        if (!in_flight_requests.empty()) {
+            piece_mgr->CancelInFlightRequests(in_flight_requests);
+            in_flight_requests.clear();
         }
     }
 

@@ -122,14 +122,26 @@ Result<ZipArchiveSummary> ZipPreviewer::InspectArchive(const std::filesystem::pa
     ZipEOCD eocd;
     std::memcpy(&eocd, &tail_buffer[static_cast<size_t>(eocd_idx)], sizeof(ZipEOCD));
 
-    if (eocd.cd_offset + eocd.cd_size > static_cast<uint64_t>(file_size)) {
+    uint64_t u_file_size = static_cast<uint64_t>(file_size);
+    if (eocd.cd_offset >= u_file_size || eocd.cd_size > (u_file_size - eocd.cd_offset)) {
         return Result<ZipArchiveSummary>::Err("ERR_ZIP_CORRUPT", "Central Directory offset exceeds file size");
     }
 
+    const uint32_t kMaxCentralDirectoryBytes = 64 * 1024 * 1024; // 64 MB max CD
+    if (eocd.cd_size > kMaxCentralDirectoryBytes) {
+        return Result<ZipArchiveSummary>::Err("ERR_ZIP_CORRUPT", "Central Directory size exceeds 64 MB limit");
+    }
+
     // Read Central Directory records
-    std::vector<uint8_t> cd_buffer(eocd.cd_size);
     ifs.seekg(eocd.cd_offset, std::ios::beg);
+    if (!ifs) {
+        return Result<ZipArchiveSummary>::Err("ERR_ZIP_CORRUPT", "Failed to seek to Central Directory");
+    }
+    std::vector<uint8_t> cd_buffer(eocd.cd_size);
     ifs.read(reinterpret_cast<char*>(cd_buffer.data()), eocd.cd_size);
+    if (ifs.gcount() != static_cast<std::streamsize>(eocd.cd_size)) {
+        return Result<ZipArchiveSummary>::Err("ERR_ZIP_CORRUPT", "Incomplete read of Central Directory");
+    }
 
     return InspectBuffer(cd_buffer.data(), cd_buffer.size());
 }
@@ -137,9 +149,15 @@ Result<ZipArchiveSummary> ZipPreviewer::InspectArchive(const std::filesystem::pa
 Result<ZipArchiveSummary> ZipPreviewer::InspectBuffer(const uint8_t* data, size_t length) {
     ZipArchiveSummary summary;
     const uint32_t kCdHeaderSig = 0x02014b50;
+    const size_t kMaxZipEntries = 100000;
     size_t offset = 0;
 
     while (offset + sizeof(ZipCDHeader) <= length) {
+        if (summary.entries.size() >= kMaxZipEntries) {
+            summary.is_potential_zip_bomb = true;
+            break;
+        }
+
         uint32_t sig = 0;
         std::memcpy(&sig, data + offset, sizeof(sig));
         if (sig != kCdHeaderSig) {
@@ -150,8 +168,11 @@ Result<ZipArchiveSummary> ZipPreviewer::InspectBuffer(const uint8_t* data, size_
         std::memcpy(&hdr, data + offset, sizeof(ZipCDHeader));
         offset += sizeof(ZipCDHeader);
 
-        if (offset + hdr.filename_length + hdr.extra_length + hdr.comment_length > length) {
-            break;
+        uint64_t variable_lengths = static_cast<uint64_t>(hdr.filename_length) +
+                                    static_cast<uint64_t>(hdr.extra_length) +
+                                    static_cast<uint64_t>(hdr.comment_length);
+        if (variable_lengths > (length - offset)) {
+            return Result<ZipArchiveSummary>::Err("ERR_ZIP_CORRUPT", "Malformed Central Directory variable lengths exceed buffer");
         }
 
         std::string filename(reinterpret_cast<const char*>(data + offset), hdr.filename_length);

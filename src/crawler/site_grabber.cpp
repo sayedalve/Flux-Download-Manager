@@ -24,14 +24,9 @@ std::string ToLower(std::string_view s) {
 }
 
 std::string ExtractHostFromUrl(std::string_view url) {
-    std::string s(url);
-    size_t proto = s.find("://");
-    if (proto == std::string::npos) return "";
-    size_t host_start = proto + 3;
-    size_t host_end = s.find('/', host_start);
-    std::string host_port = (host_end == std::string::npos) ? s.substr(host_start) : s.substr(host_start, host_end - host_start);
-    size_t colon = host_port.find(':');
-    return (colon != std::string::npos) ? host_port.substr(0, colon) : host_port;
+    auto parsed = brisk::HttpClient::ParseUrl(url);
+    if (!parsed.ok()) return "";
+    return parsed.value->host;
 }
 
 } // namespace
@@ -156,13 +151,14 @@ Result<std::vector<GrabbedItem>> SiteGrabber::Crawl(
         return Result<std::vector<GrabbedItem>>::Err("ERR_CRAWLER_START_URL", "Start URL cannot be empty");
     }
 
-    std::string start_host = ExtractHostFromUrl(cfg.start_url);
-    if (start_host.empty()) {
+    auto start_pu = brisk::HttpClient::ParseUrl(cfg.start_url);
+    if (!start_pu.ok()) {
         return Result<std::vector<GrabbedItem>>::Err("ERR_CRAWLER_INVALID_URL", "Invalid starting URL: " + cfg.start_url);
     }
+    std::string start_host = start_pu.value->host;
 
     // SSRF protection on starting host
-    if (!cfg.allow_loopback && brisk::HttpClient::CheckHostResolvesToPrivate(start_host)) {
+    if (!cfg.allow_loopback && (start_pu.value->is_loopback_or_private || brisk::HttpClient::CheckHostResolvesToPrivate(start_host))) {
         return Result<std::vector<GrabbedItem>>::Err("ERR_SSRF_BLOCKED", "Crawl blocked to private/loopback destination: " + start_host);
     }
 
@@ -187,7 +183,9 @@ Result<std::vector<GrabbedItem>> SiteGrabber::Crawl(
         if (visited_pages.count(current.url)) continue;
         visited_pages.insert(current.url);
 
-        std::string current_host = ExtractHostFromUrl(current.url);
+        auto current_pu = brisk::HttpClient::ParseUrl(current.url);
+        if (!current_pu.ok()) continue;
+        std::string current_host = current_pu.value->host;
         if (cfg.same_domain_only && current_host != start_host) {
             continue;
         }
@@ -203,7 +201,7 @@ Result<std::vector<GrabbedItem>> SiteGrabber::Crawl(
         }
 
         // SSRF protection per link
-        if (!cfg.allow_loopback && brisk::HttpClient::CheckHostResolvesToPrivate(current_host)) {
+        if (!cfg.allow_loopback && (current_pu.value->is_loopback_or_private || brisk::HttpClient::CheckHostResolvesToPrivate(current_host))) {
             continue;
         }
 

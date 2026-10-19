@@ -41,6 +41,16 @@ struct HttpResponseMeta {
     std::map<std::string, std::string> raw_headers;
 };
 
+// Explicit outcome for HTTP header callback: distinguishes intentional probe stop,
+// normal body continuation, and error abortion (Phase 1.1 / FDM-001 / FDM-004).
+enum class HeaderAction {
+    kContinue = 0,    // Continue reading response body
+    kStopSuccess = 1, // Intentional stop after headers (probe); returns Ok(meta) without body
+    kAbort = 2        // Abort transfer with error; returns Err(...)
+};
+
+using HeaderCallback = std::function<HeaderAction(const HttpResponseMeta&)>;
+
 // State machine for decoding HTTP/1.1 chunked transfer encoding (RFC 9112 Section 7.1)
 // Removes chunk framing (hex size, extensions, chunk CRLFs, trailers) and delivers
 // pure entity body bytes to the consumer (FDM-003, TG-04).
@@ -98,7 +108,28 @@ public:
 
     // Executes an HTTP/HTTPS GET request with optional byte range [range_start, range_end].
     // Calls on_headers once response headers arrive; if on_headers returns false, aborts before reading body.
+    // Maps an HTTP status code (>= 400) to its designated Result error code
+    static Result<HttpResponseMeta> MapHttpStatusToError(const HttpResponseMeta& meta);
+
+    // Executes an HTTP/HTTPS GET request with optional byte range [range_start, range_end].
+    // Calls on_headers once response headers arrive:
+    //   - HeaderAction::kContinue: proceeds to read body (checks status >= 400 as error)
+    //   - HeaderAction::kStopSuccess: terminates cleanly with Ok(meta) (for header-only probes)
+    //   - HeaderAction::kAbort: aborts transfer and returns Err(...)
     // Calls on_chunk for each body chunk; if on_chunk returns false or cancel_flag becomes true, aborts immediately.
+    static Result<HttpResponseMeta> PerformGet(
+        const std::string& url,
+        const std::map<std::string, std::string>& headers,
+        std::optional<uint64_t> range_start,
+        std::optional<uint64_t> range_end,
+        int timeout_ms,
+        bool allow_loopback_redirect,
+        std::atomic<bool>& cancel_flag,
+        HeaderCallback on_headers,
+        std::function<bool(const uint8_t* data, size_t len)> on_chunk,
+        const HttpNetworkOptions& net_opts = {});
+
+    // Overload for legacy boolean callback callers (true -> kContinue, false -> kAbort)
     static Result<HttpResponseMeta> PerformGet(
         const std::string& url,
         const std::map<std::string, std::string>& headers,

@@ -25,6 +25,7 @@
 #include "engine_torrent/torrent_engine.hpp"
 #include "engine_torrent/torrent_parser.hpp"
 #include "engine_torrent/tracker_client.hpp"
+#include "ipc/ipc_server.hpp"
 #include "security/antivirus_scanner.hpp"
 #include "storage/import_export.hpp"
 #include "storage/sqlite_store.hpp"
@@ -96,7 +97,7 @@ bool TestDynamicWorkerAndDiskSpaceGuard() {
     ASSERT_TRUE(ok_space.ok(), "1 MiB disk space check succeeds");
 
     // Requesting 1 Exabyte must fail immediately with ERR_DISK_FULL
-    auto exhausted = PathSanitizer::CheckAvailableDiskSpace(".", 1000000000000ULL);
+    auto exhausted = PathSanitizer::CheckAvailableDiskSpace(".", 1000000000000000000ULL);
     ASSERT_TRUE(!exhausted.ok() && exhausted.error->code == "ERR_DISK_FULL", "Exabyte request rejected with ERR_DISK_FULL");
     return true;
 }
@@ -3473,11 +3474,230 @@ bool TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile() {
     return true;
 }
 
+bool TestRemediationPhaseRegressionSuites() {
+    using namespace openidm;
+
+    // 1. Test brisk::HttpClient HeaderAction and HTTP status mappings
+    {
+        using brisk::HeaderAction;
+        using brisk::HttpClient;
+        using brisk::HttpResponseMeta;
+
+        HttpResponseMeta m401;
+        m401.status_code = 401;
+        m401.raw_headers["www-authenticate"] = "Basic realm=\"Secure\"";
+        auto r401 = HttpClient::MapHttpStatusToError(m401);
+        ASSERT_TRUE(!r401.ok() && r401.error->code == "ERR_HTTP_AUTH_CHALLENGE", "401 with Basic auth challenge maps to ERR_HTTP_AUTH_CHALLENGE");
+
+        HttpResponseMeta m401_no_auth;
+        m401_no_auth.status_code = 401;
+        auto r401_no = HttpClient::MapHttpStatusToError(m401_no_auth);
+        ASSERT_TRUE(!r401_no.ok() && r401_no.error->code == "ERR_HTTP_403_EXPIRED_OR_AUTH", "401 without auth challenge maps to ERR_HTTP_403_EXPIRED_OR_AUTH");
+
+        HttpResponseMeta m404; m404.status_code = 404;
+        auto r404 = HttpClient::MapHttpStatusToError(m404);
+        ASSERT_TRUE(!r404.ok() && r404.error->code == "ERR_HTTP_404_NOT_FOUND", "404 maps to ERR_HTTP_404_NOT_FOUND");
+
+        HttpResponseMeta m412; m412.status_code = 412;
+        auto r412 = HttpClient::MapHttpStatusToError(m412);
+        ASSERT_TRUE(!r412.ok() && r412.error->code == "ERR_HTTP_VALIDATOR_MISMATCH", "412 maps to ERR_HTTP_VALIDATOR_MISMATCH");
+
+        HttpResponseMeta m416; m416.status_code = 416;
+        auto r416 = HttpClient::MapHttpStatusToError(m416);
+        ASSERT_TRUE(!r416.ok() && r416.error->code == "ERR_HTTP_RANGE_NOT_SATISFIABLE", "416 maps to ERR_HTTP_RANGE_NOT_SATISFIABLE");
+
+        HttpResponseMeta m429; m429.status_code = 429;
+        auto r429 = HttpClient::MapHttpStatusToError(m429);
+        ASSERT_TRUE(!r429.ok() && r429.error->code == "ERR_HTTP_429_RATE_LIMITED", "429 maps to ERR_HTTP_429_RATE_LIMITED");
+
+        HttpResponseMeta m503; m503.status_code = 503;
+        auto r503 = HttpClient::MapHttpStatusToError(m503);
+        ASSERT_TRUE(!r503.ok() && r503.error->code == "ERR_HTTP_5XX_TRANSIENT", "503 maps to ERR_HTTP_5XX_TRANSIENT");
+    }
+
+    // 2. Test LiveSegment split synchronization & 256 KiB minimum threshold
+    {
+        brisk::SegmentScheduler sched(1048576, 4, 1024); // 1 MiB total
+        sched.Initialize();
+        ASSERT_TRUE(sched.CanSplitAnySegment(), "1 MiB segment can be split (> 256 KiB)");
+
+        // Initial worker acquires segment 0
+        auto seg0 = sched.AcquireNextOrStealSegment(true);
+        ASSERT_TRUE(seg0 != nullptr && seg0->start_offset == 0, "Worker 0 acquired initial segment");
+
+        // Secondary worker steals from initial worker
+        auto stolen = sched.AcquireNextOrStealSegment(true);
+        ASSERT_TRUE(stolen != nullptr, "Stole segment from initial worker");
+        ASSERT_TRUE(sched.RollbackUnstartedStolenSegment(stolen->segment_id), "Rollback unstarted stolen segment succeeded");
+
+        // Small total bytes (< 256 KiB) cannot be split
+        brisk::SegmentScheduler small_sched(200000, 4, 1024);
+        small_sched.Initialize();
+        ASSERT_TRUE(!small_sched.CanSplitAnySegment(), "200 KiB segment cannot be split (< 256 KiB min threshold)");
+    }
+
+    // 3. Test Bencode integer parsing edge cases & raw dictionary slice
+    {
+        using namespace openidm::torrent;
+
+        // Leading zeros
+        auto r1 = BencodeParser::Decode("i03e");
+        ASSERT_TRUE(!r1.ok(), "i03e rejected (leading zeros)");
+
+        // Negative zero
+        auto r2 = BencodeParser::Decode("i-0e");
+        ASSERT_TRUE(!r2.ok(), "i-0e rejected (negative zero)");
+
+        // Empty integer
+        auto r3 = BencodeParser::Decode("ie");
+        ASSERT_TRUE(!r3.ok(), "ie rejected (empty integer)");
+
+        // Non-digit characters
+        auto r4 = BencodeParser::Decode("i12a3e");
+        ASSERT_TRUE(!r4.ok(), "i12a3e rejected (non-digit characters)");
+
+        // Integer overflow
+        auto r5 = BencodeParser::Decode("i9999999999999999999999999999999999999999e");
+        ASSERT_TRUE(!r5.ok(), "9999...99e rejected (overflow)");
+
+        // Valid integers
+        auto v1 = BencodeParser::Decode("i42e");
+        ASSERT_TRUE(v1.ok() && v1.value->as_int() == 42, "i42e parsed as 42");
+        auto v2 = BencodeParser::Decode("i-42e");
+        ASSERT_TRUE(v2.ok() && v2.value->as_int() == -42, "i-42e parsed as -42");
+        auto v3 = BencodeParser::Decode("i0e");
+        ASSERT_TRUE(v3.ok() && v3.value->as_int() == 0, "i0e parsed as 0");
+
+        // Raw dictionary slice extraction
+        std::string raw_bencode = "d4:infod6:lengthi1024e4:name8:test.txtee";
+        size_t info_start = raw_bencode.find("4:info") + 6;
+        size_t pos = info_start;
+        ASSERT_TRUE(TorrentParser::GetBencodeValueRange(raw_bencode, pos),
+                    "GetBencodeValueRange extracts raw info dictionary slice");
+        std::string slice = raw_bencode.substr(info_start, pos - info_start);
+        ASSERT_TRUE(slice == "d6:lengthi1024e4:name8:test.txte", "Raw slice preserves exact dictionary bytes");
+    }
+
+    // 4. Test RFC 4180 CSV parsing
+    {
+        using storage::TaskImportExport;
+
+        // Comma inside quotes
+        std::string csv1 = "URL,FileName,Category,Queue,TotalBytes,State\r\n"
+                           "\"https://example.com/file\",\"sample, with comma.zip\",\"Video\",\"main\",1024,\"Queued\"\r\n";
+        auto tasks1 = TaskImportExport::ImportFromCsv(csv1);
+        ASSERT_TRUE(tasks1.ok() && tasks1.value->size() == 1, "CSV with comma in quotes parsed into 1 task");
+        ASSERT_TRUE(tasks1.value->front().file_name == "sample, with comma.zip", "Filename preserves inner comma");
+
+        // Escaped quotes ""
+        std::string csv2 = "URL,FileName,Category,Queue,TotalBytes,State\r\n"
+                           "\"https://example.com/file\",\"sample \"\"quoted\"\" name.mp4\",\"Video\",\"main\",2048,\"Queued\"\r\n";
+        auto tasks2 = TaskImportExport::ImportFromCsv(csv2);
+        ASSERT_TRUE(tasks2.ok() && tasks2.value->size() == 1, "CSV with escaped quotes parsed into 1 task");
+        ASSERT_TRUE(tasks2.value->front().file_name.find("quoted") != std::string::npos, "Filename contains unescaped quote");
+
+        // Multiline field in quotes
+        std::string csv3 = "\"https://example.com/file\",\"line1\nline2.mp4\",\"Video\",\"main\",4096,\"Queued\"\r\n";
+        auto tasks3 = TaskImportExport::ImportFromCsv(csv3);
+        ASSERT_TRUE(tasks3.ok() && tasks3.value->size() == 1, "CSV with multiline field parsed into 1 task");
+    }
+
+    // 5. Test IPC chunked transfer ordering and validation
+    {
+        std::error_code ec;
+        auto test_dir = std::filesystem::temp_directory_path() / ("test_ipc_remediation_" + GenerateUuidV4());
+        std::filesystem::create_directories(test_dir, ec);
+
+        std::string sock = openidm::ipc::IpcServer::DefaultSocketPath() + "_test_rem_" + GenerateUuidV4();
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = test_dir / "state.db";
+        cfg.default_download_dir = test_dir / "downloads";
+        cfg.temp_root_dir = test_dir / "tmp";
+
+        openidm::DownloadController ctrl(cfg);
+        ASSERT_TRUE(ctrl.Initialize().ok(), "Init controller for IPC remediation test");
+        openidm::ipc::IpcServer server(ctrl, sock);
+
+        // Path traversal in saveDir rejected
+        std::string bad_save_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "t-1",
+            "method": "download.offer",
+            "params": {
+                "url": "https://example.com/test.bin",
+                "saveDir": "C:/Windows/../System32"
+            }
+        })JSON";
+        std::string resp1 = server.HandleJsonRpcMessage(bad_save_req);
+        ASSERT_TRUE(resp1.find("ERR_PATH_TRAVERSAL_REJECTED") != std::string::npos, "saveDir with .. rejected");
+
+        // Chunk transfer out-of-order rejection
+        std::string start_chunk_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "t-2",
+            "method": "download.startChunkedTransfer",
+            "params": {
+                "taskId": "task-chunk-test-1",
+                "filename": "chunk_test.bin",
+                "totalBytes": 10
+            }
+        })JSON";
+        std::string resp2 = server.HandleJsonRpcMessage(start_chunk_req);
+        ASSERT_TRUE(resp2.find("\"accepted\":true") != std::string::npos, "Chunked transfer initiated");
+
+        // Send chunkIndex 1 before chunkIndex 0 -> must be rejected
+        std::string bad_chunk_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "t-3",
+            "method": "download.transferChunk",
+            "params": {
+                "taskId": "task-chunk-test-1",
+                "chunkIndex": 1,
+                "dataBase64": "AAAA"
+            }
+        })JSON";
+        std::string resp3 = server.HandleJsonRpcMessage(bad_chunk_req);
+        ASSERT_TRUE(resp3.find("ERR_CHUNK_OUT_OF_ORDER") != std::string::npos, "Chunk 1 before chunk 0 rejected with ERR_CHUNK_OUT_OF_ORDER");
+
+        // Send chunkIndex 0 (4 bytes)
+        std::string good_chunk_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "t-4",
+            "method": "download.transferChunk",
+            "params": {
+                "taskId": "task-chunk-test-1",
+                "chunkIndex": 0,
+                "dataBase64": "AQIDBA=="
+            }
+        })JSON";
+        std::string resp4 = server.HandleJsonRpcMessage(good_chunk_req);
+        ASSERT_TRUE(resp4.find("\"received\":true") != std::string::npos, "Chunk 0 accepted");
+
+        // Send completeChunkedTransfer with expected 10 bytes but only 4 were written -> must be rejected
+        std::string complete_req = R"JSON({
+            "jsonrpc": "2.0",
+            "id": "t-5",
+            "method": "download.completeChunkedTransfer",
+            "params": {
+                "taskId": "task-chunk-test-1",
+                "totalBytes": 10
+            }
+        })JSON";
+        std::string resp5 = server.HandleJsonRpcMessage(complete_req);
+        ASSERT_TRUE(resp5.find("ERR_CHUNKED_TRANSFER_SIZE_MISMATCH") != std::string::npos, "Size mismatch rejected with ERR_CHUNKED_TRANSFER_SIZE_MISMATCH");
+
+        ctrl.Shutdown();
+        std::filesystem::remove_all(test_dir, ec);
+    }
+
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 57;
+    const int total = 58;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
@@ -3544,6 +3764,7 @@ int main() {
     run(55, "TestYouTubeCanonicalRoutingAndSchedulerThroughput", TestYouTubeCanonicalRoutingAndSchedulerThroughput);
     run(56, "TestSpeedFormattingMultiTrackProgressAndContainerVerification", TestSpeedFormattingMultiTrackProgressAndContainerVerification);
     run(57, "TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile", TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile);
+    run(58, "TestRemediationPhaseRegressionSuites", TestRemediationPhaseRegressionSuites);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

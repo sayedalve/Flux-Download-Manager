@@ -14,7 +14,7 @@ param(
     [string]$Nm3u8dlUrl = "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.3.0-beta/N_m3u8DL-RE_v0.3.0-beta_win-x64_20241203.zip",
     [string]$Nm3u8dlExpectedSha256 = "E5C93A8DE0C58C50922C17A8A3BABD7D2193FB43B1A7FACD0B18DE9274EF8061",
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
-    [string]$FfmpegExpectedSha256 = "AA24A30E1194D4CE54999EFF72C58484B1A5AEE32DD9933A9242D15711DF1E48",
+    [string]$FfmpegExpectedSha256 = "", # Rolling latest build; leave empty to verify PE64 & compute hash, or pass pinned hash
     [string]$YtDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
     [string]$YtDlpExpectedSha256 = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
     [switch]$Force = $false,
@@ -111,9 +111,15 @@ try {
         $FoundFf = Get-ChildItem -Path (Join-Path $TmpDir "ff") -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
         if (-not $FoundFf) { throw "ffmpeg.exe not found in downloaded archive: $FfZip" }
         Assert-Pe64Executable $FoundFf.FullName
-        # If sha256 is pinned, verify it; otherwise compute and display
         if ($FfmpegExpectedSha256) {
             Assert-Sha256Checksum $FoundFf.FullName $FfmpegExpectedSha256
+        } else {
+            $hasher = [System.Security.Cryptography.SHA256]::Create()
+            $stream = [System.IO.File]::OpenRead($FoundFf.FullName)
+            $actual = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace("-", "").ToUpperInvariant()
+            $stream.Close()
+            $hasher.Dispose()
+            Write-Host "  [INFO] Verified PE64. Computed SHA-256 for ffmpeg.exe: $actual" -ForegroundColor Cyan
         }
         Copy-Item -Force $FoundFf.FullName $FfExe
         Write-Host "  [OK] Staged and verified ffmpeg.exe" -ForegroundColor Green

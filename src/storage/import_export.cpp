@@ -55,6 +55,71 @@ std::string EscapeCsv(std::string_view str) {
     return out;
 }
 
+std::vector<std::vector<std::string>> ParseRfc4180Csv(std::string_view csv) {
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::string> current_row;
+    std::string current_field;
+    bool in_quotes = false;
+
+    size_t i = 0;
+    const size_t len = csv.size();
+
+    while (i < len) {
+        char c = csv[i];
+
+        if (in_quotes) {
+            if (c == '"') {
+                if (i + 1 < len && csv[i + 1] == '"') {
+                    // Escaped double-quote: "" -> "
+                    current_field.push_back('"');
+                    i += 2;
+                } else {
+                    // Closing quote
+                    in_quotes = false;
+                    i++;
+                }
+            } else {
+                current_field.push_back(c);
+                i++;
+            }
+        } else {
+            if (c == '"') {
+                in_quotes = true;
+                i++;
+            } else if (c == ',') {
+                current_row.push_back(std::move(current_field));
+                current_field.clear();
+                i++;
+            } else if (c == '\r') {
+                if (i + 1 < len && csv[i + 1] == '\n') {
+                    i++;
+                }
+                current_row.push_back(std::move(current_field));
+                current_field.clear();
+                rows.push_back(std::move(current_row));
+                current_row.clear();
+                i++;
+            } else if (c == '\n') {
+                current_row.push_back(std::move(current_field));
+                current_field.clear();
+                rows.push_back(std::move(current_row));
+                current_row.clear();
+                i++;
+            } else {
+                current_field.push_back(c);
+                i++;
+            }
+        }
+    }
+
+    if (!current_field.empty() || !current_row.empty()) {
+        current_row.push_back(std::move(current_field));
+        rows.push_back(std::move(current_row));
+    }
+
+    return rows;
+}
+
 } // namespace
 
 Result<std::string> TaskImportExport::ExportTasksToString(
@@ -172,31 +237,18 @@ Result<std::vector<TaskModel>> TaskImportExport::ImportFromJson(std::string_view
 }
 
 Result<std::vector<TaskModel>> TaskImportExport::ImportFromCsv(std::string_view csv_str) {
+    auto rows = ParseRfc4180Csv(csv_str);
     std::vector<TaskModel> out;
-    std::string s_csv(csv_str);
-    std::stringstream ss(s_csv);
-    std::string line;
-
     bool header_skipped = false;
-    while (std::getline(ss, line)) {
-        if (line.empty()) continue;
+
+    for (const auto& cols : rows) {
+        if (cols.empty() || (cols.size() == 1 && cols[0].empty())) continue;
+
         if (!header_skipped) {
             header_skipped = true;
-            if (line.find("URL") != std::string::npos || line.find("url") != std::string::npos) {
+            if (!cols.empty() && (cols[0] == "URL" || cols[0] == "url" || cols[0].find("URL") != std::string::npos)) {
                 continue;
             }
-        }
-
-        std::stringstream line_ss(line);
-        std::string col;
-        std::vector<std::string> cols;
-
-        while (std::getline(line_ss, col, ',')) {
-            // Trim quotes if present
-            if (col.size() >= 2 && col.front() == '"' && col.back() == '"') {
-                col = col.substr(1, col.size() - 2);
-            }
-            cols.push_back(col);
         }
 
         if (!cols.empty() && !cols[0].empty()) {

@@ -124,9 +124,10 @@ std::shared_ptr<LiveSegment> SegmentScheduler::AcquireNextOrStealSegment(bool al
     }
 
     // 2. Brisk Work-Stealing / Dynamic Connection Reuse:
-    //    Find the active segment with the largest remaining byte range >= 2 * m_min_split_bytes
+    //    Find the active segment with the largest remaining byte range >= 2 * min_separation
     std::shared_ptr<LiveSegment> best_victim = nullptr;
     uint64_t max_remaining = 0;
+    uint64_t min_separation = (std::max<uint64_t>)(m_min_split_bytes, 262144ULL);
 
     for (auto& seg : m_segments) {
         if (seg->completed.load()) continue;
@@ -134,7 +135,7 @@ std::shared_ptr<LiveSegment> SegmentScheduler::AcquireNextOrStealSegment(bool al
         uint64_t end = seg->end_offset.load();
         if (end > curr) {
             uint64_t rem = end - curr + 1;
-            if (rem >= 2 * m_min_split_bytes && rem > max_remaining) {
+            if (rem >= 2 * min_separation && rem > max_remaining) {
                 max_remaining = rem;
                 best_victim = seg;
             }
@@ -145,28 +146,28 @@ std::shared_ptr<LiveSegment> SegmentScheduler::AcquireNextOrStealSegment(bool al
         return nullptr;
     }
 
+    std::lock_guard<std::mutex> write_lock(best_victim->write_mu);
     uint64_t curr = best_victim->current_offset.load();
     uint64_t old_end = best_victim->end_offset.load();
     if (old_end <= curr) {
         return nullptr;
     }
     uint64_t rem = old_end - curr + 1;
-    if (rem < 2 * m_min_split_bytes) {
+    if (rem < 2 * min_separation) {
         return nullptr;
     }
 
     uint64_t raw_mid = curr + (rem / 2);
     // Align split point to 4096-byte page boundary if possible
     uint64_t split_start = (raw_mid + 4095ULL) & ~4095ULL;
-    uint64_t min_separation = (std::max<uint64_t>)(m_min_split_bytes, 262144ULL);
-    if (split_start <= curr + min_separation || split_start >= old_end) {
+    if (split_start <= curr + min_separation || split_start + min_separation > old_end + 1) {
         split_start = raw_mid;
     }
     if (split_start <= curr + min_separation || split_start >= old_end) {
         return nullptr;
     }
 
-    // Atomically shrink victim's end_offset to split_start - 1
+    // Atomically shrink victim's end_offset to split_start - 1 while holding write_mu
     best_victim->end_offset.store(split_start - 1);
 
     // Double check that victim has not concurrently advanced past split_start
@@ -202,6 +203,7 @@ bool SegmentScheduler::RollbackUnstartedStolenSegment(uint32_t segment_id) {
 
     for (auto& pred : m_segments) {
         if (pred->segment_id != segment_id && pred->end_offset.load() + 1 == start && !pred->completed.load()) {
+            std::lock_guard<std::mutex> pred_lock(pred->write_mu);
             pred->end_offset.store(end);
             m_segments.erase(it);
             return true;
@@ -262,11 +264,12 @@ size_t SegmentScheduler::ActiveWorkerCount() const {
 
 bool SegmentScheduler::CanSplitAnySegment() const {
     std::lock_guard<std::mutex> lock(m_mutex);
+    uint64_t min_separation = (std::max<uint64_t>)(m_min_split_bytes, 262144ULL);
     for (const auto& s : m_segments) {
         if (s->completed.load(std::memory_order_relaxed)) continue;
         uint64_t curr = s->current_offset.load(std::memory_order_relaxed);
         uint64_t end = s->end_offset.load(std::memory_order_relaxed);
-        if (end > curr && (end - curr + 1) >= 2 * m_min_split_bytes) {
+        if (end > curr && (end - curr + 1) >= 2 * min_separation) {
             return true;
         }
     }

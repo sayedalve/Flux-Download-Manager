@@ -171,7 +171,7 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
         } else if (i == 9) {
             brc = g.settings_button_rect;
         } else {
-            brc = RectI{w + static_cast<int>(i * 50), 0, w + static_cast<int>(i * 50 + 40), 30};
+            brc = RectI{0, 0, 0, 0};
         }
         g.toolbar_buttons.push_back({d.id, d.label, d.enabled, d.primary, brc});
     }
@@ -2245,6 +2245,7 @@ Result<void> DesktopView::TriggerToolbarAction(ToolbarActionId action_id) {
         case ToolbarActionId::kPause:        return ActionPauseSelected();
         case ToolbarActionId::kResume:       return ActionResumeSelected();
         case ToolbarActionId::kRetry:        return ActionRetrySelected();
+        case ToolbarActionId::kCancel:       return ActionCancelSelected();
         case ToolbarActionId::kRemove: {
 #ifdef _WIN32
             if (m_hwnd) {
@@ -3710,9 +3711,9 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
             HINSTANCE hInst = GetModuleHandleW(nullptr);
 
-            // 1. Permanently Delete Button (Coral Red Accent #FF4F57, Initially Focused)
+            // 1. Permanently Delete Button (Coral Red Accent #FF4F57)
             ctx->hPermanentBtn = CreateWindowExW(0, L"BUTTON", L"Permanently Delete",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_OWNERDRAW,
                 24, 185, 175, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6001)), hInst, nullptr);
 
             // 2. Move to Recycle Bin Button
@@ -3720,9 +3721,9 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_OWNERDRAW,
                 209, 185, 160, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6002)), hInst, nullptr);
 
-            // 3. Cancel Button
+            // 3. Cancel Button (Initially Focused, Safe Default)
             ctx->hCancelBtn = CreateWindowExW(0, L"BUTTON", L"Cancel",
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_OWNERDRAW,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
                 379, 185, 105, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(6003)), hInst, nullptr);
 
             return 0;
@@ -3909,7 +3910,7 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
 
     EnableWindow(hwnd_parent, FALSE);
     SetForegroundWindow(hDlg);
-    SetFocus(ctx.hPermanentBtn);
+    SetFocus(ctx.hCancelBtn);
 
     MSG msg{};
     while (IsWindow(hDlg) && GetMessageW(&msg, nullptr, 0, 0)) {
@@ -3919,13 +3920,13 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
                 break;
             } else if (msg.wParam == VK_RETURN) {
                 HWND focused = GetFocus();
-                if (focused == ctx.hRecycleBtn) {
-                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hRecycleBtn));
-                } else if (focused == ctx.hCancelBtn) {
-                    DestroyWindow(hDlg);
-                } else {
-                    // Default enter action: Permanently Delete
+                if (focused == ctx.hPermanentBtn) {
                     SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6001, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hPermanentBtn));
+                } else if (focused == ctx.hRecycleBtn) {
+                    SendMessageW(hDlg, WM_COMMAND, MAKEWPARAM(6002, BN_CLICKED), reinterpret_cast<LPARAM>(ctx.hRecycleBtn));
+                } else {
+                    // Default enter action: Safe option (Cancel)
+                    DestroyWindow(hDlg);
                 }
                 if (!IsWindow(hDlg)) break;
             }
@@ -5371,15 +5372,8 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     auto aid = geom.toolbar_buttons[static_cast<size_t>(hit.index)].action_id;
                     if (aid == ToolbarActionId::kAddUrl) {
                         ShowAddUrlQuickDialogWin32(hwnd, *ctx->view, *ctx->controller);
-                    } else if (aid == ToolbarActionId::kOpenFolder) {
-                        ctx->view->ActionOpenDestinationFolder(false);
                     }
                 }
-            } else if (hit.type == HitTargetType::kRowInlineAction || hit.type == HitTargetType::kTaskRowActionButton) {
-                ctx->view->SelectTask(hit.task_id);
-                ctx->view->TriggerRowPrimaryAction(hit.task_id);
-            } else if (hit.type == HitTargetType::kTaskRow && msg == WM_LBUTTONDBLCLK) {
-                ctx->view->ActionOpenCompletedFile(false);
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;

@@ -148,7 +148,6 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
     // -------------------------------------------------------------------------
     task.state = TaskState::kProbing;
     task.status_detail = "Probing server & headers...";
-    bool probe_aborted_after_headers = false;
     HttpResponseMeta probe_meta;
     std::atomic<bool> probe_cancel{false};
 
@@ -160,17 +159,11 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         m_cfg.stall_timeout_ms,
         m_cfg.allow_loopback_redirect,
         probe_cancel,
-        [&](const HttpResponseMeta& meta) -> bool {
+        [&](const HttpResponseMeta& meta) -> HeaderAction {
             probe_meta = meta;
-            if (meta.status_code == 200 || meta.status_code == 416) {
-                probe_aborted_after_headers = true;
-                return false;
-            }
-            return true;
+            return HeaderAction::kStopSuccess;
         },
-        [&](const uint8_t*, size_t) -> bool {
-            return true;
-        },
+        nullptr,
         m_cfg.net_opts);
 
     // FDM-017: If server returned 416 Range Not Satisfiable during range probe (common for 0-byte files), retry un-ranged GET
@@ -184,22 +177,25 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             m_cfg.stall_timeout_ms,
             m_cfg.allow_loopback_redirect,
             probe_cancel,
-            [&](const HttpResponseMeta& meta) -> bool {
+            [&](const HttpResponseMeta& meta) -> HeaderAction {
                 probe_meta = meta;
-                probe_aborted_after_headers = true;
-                return false;
+                return HeaderAction::kStopSuccess;
             },
-            [&](const uint8_t*, size_t) -> bool { return true; },
+            nullptr,
             m_cfg.net_opts);
+        if (!unrange_res.ok()) {
+            probe_res = unrange_res;
+        }
     }
 
-    if (!probe_res.ok() && !probe_aborted_after_headers) {
-        task.state = probe_res.error->user_action_resumable ? TaskState::kPaused : TaskState::kFailed;
-        task.error_code = probe_res.error->code;
-        task.error_message = probe_res.error->message;
+    if (!probe_res.ok() || probe_meta.status_code >= 400) {
+        Error probe_err = !probe_res.ok() ? *probe_res.error : *HttpClient::MapHttpStatusToError(probe_meta).error;
+        task.state = probe_err.user_action_resumable ? TaskState::kPaused : TaskState::kFailed;
+        task.error_code = probe_err.code;
+        task.error_message = probe_err.message;
         task.status_detail = task.error_message;
         return Result<std::filesystem::path>::Err(
-            probe_res.error->code, probe_res.error->message, probe_res.error->retryable, probe_res.error->user_action_resumable);
+            probe_err.code, probe_err.message, probe_err.retryable, probe_err.user_action_resumable);
     }
 
     // FDM-007: Cross-origin redirect credential scrubbing
@@ -291,8 +287,14 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             task.file_name = cd_name;
         }
     }
+    if (task.file_name.empty() || task.file_name == "download" || task.file_name == "index.html" || task.file_name == "file") {
+        std::string url_name = PathSanitizer::ExtractFromUrl(task.url);
+        if (!url_name.empty() && url_name != "download") {
+            task.file_name = url_name;
+        }
+    }
     if (task.file_name.empty()) {
-        task.file_name = PathSanitizer::ExtractFromUrl(task.url);
+        task.file_name = "download.bin";
     }
     task.file_name = PathSanitizer::SanitizeFileName(task.file_name);
     task.category = InferCategoryFromFilename(task.file_name);
@@ -411,7 +413,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             m_cfg.stall_timeout_ms,
             m_cfg.allow_loopback_redirect,
             stop_flag,
-            [&](const HttpResponseMeta&) -> bool { return true; },
+            [&](const HttpResponseMeta&) -> HeaderAction { return HeaderAction::kContinue; },
             [&](const uint8_t* data, size_t len) -> bool {
                 if (pause_requested.load() || cancel_requested.load()) {
                     stop_flag.store(true);
@@ -532,23 +534,23 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         m_cfg.stall_timeout_ms,
                         m_cfg.allow_loopback_redirect,
                         req_cancel,
-                        [&](const HttpResponseMeta& meta) -> bool {
+                        [&](const HttpResponseMeta& meta) -> HeaderAction {
                             if (meta.status_code == 416) {
                                 if (curr == 0 && (total_bytes == 0 || meta.range_total == 0)) {
                                     seg->completed.store(true);
-                                    return false;
+                                    return HeaderAction::kStopSuccess;
                                 }
                                 std::lock_guard<std::mutex> lk(err_mu);
                                 fatal_error = Error{"ERR_HTTP_RANGE_NOT_SATISFIABLE", "HTTP 416 Range Not Satisfiable", false, true};
                                 fatal_abort.store(true);
-                                return false;
+                                return HeaderAction::kAbort;
                             }
                             // Range satisfaction validation (aria2 HttpRequest::isRangeSatisfied)
                             if (meta.status_code != 206 || !meta.is_partial_content || meta.range_start != curr) {
                                 server_ignored_range = true;
                                 disable_splitting.store(true);
                                 OPENIDM_LOG_WARN("BriskEngine", "Server ignored Range header on worker; aborting secondary range stream");
-                                return false;
+                                return HeaderAction::kAbort;
                             }
                             if (total_bytes > 0 && meta.range_total > 0 && meta.range_total != total_bytes) {
                                 std::lock_guard<std::mutex> lk(err_mu);
@@ -556,9 +558,9 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                     "Remote entity length changed mid-download (expected " +
                                     std::to_string(total_bytes) + ", got " + std::to_string(meta.range_total) + ")", false, false};
                                 fatal_abort.store(true);
-                                return false;
+                                return HeaderAction::kAbort;
                             }
-                            return true;
+                            return HeaderAction::kContinue;
                         },
                         [&](const uint8_t* data, size_t len) -> bool {
                             if (fatal_abort.load() || pause_requested.load() || cancel_requested.load()) {
@@ -566,21 +568,24 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 return false;
                             }
 
+                            consume_both_limiters(len, req_cancel);
+
+                            std::lock_guard<std::mutex> write_lk(seg->write_mu);
                             uint64_t write_pos = seg->current_offset.load();
                             uint64_t current_end = seg->end_offset.load();
                             if (write_pos > current_end) {
+                                seg->completed.store(true);
                                 req_cancel.store(true);
                                 return false;
                             }
 
                             uint64_t max_writable = (current_end >= write_pos) ? (current_end - write_pos + 1) : 0;
                             if (max_writable == 0) {
+                                seg->completed.store(true);
                                 req_cancel.store(true);
                                 return false;
                             }
                             size_t to_write = static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(len), max_writable));
-
-                            consume_both_limiters(to_write, req_cancel);
 
                             if (!part_file.PWrite(data, to_write, write_pos)) {
                                 std::lock_guard<std::mutex> lk(err_mu);

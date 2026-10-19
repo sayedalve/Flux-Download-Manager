@@ -13,7 +13,7 @@
 #   9. Video element using a blob: URL (both backed MSE blob resolved via discovery and unbacked blob producing clear error)
 #  10. YouTube extraction routing path (controlled watch page with adaptive video+audio tracks muxed via FFmpeg,
 #      JSON-in-m3u8 rejection guard, and external yt-dlp worker execution path)
-# Also executes a real Chromium browser session against the local test server to inspect DOM overlays and console logs.
+# Also executes an offline simulated V8 DOM environment against the local test server to inspect DOM overlays and console logs.
 
 import hashlib
 import http.server
@@ -477,9 +477,9 @@ def run_extension_bridge_step(script_js: str, sock_path: str):
     return json.loads(res.stdout.strip().splitlines()[-1])
 
 
-def run_real_chromium_session_verification(base_url: str, work_dir: Path):
-    # Execute a live multi-world V8 browser session (Page MAIN world catch.js + ISOLATED world content-script.js
-    # + MV3 Service Worker background.js) against the live HTTP fixture page, verifying:
+def run_offline_dom_simulation_verification(base_url: str, work_dir: Path):
+    # Execute an offline simulated multi-world V8 session in Node.js (Page MAIN world catch.js + ISOLATED world content-script.js
+    # + MV3 Service Worker background.js) against the local HTTP fixture page, verifying:
     # 1. Empty <video#video-empty> (640x360, no src) does NOT get a false overlay button.
     # 2. Direct <video#video-mp4> gets a Closed Shadow DOM overlay button.
     # 3. Dynamically inserted <video#video-dynamic> triggers MutationObserver + catch.js discovery + overlay attachment.
@@ -943,11 +943,11 @@ function callNativeHost(payload) {
         print(f"  -> PASS (WebM video detected & downloaded -> {webm_out.name})")
 
         # ---------------------------------------------------------------------
-        # Fixture 6: Dynamically Inserted Video & Real Chromium DOM Overlay Check
+        # Fixture 6: Dynamically Inserted Video & Offline DOM Simulation Verification
         # ---------------------------------------------------------------------
-        print("[6/10] Testing Fixture 6: Dynamically Inserted Video & Real Chromium Session DOM Verification...")
-        chrome_res = run_real_chromium_session_verification(base_url, work_dir)
-        print(f"  -> PASS (Dynamic video & real Chromium DOM verified: {chrome_res})")
+        print("[6/10] Testing Fixture 6: Dynamically Inserted Video & Offline V8 DOM Simulation...")
+        chrome_res = run_offline_dom_simulation_verification(base_url, work_dir)
+        print(f"  -> PASS (Dynamic video & offline simulated DOM verified: {chrome_res})")
 
         # ---------------------------------------------------------------------
         # Fixture 7: HLS Master Playlist (.m3u8) via N_m3u8DL-RE + FFmpeg
@@ -1106,7 +1106,7 @@ function callNativeHost(payload) {
         assert "Dispatching task=" in log_text and "YOUTUBE_EXTRACTION" in log_text, f"Expected correlation & dispatch logs in flux.log. Actual log contents:\n{log_text}"
 
         print("\n=================================================================")
-        print("  ALL 10 DETERMINISTIC FIXTURES & REAL CHROMIUM TESTS PASSED!    ")
+        print("  ALL 10 DETERMINISTIC FIXTURES & OFFLINE SIMULATION TESTS PASSED!    ")
         print("=================================================================")
     finally:
         if nmh_proc:

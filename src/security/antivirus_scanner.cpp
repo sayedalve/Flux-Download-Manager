@@ -106,6 +106,17 @@ Result<std::pair<int, std::string>> RunProcessCaptureOutput(
 }
 #endif
 
+#ifdef _WIN32
+std::wstring Utf8ToWide(std::string_view sv) {
+    if (sv.empty()) return {};
+    int sz = MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), nullptr, 0);
+    if (sz <= 0) return {};
+    std::wstring out(sz, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, sv.data(), static_cast<int>(sv.size()), out.data(), sz);
+    return out;
+}
+#endif
+
 } // namespace
 
 bool AntivirusScanner::IsWindowsDefenderAvailable() {
@@ -139,8 +150,10 @@ std::filesystem::path AntivirusScanner::GetDefenderPath() {
             }
         }
     }
-#endif
     return "C:\\Program Files\\Windows Defender\\MpCmdRun.exe";
+#else
+    return {};
+#endif
 }
 
 Result<ScanReport> AntivirusScanner::ScanWithDefender(
@@ -152,12 +165,12 @@ Result<ScanReport> AntivirusScanner::ScanWithDefender(
         return Result<ScanReport>::Err("ERR_FILE_NOT_FOUND", "Target file does not exist: " + target_file.string());
     }
 
+#ifdef _WIN32
     auto defender_path = GetDefenderPath();
-    if (!std::filesystem::exists(defender_path, ec)) {
+    if (defender_path.empty() || !std::filesystem::exists(defender_path, ec)) {
         return Result<ScanReport>::Err("ERR_DEFENDER_NOT_FOUND", "Windows Defender (MpCmdRun.exe) not found");
     }
 
-#ifdef _WIN32
     auto start_tp = std::chrono::steady_clock::now();
 
     std::wstring cmd = L"\"" + defender_path.wstring() + L"\" -Scan -ScanType 3 -File \"" + target_file.wstring() + L"\"";
@@ -184,6 +197,7 @@ Result<ScanReport> AntivirusScanner::ScanWithDefender(
     }
     return Result<ScanReport>::Ok(std::move(rep));
 #else
+    (void)timeout_ms;
     ScanReport rep;
     rep.status = ScanStatus::kUnavailable;
     rep.scanner_name = "Mock Defender (POSIX)";
@@ -207,17 +221,17 @@ Result<ScanReport> AntivirusScanner::ScanWithCustomExecutable(
     }
 
 #ifdef _WIN32
-    std::string templ(args_template);
-    std::string placeholder = "{file}";
-    size_t ph_pos = templ.find(placeholder);
-    if (ph_pos != std::string::npos) {
-        templ.replace(ph_pos, placeholder.size(), "\"" + target_file.string() + "\"");
+    std::wstring wtarget = target_file.wstring();
+    std::wstring wtempl = Utf8ToWide(args_template);
+    std::wstring wplaceholder = L"{file}";
+    size_t ph_pos = wtempl.find(wplaceholder);
+    if (ph_pos != std::wstring::npos) {
+        wtempl.replace(ph_pos, wplaceholder.size(), L"\"" + wtarget + L"\"");
     } else {
-        templ += " \"" + target_file.string() + "\"";
+        wtempl += L" \"" + wtarget + L"\"";
     }
 
-    std::wstring wargs(templ.begin(), templ.end());
-    std::wstring cmd = L"\"" + custom_exe.wstring() + L"\" " + wargs;
+    std::wstring cmd = L"\"" + custom_exe.wstring() + L"\" " + wtempl;
 
     auto start_tp = std::chrono::steady_clock::now();
     auto proc_res = RunProcessCaptureOutput(custom_exe.wstring(), cmd, timeout_ms);
@@ -242,6 +256,8 @@ Result<ScanReport> AntivirusScanner::ScanWithCustomExecutable(
 
     return Result<ScanReport>::Ok(std::move(rep));
 #else
+    (void)args_template;
+    (void)timeout_ms;
     ScanReport rep;
     rep.status = ScanStatus::kUnavailable;
     rep.scanner_name = custom_exe.filename().string();

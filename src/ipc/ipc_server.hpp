@@ -80,6 +80,7 @@ private:
         std::string filename;
         std::string page_url;
         std::string correlation_id;
+        std::string save_dir;
         uint64_t expected_total_bytes{0};
         uint64_t bytes_written{0};
         uint32_t next_chunk_index{0};

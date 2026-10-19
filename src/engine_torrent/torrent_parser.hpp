@@ -51,6 +51,7 @@ public:
     static Result<TorrentInfo> ParseTorrentBuffer(std::string_view data);
     static Result<TorrentInfo> ParseMagnetUri(std::string_view magnet_uri);
 
+    static bool GetBencodeValueRange(std::string_view s, size_t& pos, size_t depth = 0);
     static bool VerifyPiece(const uint8_t* piece_data, size_t piece_len, const std::vector<uint8_t>& expected_sha1);
     static bool VerifyPieceHex(const uint8_t* piece_data, size_t piece_len, std::string_view expected_sha1_hex);
 };

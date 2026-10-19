@@ -332,6 +332,11 @@ Result<void> Nm3u8dlReAdapter::ValidateManifestSafety(std::string_view url, std:
         if (url.front() == '-' || url.front() == '@') {
             return Result<void>::Err("ERR_SEC_FLAG_INJECTION", "Manifest URL cannot begin with '-' or '@'");
         }
+        for (char c : url) {
+            if (static_cast<unsigned char>(c) <= 32 || c == '"' || c == '\\' || c == '\'' || c == '`') {
+                return Result<void>::Err("ERR_SEC_FLAG_INJECTION", "Invalid or dangerous characters in manifest URL");
+            }
+        }
         auto pu = brisk::HttpClient::ParseUrl(url);
         if (!pu.ok()) {
             return Result<void>::Err(pu.error->code, pu.error->message);
@@ -339,6 +344,10 @@ Result<void> Nm3u8dlReAdapter::ValidateManifestSafety(std::string_view url, std:
         if (pu.value->is_loopback_or_private && !m_cfg.allow_loopback_manifests) {
             return Result<void>::Err("ERR_SEC_SSRF_BLOCKED", "Loopback/private manifest URLs are blocked");
         }
+    }
+
+    if (body.size() > 10 * 1024 * 1024) {
+        return Result<void>::Err("ERR_STREAM_MANIFEST_TOO_LARGE", "Manifest exceeds 10 MB maximum size limit");
     }
 
     // Defect B Fix: Reject JSON descriptors or non-manifest bodies passed as cached_manifest_body
@@ -367,16 +376,26 @@ Result<void> Nm3u8dlReAdapter::ValidateManifestSafety(std::string_view url, std:
 
     std::string lower(body);
     for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (lower.find("file://") != std::string::npos ||
-        lower.find("smb://") != std::string::npos ||
-        lower.find("\\\\") != std::string::npos) {
-        return Result<void>::Err("ERR_SEC_HOSTILE_MANIFEST", "Manifest contains forbidden local file/UNC URI");
-    }
-    if (!m_cfg.allow_loopback_manifests &&
-        (lower.find("http://127.0.0.1") != std::string::npos ||
-         lower.find("http://localhost") != std::string::npos ||
-         lower.find("http://169.254.") != std::string::npos)) {
-        return Result<void>::Err("ERR_SEC_HOSTILE_MANIFEST", "Manifest contains loopback/link-local SSRF segment URI");
+
+    // Line-by-line structural check for URI lines and key tags
+    std::istringstream stream(lower);
+    std::string line;
+    while (std::getline(stream, line)) {
+        line = TrimView(line);
+        if (line.empty()) continue;
+        if (line.find("file://") != std::string::npos ||
+            line.find("smb://") != std::string::npos ||
+            line.find("\\\\") != std::string::npos) {
+            return Result<void>::Err("ERR_SEC_HOSTILE_MANIFEST", "Manifest contains forbidden local file/UNC URI");
+        }
+        if (!m_cfg.allow_loopback_manifests &&
+            (line.find("http://127.0.0.1") != std::string::npos ||
+             line.find("http://localhost") != std::string::npos ||
+             line.find("http://169.254.") != std::string::npos ||
+             line.find("http://10.") != std::string::npos ||
+             line.find("http://192.168.") != std::string::npos)) {
+            return Result<void>::Err("ERR_SEC_HOSTILE_MANIFEST", "Manifest contains loopback/link-local SSRF segment URI");
+        }
     }
     return Result<void>::Ok();
 }
@@ -911,9 +930,17 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteStreamDownload(
         rsp_lines.push_back("-R " + std::to_string(kbps) + "K");
     }
     for (const auto& [k, v] : task.headers) {
+        if (k.find('\r') != std::string::npos || k.find('\n') != std::string::npos ||
+            v.find('\r') != std::string::npos || v.find('\n') != std::string::npos) {
+            continue;
+        }
         rsp_lines.push_back("-H \"" + EscapeRspArg(k + ": " + v) + "\"");
     }
     for (const auto& [k, v] : task.auth_headers) {
+        if (k.find('\r') != std::string::npos || k.find('\n') != std::string::npos ||
+            v.find('\r') != std::string::npos || v.find('\n') != std::string::npos) {
+            continue;
+        }
         rsp_lines.push_back("-H \"" + EscapeRspArg(k + ": " + v) + "\"");
     }
 
@@ -2045,19 +2072,19 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
             30000,
             m_cfg.allow_loopback_manifests,
             cancel_requested,
-            [&](const brisk::HttpResponseMeta& meta) -> bool {
+            [&](const brisk::HttpResponseMeta& meta) -> brisk::HeaderAction {
                 if (meta.status_code != 200 && meta.status_code != 206) {
-                    return false;
+                    return brisk::HeaderAction::kAbort;
                 }
                 if (meta.content_length > 0) {
                     track_total = meta.content_length;
                 }
-                return true;
+                return brisk::HeaderAction::kContinue;
             },
             [&](const uint8_t* data, size_t len) -> bool {
                 if (pause_requested.load() || cancel_requested.load()) return false;
                 ofs.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(len));
-                if (!ofs) return false;
+                if (!ofs.good()) return false;
                 track_dl += len;
                 cumulative_bytes += len;
 
@@ -2093,7 +2120,15 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 }
                 return true;
             });
+
+        ofs.flush();
+        if (!ofs.good()) {
+            return Result<void>::Err("ERR_STORAGE_WRITE", "Failed to write or flush track file");
+        }
         ofs.close();
+        if (!res.ok()) {
+            return Result<void>::Err(res.error->code, res.error->message);
+        }
         if (cancel_requested.load()) {
             return Result<void>::Err("ERR_CANCELED", "Download canceled");
         }

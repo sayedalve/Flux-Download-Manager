@@ -1,5 +1,6 @@
 # Build directories and outputs
 build/
+build*/
 bin/
 obj/
 dist/
@@ -16,8 +17,9 @@ tools/win-x64/*
 *.exe
 *.dll
 
-# Reference repositories
-third_party/reference_repos/
+# Third-party dependencies & audit artifacts
+third_party/
+idm audit/
 
 # Release archives
 *.zip

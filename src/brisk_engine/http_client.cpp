@@ -572,6 +572,28 @@ bool HttpClient::IsLinkExpiredStatus(int status_code, std::string_view www_authe
     return false;
 }
 
+Result<HttpResponseMeta> HttpClient::MapHttpStatusToError(const HttpResponseMeta& meta) {
+    if (meta.status_code == 407) {
+        return Result<HttpResponseMeta>::Err("ERR_PROXY_AUTH_REQUIRED", "Proxy authentication required (HTTP 407)", false, true);
+    }
+    std::string www_auth;
+    auto auth_it = meta.raw_headers.find("www-authenticate");
+    if (auth_it != meta.raw_headers.end()) www_auth = auth_it->second;
+
+    if (IsLinkExpiredStatus(meta.status_code, www_auth)) {
+        return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH", "HTTP " + std::to_string(meta.status_code) + " (Link Expired or Auth Required)", false, true);
+    }
+    if (meta.status_code == 401) {
+        return Result<HttpResponseMeta>::Err("ERR_HTTP_AUTH_CHALLENGE", "HTTP 401 Authorization Challenge Required", false, true);
+    }
+    if (meta.status_code == 404) return Result<HttpResponseMeta>::Err("ERR_HTTP_404_NOT_FOUND", "HTTP 404 Not Found", false, false);
+    if (meta.status_code == 412) return Result<HttpResponseMeta>::Err("ERR_HTTP_VALIDATOR_MISMATCH", "HTTP 412 Precondition Failed", false, true);
+    if (meta.status_code == 416) return Result<HttpResponseMeta>::Err("ERR_HTTP_RANGE_NOT_SATISFIABLE", "HTTP 416 Range Not Satisfiable", false, true);
+    if (meta.status_code == 429) return Result<HttpResponseMeta>::Err("ERR_HTTP_429_RATE_LIMITED", "HTTP 429 Too Many Requests", true, true);
+    if (meta.status_code >= 500) return Result<HttpResponseMeta>::Err("ERR_HTTP_5XX_TRANSIENT", "HTTP " + std::to_string(meta.status_code) + " Server Error", true, true);
+    return Result<HttpResponseMeta>::Err("ERR_HTTP_CLIENT", "HTTP status " + std::to_string(meta.status_code));
+}
+
 Result<HttpResponseMeta> HttpClient::PerformGet(
     const std::string& initial_url,
     const std::map<std::string, std::string>& headers,
@@ -580,7 +602,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
     int timeout_ms,
     bool allow_loopback_redirect,
     std::atomic<bool>& cancel_flag,
-    std::function<bool(const HttpResponseMeta&)> on_headers,
+    HeaderCallback on_headers,
     std::function<bool(const uint8_t* data, size_t len)> on_chunk,
     const HttpNetworkOptions& net_opts) {
 
@@ -600,6 +622,11 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         }
         ParsedUrl pu = *parsed_res.value;
         bool host_is_private = pu.is_loopback_or_private || HttpClient::CheckHostResolvesToPrivate(pu.host);
+        if (!allow_loopback_redirect && host_is_private) {
+            return Result<HttpResponseMeta>::Err(
+                "ERR_NET_UNSAFE_HOST",
+                "Blocked fetch to loopback/private/internal address: " + current_url);
+        }
         if (redirect_hop == 0) {
             initial_pu = pu;
             started_on_public_host = !host_is_private;
@@ -625,17 +652,23 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             }
         }
 
-        // Auto-inject HTTP Basic Authorization from URL userinfo if not explicitly provided
+        // Auto-inject HTTP Basic Authorization from URL userinfo only for same-origin
         if (!pu.userinfo.empty()) {
-            bool has_auth = false;
-            for (const auto& [hk, hv] : current_headers) {
-                if (ToLower(hk) == "authorization") {
-                    has_auth = true;
-                    break;
+            bool origin_matches = (redirect_hop == 0) ||
+                                  (pu.scheme == initial_pu.scheme &&
+                                   ToLower(pu.host) == ToLower(initial_pu.host) &&
+                                   pu.port == initial_pu.port);
+            if (origin_matches) {
+                bool has_auth = false;
+                for (const auto& [hk, hv] : current_headers) {
+                    if (ToLower(hk) == "authorization") {
+                        has_auth = true;
+                        break;
+                    }
                 }
-            }
-            if (!has_auth) {
-                current_headers["Authorization"] = "Basic " + CryptoUtils::Base64Encode(pu.userinfo);
+                if (!has_auth) {
+                    current_headers["Authorization"] = "Basic " + CryptoUtils::Base64Encode(pu.userinfo);
+                }
             }
         }
 
@@ -789,32 +822,24 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             continue;
         }
 
-        if (on_headers && !on_headers(meta)) {
-            cleanup_winhttp();
-            return Result<HttpResponseMeta>::Ok(std::move(meta));
+        if (on_headers) {
+            HeaderAction action = on_headers(meta);
+            if (action == HeaderAction::kStopSuccess) {
+                cleanup_winhttp();
+                return Result<HttpResponseMeta>::Ok(std::move(meta));
+            }
+            if (action == HeaderAction::kAbort) {
+                cleanup_winhttp();
+                if (meta.status_code >= 400) {
+                    return MapHttpStatusToError(meta);
+                }
+                return Result<HttpResponseMeta>::Err("ERR_HTTP_ABORTED", "Transfer aborted after headers");
+            }
         }
 
         if (meta.status_code >= 400) {
             cleanup_winhttp();
-            if (meta.status_code == 407) {
-                return Result<HttpResponseMeta>::Err("ERR_PROXY_AUTH_REQUIRED", "Proxy authentication required (HTTP 407)", false, true);
-            }
-            std::string www_auth;
-            auto auth_it = meta.raw_headers.find("www-authenticate");
-            if (auth_it != meta.raw_headers.end()) www_auth = auth_it->second;
-
-            if (IsLinkExpiredStatus(meta.status_code, www_auth)) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH", "HTTP " + std::to_string(meta.status_code) + " (Link Expired or Auth Required)", false, true);
-            }
-            if (meta.status_code == 401) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_AUTH_CHALLENGE", "HTTP 401 Authorization Challenge Required", false, true);
-            }
-            if (meta.status_code == 404) return Result<HttpResponseMeta>::Err("ERR_HTTP_404_NOT_FOUND", "HTTP 404 Not Found", false, false);
-            if (meta.status_code == 412) return Result<HttpResponseMeta>::Err("ERR_HTTP_VALIDATOR_MISMATCH", "HTTP 412 Precondition Failed", false, true);
-            if (meta.status_code == 416) return Result<HttpResponseMeta>::Err("ERR_HTTP_RANGE_NOT_SATISFIABLE", "HTTP 416 Range Not Satisfiable", false, true);
-            if (meta.status_code == 429) return Result<HttpResponseMeta>::Err("ERR_HTTP_429_RATE_LIMITED", "HTTP 429 Too Many Requests", true, true);
-            if (meta.status_code >= 500) return Result<HttpResponseMeta>::Err("ERR_HTTP_5XX_TRANSIENT", "HTTP " + std::to_string(meta.status_code), true, true);
-            return Result<HttpResponseMeta>::Err("ERR_HTTP_CLIENT", "HTTP status " + std::to_string(meta.status_code));
+            return MapHttpStatusToError(meta);
         }
 
         uint64_t bytes_delivered = 0;
@@ -832,7 +857,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             if (bytes_read == 0) break;
             if (on_chunk && !on_chunk(rbuf.data(), bytes_read)) {
                 cleanup_winhttp();
-                return Result<HttpResponseMeta>::Ok(std::move(meta));
+                return Result<HttpResponseMeta>::Err("ERR_CONSUMER_ABORTED", "Body consumer aborted transfer");
             }
             bytes_delivered += bytes_read;
         }
@@ -1054,42 +1079,24 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             continue;
         }
 
-        if (on_headers && !on_headers(meta)) {
-            cleanup_conn();
-            return Result<HttpResponseMeta>::Ok(std::move(meta));
+        if (on_headers) {
+            HeaderAction action = on_headers(meta);
+            if (action == HeaderAction::kStopSuccess) {
+                cleanup_conn();
+                return Result<HttpResponseMeta>::Ok(std::move(meta));
+            }
+            if (action == HeaderAction::kAbort) {
+                cleanup_conn();
+                if (meta.status_code >= 400) {
+                    return MapHttpStatusToError(meta);
+                }
+                return Result<HttpResponseMeta>::Err("ERR_HTTP_ABORTED", "Transfer aborted after headers");
+            }
         }
 
         if (meta.status_code >= 400) {
             cleanup_conn();
-            std::string www_auth;
-            auto auth_it = meta.raw_headers.find("www-authenticate");
-            if (auth_it != meta.raw_headers.end()) www_auth = auth_it->second;
-
-            if (IsLinkExpiredStatus(meta.status_code, www_auth)) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_403_EXPIRED_OR_AUTH",
-                    "HTTP " + std::to_string(meta.status_code) + " (Link Expired or Auth Required)", false, true);
-            }
-            if (meta.status_code == 401) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_AUTH_CHALLENGE",
-                    "HTTP 401 Authorization Challenge Required", false, true);
-            }
-            if (meta.status_code == 404) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_404_NOT_FOUND", "HTTP 404 Not Found", false, false);
-            }
-            if (meta.status_code == 412) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_VALIDATOR_MISMATCH", "HTTP 412 Precondition Failed", false, true);
-            }
-            if (meta.status_code == 416) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_RANGE_NOT_SATISFIABLE", "HTTP 416 Range Not Satisfiable", false, true);
-            }
-            if (meta.status_code == 429) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_429_RATE_LIMITED", "HTTP 429 Too Many Requests", true, true);
-            }
-            if (meta.status_code >= 500) {
-                return Result<HttpResponseMeta>::Err("ERR_HTTP_5XX_TRANSIENT",
-                    "HTTP " + std::to_string(meta.status_code) + " Server Error", true, true);
-            }
-            return Result<HttpResponseMeta>::Err("ERR_HTTP_CLIENT", "HTTP status " + std::to_string(meta.status_code));
+            return MapHttpStatusToError(meta);
         }
 
         if (meta.is_chunked) {
@@ -1124,7 +1131,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         if (!leftover_body.empty()) {
             if (on_chunk && !on_chunk(reinterpret_cast<const uint8_t*>(leftover_body.data()), leftover_body.size())) {
                 cleanup_conn();
-                return Result<HttpResponseMeta>::Ok(std::move(meta));
+                return Result<HttpResponseMeta>::Err("ERR_CONSUMER_ABORTED", "Body consumer aborted transfer");
             }
             bytes_delivered += leftover_body.size();
         }
@@ -1142,7 +1149,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             }
             if (on_chunk && !on_chunk(reinterpret_cast<const uint8_t*>(tmp), static_cast<size_t>(n))) {
                 cleanup_conn();
-                return Result<HttpResponseMeta>::Ok(std::move(meta));
+                return Result<HttpResponseMeta>::Err("ERR_CONSUMER_ABORTED", "Body consumer aborted transfer");
             }
             bytes_delivered += static_cast<uint64_t>(n);
         }
@@ -1156,6 +1163,27 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
     }
 
     return Result<HttpResponseMeta>::Err("ERR_HTTP_TOO_MANY_REDIRECTS", "Exceeded 10 redirects");
+}
+
+Result<HttpResponseMeta> HttpClient::PerformGet(
+    const std::string& initial_url,
+    const std::map<std::string, std::string>& headers,
+    std::optional<uint64_t> range_start,
+    std::optional<uint64_t> range_end,
+    int timeout_ms,
+    bool allow_loopback_redirect,
+    std::atomic<bool>& cancel_flag,
+    std::function<bool(const HttpResponseMeta&)> on_headers,
+    std::function<bool(const uint8_t* data, size_t len)> on_chunk,
+    const HttpNetworkOptions& net_opts) {
+    HeaderCallback cb = nullptr;
+    if (on_headers) {
+        cb = [on_headers](const HttpResponseMeta& meta) {
+            return on_headers(meta) ? HeaderAction::kContinue : HeaderAction::kAbort;
+        };
+    }
+    return PerformGet(
+        initial_url, headers, range_start, range_end, timeout_ms, allow_loopback_redirect, cancel_flag, cb, on_chunk, net_opts);
 }
 
 Result<HttpResponseMeta> HttpClient::ProbeResource(
@@ -1178,8 +1206,8 @@ Result<HttpResponseMeta> HttpClient::ProbeResource(
         timeout_ms,
         allow_loopback,
         cancel,
-        [](const HttpResponseMeta&) { return false; }, // Terminate early as soon as headers are received
-        [](const uint8_t*, size_t) { return false; },
+        [](const HttpResponseMeta&) { return HeaderAction::kStopSuccess; }, // Header-only probe stop
+        nullptr,
         net_opts);
 }
 

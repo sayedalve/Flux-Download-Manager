@@ -12,7 +12,9 @@
 
 #define MyAppName "Flux Download Manager"
 #define MyAppShortName "Flux"
-#define MyAppVersion "0.3.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.3.0"
+#endif
 #define MyAppPublisher "Flux Contributors"
 #define MyAppURL "https://github.com/sayedalve/Flux-Download-Manager"
 #define MyAppExeName "flux.exe"
@@ -33,13 +35,15 @@
   #endif
 #endif
 
-; Resolve N_m3u8DL-RE worker: prioritize lightweight native C++ worker if compiled
-#if FileExists(SourceDir + "\N_m3u8DL-RE.exe")
+; Resolve N_m3u8DL-RE worker: prioritize staged worker from tools\win-x64 (or build output fallback)
+#if FileExists("..\tools\win-x64\N_m3u8DL-RE.exe")
+  #define Nm3u8dlSource "..\tools\win-x64\N_m3u8DL-RE.exe"
+#elif FileExists(SourceDir + "\N_m3u8DL-RE.exe")
   #define Nm3u8dlSource SourceDir + "\N_m3u8DL-RE.exe"
 #elif FileExists("..\build\win-x64\Release\N_m3u8DL-RE.exe")
   #define Nm3u8dlSource "..\build\win-x64\Release\N_m3u8DL-RE.exe"
-#elif FileExists("..\build\win-x64\N_m3u8DL-RE.exe")
-  #define Nm3u8dlSource "..\build\win-x64\N_m3u8DL-RE.exe"
+#elif FileExists("..\build\Release\N_m3u8DL-RE.exe")
+  #define Nm3u8dlSource "..\build\Release\N_m3u8DL-RE.exe"
 #elif FileExists("..\dist\tools\win-x64\N_m3u8DL-RE.exe")
   #define Nm3u8dlSource "..\dist\tools\win-x64\N_m3u8DL-RE.exe"
 #else

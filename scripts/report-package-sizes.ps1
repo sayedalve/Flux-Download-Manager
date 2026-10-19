@@ -6,11 +6,12 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "0.3.0",
+    [string]$Version = "",
     [string]$RepoRoot = "",
     [string]$DistDir = "",
     [string]$JsonOut = "",
-    [switch]$UpdateMetrics = $false
+    [switch]$UpdateMetrics = $false,
+    [switch]$FailOnExceeded = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,26 @@ if (-not $RepoRoot) {
 }
 if (-not $DistDir) {
     $DistDir = Join-Path $RepoRoot "dist"
+}
+
+# Resolve and Normalize Version
+if (-not $Version) {
+    if ($env:FLUX_VERSION) {
+        $Version = $env:FLUX_VERSION
+    } else {
+        try {
+            $gitTag = (git describe --tags --exact-match 2>$null)
+            if ($gitTag -match '^v?(\d+\.\d+\.\d+.*)$') {
+                $Version = $Matches[1]
+            }
+        } catch {}
+        if (-not $Version) {
+            $Version = "0.3.0"
+        }
+    }
+}
+if ($Version -match '^v?(\d+\.\d+\.\d+.*)$') {
+    $Version = $Matches[1]
 }
 
 function Format-Bytes([int64]$Bytes) {
@@ -250,31 +271,61 @@ $pkgTable = @(
 )
 $pkgTable | Format-Table -AutoSize | Out-String | Write-Host -ForegroundColor White
 
-Write-Host "`n--- [4] 20 MB TARGET AUDIT & ROOT-CAUSE ANALYSIS ---" -ForegroundColor Yellow
+Write-Host "`n--- [4] 20 MB TARGET AUDIT & PACKAGE COMPLIANCE ---" -ForegroundColor Yellow
 $targetBytes = 20971520 # 20.0 MB
-$targetDiff = $fullInstallerEstBytes - $targetBytes
 
-Write-Host "  Target Ceiling          : $(Format-Bytes $targetBytes) (20.0 MB)" -ForegroundColor White
-Write-Host "  Estimated Full Size     : $(Format-Bytes $fullInstallerEstBytes) [ESTIMATE]" -ForegroundColor White
-
-if ($fullInstallerEstBytes -le $targetBytes) {
-    Write-Host "  Compliance Status       : [PASS] Estimated Full installer satisfies the 20 MB target!" -ForegroundColor Green
+if ($fullInstallerSize) {
+    Write-Host "  Target Ceiling (Installer) : $(Format-Bytes $targetBytes) (20.0 MB)" -ForegroundColor White
+    Write-Host "  Actual Full Installer Size : $(Format-Bytes $fullInstallerSize) ($fullInstallerSize bytes)" -ForegroundColor White
+    if ($fullInstallerSize -le $targetBytes) {
+        $underMb = [Math]::Round(($targetBytes - $fullInstallerSize) / 1MB, 2)
+        Write-Host "  Compliance Status          : [PASS - ACTUAL] Generated installer satisfies 20 MB target! ($underMb MB under target ceiling)" -ForegroundColor Green
+    } else {
+        $overMb = [Math]::Round(($fullInstallerSize - $targetBytes) / 1MB, 2)
+        Write-Host "  Compliance Status          : [FAIL - ACTUAL] Generated installer EXCEEDS 20 MB target by $overMb MB!" -ForegroundColor Red
+        if ($FailOnExceeded) {
+            throw "Budget Audit FAILED: Actual installer size ($(Format-Bytes $fullInstallerSize)) exceeds 20.0 MB target by $overMb MB!"
+        }
+    }
 } else {
-    $overMb = [Math]::Round(($fullInstallerEstBytes - $targetBytes) / 1MB, 2)
-    Write-Host "  Compliance Status       : [BORDERLINE/EXCEEDS by ~$overMb MB] [ESTIMATE]" -ForegroundColor Yellow
-    Write-Host "`n  [Root-Cause Analysis of Package Weight]:" -ForegroundColor Cyan
-    Write-Host "    1. yt-dlp.exe        : $(Format-Bytes $ytCompressedEst) compressed [ESTIMATE] (~$([Math]::Round(($ytCompressedEst / $fullInstallerEstBytes) * 100, 1))% of installer)" -ForegroundColor White
-    Write-Host "       - Why so large? PyInstaller standalone packaging bundles Python 3.10+ runtime, pycryptodomex, certifi, mutagen." -ForegroundColor Gray
-    Write-Host "    2. ffmpeg.exe        : $(Format-Bytes $ffCompressedEst) compressed [ESTIMATE] (~$([Math]::Round(($ffCompressedEst / $fullInstallerEstBytes) * 100, 1))% of installer)" -ForegroundColor White
-    Write-Host "       - Minimal configuration (Prompt 3) reduced this by 91% (from 161 MiB to ~14.0 MB uncompressed, ~5.5 MB compressed)." -ForegroundColor Gray
-    Write-Host "    -> yt-dlp + FFmpeg account for $(Format-Bytes ($ytCompressedEst + $ffCompressedEst)) (~$([Math]::Round((($ytCompressedEst + $ffCompressedEst) / $fullInstallerEstBytes) * 100, 1))%) of the entire installer payload!" -ForegroundColor Yellow
-    Write-Host "`n  [Evaluated Smallest Safe Alternatives]:" -ForegroundColor Cyan
-    Write-Host "    Option A (Recommended Default): Full Offline Installer with Standard yt-dlp (~20.5 MB [ESTIMATE])" -ForegroundColor White
-    Write-Host "      - Impact: Zero missing features; 100% offline YouTube cipher extraction and container muxing preserved." -ForegroundColor Gray
-    Write-Host "    Option B: Full Offline Installer with Ultra-Compact yt-dlp_min (~15.2 MB [ESTIMATE])" -ForegroundColor White
-    Write-Host "      - Impact: Passes 20 MB target easily; retains all extractors but omits optional C accelerators (Cryptodome)." -ForegroundColor Gray
-    Write-Host "    Option C: Core Edition Installer (~1.5 MB [ESTIMATE]) + On-Demand Stream Worker Provisioning" -ForegroundColor White
-    Write-Host "      - Impact: Minimal initial download; stream workers fetched on first stream download request." -ForegroundColor Gray
+    Write-Host "  Target Ceiling (Installer) : $(Format-Bytes $targetBytes) (20.0 MB)" -ForegroundColor White
+    Write-Host "  Estimated Full Size        : $(Format-Bytes $fullInstallerEstBytes) [ESTIMATE - Installer not built yet]" -ForegroundColor White
+    if ($fullInstallerEstBytes -le $targetBytes) {
+        Write-Host "  Compliance Status          : [PASS - ESTIMATE] Estimated Full installer satisfies the 20 MB target!" -ForegroundColor Green
+    } else {
+        $overMb = [Math]::Round(($fullInstallerEstBytes - $targetBytes) / 1MB, 2)
+        Write-Host "  Compliance Status          : [BORDERLINE/EXCEEDS by ~$overMb MB] [ESTIMATE]" -ForegroundColor Yellow
+    }
+}
+
+if ($fullZipSize) {
+    $zipTargetBytes = 26214400 # 25.0 MB target for portable zip
+    Write-Host "  Target Ceiling (Full ZIP)  : $(Format-Bytes $zipTargetBytes) (25.0 MB)" -ForegroundColor White
+    Write-Host "  Actual Full ZIP Size       : $(Format-Bytes $fullZipSize) ($fullZipSize bytes)" -ForegroundColor White
+    if ($fullZipSize -le $zipTargetBytes) {
+        $zipUnderMb = [Math]::Round(($zipTargetBytes - $fullZipSize) / 1MB, 2)
+        Write-Host "  ZIP Compliance Status      : [PASS - ACTUAL] Generated Full ZIP satisfies 25 MB target! ($zipUnderMb MB under ceiling)" -ForegroundColor Green
+    } else {
+        $zipOverMb = [Math]::Round(($fullZipSize - $zipTargetBytes) / 1MB, 2)
+        Write-Host "  ZIP Compliance Status      : [FAIL - ACTUAL] Generated Full ZIP EXCEEDS 25 MB target by $zipOverMb MB!" -ForegroundColor Red
+        if ($FailOnExceeded) {
+            throw "Budget Audit FAILED: Actual portable ZIP size ($(Format-Bytes $fullZipSize)) exceeds 25.0 MB target by $zipOverMb MB!"
+        }
+    }
+}
+
+# Strict worker size audits
+if ($ffmpegSize -gt 25MB) {
+    Write-Host "  [WARNING] Bloated FFmpeg detected ($(Format-Bytes $ffmpegSize) > 25 MB minimal profile)!" -ForegroundColor Red
+    if ($FailOnExceeded) {
+        throw "Budget Audit FAILED: Bloated FFmpeg detected ($(Format-Bytes $ffmpegSize)). Minimal worker profile required."
+    }
+}
+if ($nm3u8dlSize -gt 5MB) {
+    Write-Host "  [WARNING] Bloated N_m3u8DL-RE detected ($(Format-Bytes $nm3u8dlSize) > 5 MB native profile)!" -ForegroundColor Red
+    if ($FailOnExceeded) {
+        throw "Budget Audit FAILED: Upstream .NET N_m3u8DL-RE detected ($(Format-Bytes $nm3u8dlSize)). Native C++ worker required."
+    }
 }
 
 Write-Host "`n=================================================================" -ForegroundColor Magenta

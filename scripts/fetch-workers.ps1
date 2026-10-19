@@ -101,11 +101,22 @@ try {
     $NmExe = Join-Path $TargetDir "N_m3u8DL-RE.exe"
     $stagedFromNative = $false
 
-    if ($PreferNativeWorker) {
+    # Check if TargetDir already has a verified native C++ worker (< 5MB)
+    if (Test-Path $NmExe) {
+        $existingNmSize = (Get-Item $NmExe).Length
+        if ($existingNmSize -lt 5MB -and (Verify-ExistingBinary $NmExe $null)) {
+            $stagedFromNative = $true
+            $candSizeKb = [Math]::Round($existingNmSize / 1KB, 1)
+            Write-Host "`n[1/3] Using verified native C++ stream worker in $TargetDir ($candSizeKb KB)" -ForegroundColor Green
+        }
+    }
+
+    if (-not $stagedFromNative -and $PreferNativeWorker) {
         $nativeCandidates = @(
             (Join-Path $RepoRoot "build\win-x64\Release\N_m3u8DL-RE.exe"),
-            (Join-Path $RepoRoot "build\win-x64\N_m3u8DL-RE.exe"),
             (Join-Path $RepoRoot "build\Release\N_m3u8DL-RE.exe"),
+            (Join-Path $RepoRoot "build\win-x64\N_m3u8DL-RE.exe"),
+            (Join-Path $RepoRoot "build\N_m3u8DL-RE.exe"),
             (Join-Path $RepoRoot "dist\tools\win-x64\N_m3u8DL-RE.exe")
         )
         foreach ($cand in $nativeCandidates) {
@@ -116,7 +127,7 @@ try {
                     Copy-Item -Force $cand $NmExe
                     $stagedFromNative = $true
                     $candSizeKb = [Math]::Round($candSize / 1KB, 1)
-                    Write-Host "`n[1/3] Staged native C++ stream worker: $cand ($candSizeKb KB)" -ForegroundColor Green
+                    Write-Host "`n[1/3] Staged native C++ stream worker from build output: $cand ($candSizeKb KB)" -ForegroundColor Green
                     break
                 }
             }
@@ -151,16 +162,26 @@ try {
     if (-not $FfmpegUrl) {
         if ($UseUpstreamFfmpeg) {
             $FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+            Write-Warning "[LARGE FALLBACK] Explicitly using monolithic upstream FFmpeg (161+ MiB). Package size will exceed 20 MB budget."
         } else {
-            # Pinned minimal FFmpeg 7.1 Windows x64 build
-            $FfmpegUrl = "https://github.com/BrisklyDev/brisk-stream-tools/releases/download/v1.0.0/ffmpeg-minimal-7.1-win-x64.zip"
+            # Pinned minimal FFmpeg 7.1 Windows x64 build from verified release
+            $FfmpegUrl = "https://github.com/sayedalve/Flux-Download-Manager/releases/download/stream-tools-v1/ffmpeg-minimal-7.1-win-x64.zip"
             if (-not $FfmpegExpectedSha256) {
-                $FfmpegExpectedSha256 = "6AFE28D701DE356612A0BD11894D5E9BF6DAF2039B2A4FBC4A144EC12A0E1A04"
+                $FfmpegExpectedSha256 = "CBCC7523D458E84309893719C96FFD3EF7ADCE490616CF5FD26B680FB80DF5CF"
             }
         }
     }
 
-    $needFfDownload = $Force -or (-not (Verify-ExistingBinary $FfExe $FfmpegExpectedSha256))
+    $needFfDownload = $Force -or (-not (Test-Path $FfExe))
+    if (-not $needFfDownload) {
+        $existingFfSize = (Get-Item $FfExe).Length
+        if (-not $UseUpstreamFfmpeg -and $existingFfSize -gt 25MB) {
+            Write-Host "Existing ffmpeg.exe ($([Math]::Round($existingFfSize/1MB, 1)) MB) exceeds minimal budget (<25 MB); re-downloading minimal build..." -ForegroundColor Yellow
+            $needFfDownload = $true
+        } elseif ($FfmpegExpectedSha256 -and -not (Verify-ExistingBinary $FfExe $FfmpegExpectedSha256)) {
+            $needFfDownload = $true
+        }
+    }
 
     if ($needFfDownload) {
         $flavorDesc = if ($UseUpstreamFfmpeg) { "upstream monolithic" } else { "minimal LGPL" }
@@ -169,14 +190,7 @@ try {
         try {
             Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfZip -UseBasicParsing
         } catch {
-            if (-not $UseUpstreamFfmpeg) {
-                Write-Host "  [WARN] Minimal release artifact not reachable; falling back to upstream release..." -ForegroundColor Yellow
-                $FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-                $FfmpegExpectedSha256 = ""
-                Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfZip -UseBasicParsing
-            } else {
-                throw
-            }
+            throw "Failed to download minimal FFmpeg from $FfmpegUrl: $($_.Exception.Message)`nSilent fallback to bloated upstream monolithic FFmpeg (161+ MiB) is strictly prohibited to prevent package size regressions.`nTo explicitly allow large upstream worker, specify -UseUpstreamFfmpeg."
         }
         Expand-Archive -Path $FfZip -DestinationPath (Join-Path $TmpDir "ff") -Force
         $FoundFf = Get-ChildItem -Path (Join-Path $TmpDir "ff") -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
@@ -192,8 +206,12 @@ try {
             $hasher.Dispose()
             Write-Host "  [INFO] Verified PE64. Computed SHA-256 for ffmpeg.exe: $actual" -ForegroundColor Cyan
         }
+        $downloadedFfSize = (Get-Item $FoundFf.FullName).Length
+        if (-not $UseUpstreamFfmpeg -and $downloadedFfSize -gt 25MB) {
+            throw "Downloaded FFmpeg executable ($($FoundFf.FullName)) is $([Math]::Round($downloadedFfSize/1MB, 2)) MiB, exceeding the 25 MB ceiling for minimal builds."
+        }
         Copy-Item -Force $FoundFf.FullName $FfExe
-        Write-Host "  [OK] Staged and verified ffmpeg.exe" -ForegroundColor Green
+        Write-Host "  [OK] Staged and verified ffmpeg.exe ($([Math]::Round($downloadedFfSize/1MB, 2)) MiB)" -ForegroundColor Green
     } else {
         Write-Host "`n[2/3] ffmpeg.exe already present and verified in $TargetDir" -ForegroundColor Green
     }

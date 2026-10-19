@@ -6,19 +6,42 @@
 
 [CmdletBinding()]
 param(
-    [string]$Version = "0.3.0",
+    [string]$Version = "",
     [ValidateSet("Full", "Core", "Both")]
     [string]$PackageType = "Both",
     [string]$BuildDir = "",
     [string]$OutputDir = "",
-    [switch]$SkipHash = $false
+    [switch]$SkipHash = $false,
+    [switch]$AllowLargeWorkers = $false
 )
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 
-# 1. Resolve Output Directory
+# 1. Resolve and Validate Release Version
+if (-not $Version) {
+    if ($env:FLUX_VERSION) {
+        $Version = $env:FLUX_VERSION
+    } else {
+        try {
+            $gitTag = (git describe --tags --exact-match 2>$null)
+            if ($gitTag -match '^v?(\d+\.\d+\.\d+.*)$') {
+                $Version = $Matches[1]
+            }
+        } catch {}
+        if (-not $Version) {
+            $Version = "0.3.0"
+        }
+    }
+}
+if ($Version -match '^v?(\d+\.\d+\.\d+.*)$') {
+    $Version = $Matches[1]
+} else {
+    throw "Invalid version format '$Version'. Expected semantic version like '0.3.1'."
+}
+
+# 2. Resolve Output Directory
 if (-not $OutputDir) {
     $OutputDir = Join-Path $RepoRoot "dist"
 }
@@ -95,30 +118,44 @@ $Nm3u8dlExe = $null
 $FfmpegExe = $null
 $YtDlpExe = $null
 
-# Prioritize native C++ stream worker (< 5MB, ~340 KB) if compiled
-$nativeWorkerCandidates = @()
-if ($BuildDir) {
-    $nativeWorkerCandidates += (Join-Path $BuildDir "N_m3u8DL-RE.exe")
-    $nativeWorkerCandidates += (Join-Path $BuildDir "Release\N_m3u8DL-RE.exe")
+# Check standardized tools\win-x64 directory first for uniform worker selection
+$toolsWinDir = Join-Path $RepoRoot "tools\win-x64"
+if (Test-Path $toolsWinDir) {
+    $stagedNm = Join-Path $toolsWinDir "N_m3u8DL-RE.exe"
+    if (Test-Path $stagedNm) { $Nm3u8dlExe = (Resolve-Path $stagedNm).Path }
+
+    $stagedFf = Join-Path $toolsWinDir "ffmpeg.exe"
+    if (Test-Path $stagedFf) { $FfmpegExe = (Resolve-Path $stagedFf).Path }
+
+    $stagedYt = Join-Path $toolsWinDir "yt-dlp.exe"
+    if (Test-Path $stagedYt) { $YtDlpExe = (Resolve-Path $stagedYt).Path }
 }
-$nativeWorkerCandidates += @(
-    (Join-Path $RepoRoot "build\win-x64\Release\N_m3u8DL-RE.exe"),
-    (Join-Path $RepoRoot "build\win-x64\N_m3u8DL-RE.exe"),
-    (Join-Path $RepoRoot "build\Release\N_m3u8DL-RE.exe"),
-    (Join-Path $RepoRoot "dist\tools\win-x64\N_m3u8DL-RE.exe")
-)
-foreach ($nw in $nativeWorkerCandidates) {
-    if (Test-Path $nw) {
-        $nwSize = (Get-Item $nw).Length
-        if ($nwSize -lt 5MB) {
-            $Nm3u8dlExe = (Resolve-Path $nw).Path
-            break
+
+# If N_m3u8DL-RE not in tools\win-x64, search build directories
+if (-not $Nm3u8dlExe) {
+    $nativeWorkerCandidates = @()
+    if ($BuildDir) {
+        $nativeWorkerCandidates += (Join-Path $BuildDir "N_m3u8DL-RE.exe")
+        $nativeWorkerCandidates += (Join-Path $BuildDir "Release\N_m3u8DL-RE.exe")
+    }
+    $nativeWorkerCandidates += @(
+        (Join-Path $RepoRoot "build\win-x64\Release\N_m3u8DL-RE.exe"),
+        (Join-Path $RepoRoot "build\win-x64\N_m3u8DL-RE.exe"),
+        (Join-Path $RepoRoot "build\Release\N_m3u8DL-RE.exe"),
+        (Join-Path $RepoRoot "dist\tools\win-x64\N_m3u8DL-RE.exe")
+    )
+    foreach ($nw in $nativeWorkerCandidates) {
+        if (Test-Path $nw) {
+            $nwSize = (Get-Item $nw).Length
+            if ($nwSize -lt 5MB) {
+                $Nm3u8dlExe = (Resolve-Path $nw).Path
+                break
+            }
         }
     }
 }
 
 $toolsCandidates = @(
-    (Join-Path $RepoRoot "tools\win-x64"),
     (Join-Path $RepoRoot "tools"),
     (Join-Path $RepoRoot "dist\tools\win-x64"),
     (Join-Path $RepoRoot "dist\tools")
@@ -153,11 +190,24 @@ if ($PackageType -in @("Full", "Both")) {
         $nmType = if ($nmSize -lt 5MB) { "native C++ worker ($([Math]::Round($nmSize/1KB, 1)) KB)" } else { "upstream .NET worker ($([Math]::Round($nmSize/1MB, 2)) MB)" }
         $ffSize = (Get-Item $FfmpegExe).Length
         $ffType = if ($ffSize -lt 25MB) { "minimal LGPL build ($([Math]::Round($ffSize/1MB, 2)) MB)" } else { "upstream build ($([Math]::Round($ffSize/1MB, 2)) MB)" }
-        Write-Host "[+] Found N_m3u8DL-RE    : $Nm3u8dlExe ($nmType)" -ForegroundColor Green
-        Write-Host "[+] Found FFmpeg         : $FfmpegExe ($ffType)" -ForegroundColor Green
+
+        if (-not $AllowLargeWorkers) {
+            if ($ffSize -gt 25MB) {
+                throw "Packaging halted: ffmpeg.exe ($FfmpegExe) size ($([Math]::Round($ffSize/1MB, 2)) MB) exceeds minimal budget (< 25 MB). Silent inclusion of bloated upstream FFmpeg is prohibited. Run scripts/fetch-workers.ps1, or pass -AllowLargeWorkers."
+            }
+            if ($nmSize -gt 5MB) {
+                throw "Packaging halted: N_m3u8DL-RE.exe ($Nm3u8dlExe) size ($([Math]::Round($nmSize/1MB, 2)) MB) is not the native C++ worker (< 5 MB). Run scripts/fetch-workers.ps1 or build with CMake, or pass -AllowLargeWorkers."
+            }
+        }
+
+        $nmHash = (Get-FileHash -Path $Nm3u8dlExe -Algorithm SHA256).Hash
+        $ffHash = (Get-FileHash -Path $FfmpegExe -Algorithm SHA256).Hash
+        Write-Host "[+] Packaged N_m3u8DL-RE : $Nm3u8dlExe ($nmType) [SHA256: $nmHash]" -ForegroundColor Green
+        Write-Host "[+] Packaged FFmpeg     : $FfmpegExe ($ffType) [SHA256: $ffHash]" -ForegroundColor Green
         if ($YtDlpExe) {
             $ytSize = (Get-Item $YtDlpExe).Length
-            Write-Host "[+] Found yt-dlp (opt)   : $YtDlpExe ($([Math]::Round($ytSize/1MB, 2)) MB)" -ForegroundColor Green
+            $ytHash = (Get-FileHash -Path $YtDlpExe -Algorithm SHA256).Hash
+            Write-Host "[+] Packaged yt-dlp     : $YtDlpExe ($([Math]::Round($ytSize/1MB, 2)) MB) [SHA256: $ytHash]" -ForegroundColor Green
         }
     }
 }
@@ -351,9 +401,23 @@ if (-not $SkipHash -and $createdZips.Count -gt 0) {
     }
 
     $newEntries = @()
+    $filesToHash = @()
     foreach ($z in ($createdZips | Select-Object -Unique)) {
-        $h = Get-FileHash -Path $z -Algorithm SHA256
-        $fileName = Split-Path -Leaf $z
+        $filesToHash += $z
+    }
+    $setupCandidates = @(
+        (Join-Path $OutputDir "Flux-Setup-x64-$Version.exe"),
+        (Join-Path $OutputDir "Flux-Setup-x64-Core-$Version.exe")
+    )
+    foreach ($sc in $setupCandidates) {
+        if (Test-Path $sc) {
+            $filesToHash += (Resolve-Path $sc).Path
+        }
+    }
+
+    foreach ($f in ($filesToHash | Select-Object -Unique)) {
+        $h = Get-FileHash -Path $f -Algorithm SHA256
+        $fileName = Split-Path -Leaf $f
         $entry = "$($h.Hash)  dist\$fileName"
         Write-Host "  $entry" -ForegroundColor White
         $newEntries += $entry

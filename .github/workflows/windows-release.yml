@@ -42,10 +42,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install cryptography
 
-      - name: Provision Upstream Stream Workers (N_m3u8DL-RE & FFmpeg)
+      - name: Resolve and Validate Release Version
+        id: version
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
+          $rawRef = "${{ github.ref_name }}"
+          $refType = "${{ github.ref_type }}"
+          Write-Host "Triggered by $refType: '$rawRef'"
+
+          # 1. Resolve canonical version
+          if ($refType -eq "tag" -or $rawRef -match '^v?\d+\.\d+\.\d+') {
+            if ($rawRef -match '^v?(\d+\.\d+\.\d+.*)$') {
+              $ver = $Matches[1]
+            } else {
+              throw "Invalid version tag format: '$rawRef'. Expected semantic version like 'v0.3.1' or '0.3.1'."
+            }
+          } else {
+            # On branch builds (e.g. main), extract canonical base version from CMakeLists.txt
+            $cmakePath = "CMakeLists.txt"
+            $ver = "0.3.0"
+            if (Test-Path $cmakePath) {
+              $cmakeContent = Get-Content $cmakePath -Raw
+              if ($cmakeContent -match 'project\s*\(\s*Flux\s+VERSION\s+(\d+\.\d+\.\d+)') {
+                $ver = $Matches[1]
+              }
+            }
+            Write-Host "Non-tag build on branch '$rawRef'; using repository base version: $ver"
+          }
+
+          # 2. Validate version is clean SemVer
+          if ($ver -notmatch '^\d+\.\d+\.\d+([.-].+)?$') {
+            throw "Resolved version '$ver' is not valid SemVer (e.g. 0.3.1, 0.3.1-beta.1)"
+          }
+
+          Write-Host "Canonical release version: $ver"
+          "FLUX_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Preflight Toolchain & CMake Inspection
         shell: powershell
@@ -95,7 +127,33 @@ jobs:
 
       - name: Build Windows Targets
         run: |
-          cmake --build build --config Release --target flux flux-nmh flux_unit_tests openidm openidm-nmh openidm_unit_tests
+          cmake --build build --config Release --target flux flux-nmh flux_unit_tests openidm openidm-nmh openidm_unit_tests N_m3u8DL-RE
+
+      - name: Provision Upstream Stream Workers (N_m3u8DL-RE & FFmpeg)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
+
+      - name: Audit Stream Workers and FFmpeg Capabilities
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/verify-ffmpeg-capabilities.ps1 -RunSmokeTests
+          $ffPath = "tools/win-x64/ffmpeg.exe"
+          $nmPath = "tools/win-x64/N_m3u8DL-RE.exe"
+          $ytPath = "tools/win-x64/yt-dlp.exe"
+          Write-Host "`n=== Stream Worker Verification Audit ==="
+          foreach ($p in @($ffPath, $nmPath, $ytPath)) {
+            if (-not (Test-Path $p)) { throw "Required worker missing: $p" }
+            $item = Get-Item $p
+            $hash = (Get-FileHash $p -Algorithm SHA256).Hash
+            Write-Host "$($item.Name): $($item.Length) bytes ($([Math]::Round($item.Length/1MB, 2)) MB) [SHA256: $hash]"
+          }
+          if ((Get-Item $ffPath).Length -gt 25MB) {
+            throw "FFmpeg exceeds 25 MB minimal budget! Monolithic upstream build detected."
+          }
+          if ((Get-Item $nmPath).Length -gt 5MB) {
+            throw "N_m3u8DL-RE exceeds 5 MB native worker budget! Upstream .NET build detected."
+          }
 
       - name: Verify PE32+ Binaries & Subsystems
         shell: powershell
@@ -157,49 +215,54 @@ jobs:
           if (-not (Test-Path $issPath)) {
             $issPath = "installer/openidm.iss"
           }
+          $isccArgs = @("/DMyAppVersion=$env:FLUX_VERSION", $issPath)
           if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs
           } elseif (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
-            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" $issPath
+            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" @isccArgs
           } else {
             choco install innosetup -y
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs
           }
 
       - name: Package Standalone Portable Releases (Full & Core)
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "0.3.0" -PackageType Both -BuildDir "build/Release"
-          if (Test-Path "dist/Flux-Setup-x64-0.3.0.exe") {
-            $h = Get-FileHash "dist/Flux-Setup-x64-0.3.0.exe" -Algorithm SHA256
-            Add-Content -Path "dist/SHA256SUMS.txt" -Value "$($h.Hash)  dist\Flux-Setup-x64-0.3.0.exe" -Encoding utf8
-          }
+          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "$env:FLUX_VERSION" -PackageType Both -BuildDir "build/Release"
+          Write-Host "`n=== Final SHA-256 Release Checksums ==="
           Get-Content "dist/SHA256SUMS.txt"
+
+      - name: Packaging Size Budget Audit & Verification
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/report-package-sizes.ps1 -Version "$env:FLUX_VERSION" -DistDir "dist" -UpdateMetrics -FailOnExceeded
 
       - name: Upload Release Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: flux-v0.3.0-windows-x64
+          name: flux-v${{ env.FLUX_VERSION }}-windows-x64
           path: |
             dist/*-Setup-*.exe
-            dist/Flux-v0.3.0-Windows-x64-Full.zip
-            dist/Flux-v0.3.0-Windows-x64-Core.zip
-            dist/Flux-v0.3.0-Windows-x64.zip
+            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Full.zip
+            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Core.zip
             dist/SHA256SUMS.txt
             benchmarks/latest_metrics.json
             docs/BENCHMARK_REPORT.md
 
-      - name: Create GitHub Release Draft
+      - name: Publish Official GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
-          prerelease: false
+          name: "Flux Download Manager ${{ github.ref_name }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            dist/*-Setup-*.exe
-            dist/Flux-v0.3.0-Windows-x64-Full.zip
-            dist/Flux-v0.3.0-Windows-x64-Core.zip
-            dist/Flux-v0.3.0-Windows-x64.zip
+            dist/Flux-Setup-x64-${{ env.FLUX_VERSION }}.exe
+            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Full.zip
+            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Core.zip
+            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64.zip
             dist/SHA256SUMS.txt
             LICENSE
             THIRD_PARTY_NOTICES.md

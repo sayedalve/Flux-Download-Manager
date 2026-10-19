@@ -233,28 +233,39 @@ def build_media_fixtures(fixture_dir: Path, base_url: str, aes_key: bytes):
     hls_dir.mkdir(parents=True, exist_ok=True)
 
     src_mp4 = fixture_dir / "source.mp4"
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc=duration=4:size=640x360:rate=15",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "15",
-            "-c:a", "aac", "-b:a", "64k",
-            str(src_mp4),
-        ],
-        check=True,
-    )
+    static_media_dir = ROOT / "tests" / "fixtures" / "media"
+    if (static_media_dir / "source.mp4").is_file() and (static_media_dir / "seg_000.ts").is_file():
+        shutil.copy2(static_media_dir / "source.mp4", src_mp4)
+        for ts_file in static_media_dir.glob("seg_*.ts"):
+            shutil.copy2(ts_file, hls_dir / ts_file.name)
+        if (static_media_dir / "720p.m3u8").is_file():
+            shutil.copy2(static_media_dir / "720p.m3u8", hls_dir / "720p.m3u8")
+    else:
+        gen_ffmpeg = ROOT / "tools" / "win-x64" / f"ffmpeg{EXE_EXT}.pre-minimal-backup"
+        if not gen_ffmpeg.is_file():
+            gen_ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+        subprocess.run(
+            [
+                str(gen_ffmpeg), "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc=duration=4:size=640x360:rate=15",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "15",
+                "-c:a", "aac", "-b:a", "64k",
+                str(src_mp4),
+            ],
+            check=True,
+        )
 
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-i", str(src_mp4),
-            "-c", "copy", "-f", "segment", "-segment_time", "2",
-            "-segment_list", str(hls_dir / "720p.m3u8"),
-            str(hls_dir / "seg_%03d.ts"),
-        ],
-        check=True,
-    )
+        subprocess.run(
+            [
+                str(gen_ffmpeg), "-y", "-loglevel", "error",
+                "-i", str(src_mp4),
+                "-c", "copy", "-f", "segment", "-segment_time", "2",
+                "-segment_list", str(hls_dir / "720p.m3u8"),
+                str(hls_dir / "seg_%03d.ts"),
+            ],
+            check=True,
+        )
 
     (hls_dir / "sub_000.vtt").write_text(
         "WEBVTT\n\n00:00:00.000 --> 00:00:04.000\nOpenIDM Automated Stream Test Subtitle\n",

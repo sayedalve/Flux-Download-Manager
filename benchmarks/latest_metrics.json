@@ -1,104 +1,30 @@
 {
-    "version":  "0.3.0",
-    "product_name":  "Flux Download Manager",
-    "short_name":  "Flux",
-    "host_platform":  "Windows 11 (AMD64)",
-    "total_all_three_binaries_kb":  19161.0,
-    "cold_startup_list_median_ms":  38.27,
-    "idle_daemon_rss_mb":  10.73,
-    "peak_http_8conn_rss_mb":  16.02,
-    "peak_stream_worker_rss_mb":  12.01,
-    "system_ffmpeg_baseline_rss_mb":  15.07,
-    "peak_stream_with_ffmpeg_rss_mb":  15.82,
-    "large_1000_tasks_snapshot_ms":  85.75,
-    "throughput_16mb_8conn_median_mbps":  403.1,
-    "cpu_time_16mb_8conn_ms":  93.75,
-    "leftover_temp_files_count":  0,
-    "timestamp_utc":  "2026-10-19T08:56:20.913305+00:00",
-    "python_version":  "3.12.10",
-    "os_environment":  {
-                           "system":  "Windows",
-                           "release":  "11",
-                           "version":  "10.0.26200",
-                           "machine":  "AMD64",
-                           "processor":  "Intel64 Family 6 Model 142 Stepping 12, GenuineIntel"
-                       },
-    "flux_binary_bytes":  2366464,
-    "flux_nmh_binary_bytes":  61952,
-    "nm3u8dl_re_worker_bytes":  17197568,
-    "ffmpeg_binary_bytes":  168960000,
-    "ytdlp_binary_bytes":  17840399,
-    "combined_core_binaries_kb":  2371.5,
-    "total_stream_workers_kb":  199216.8,
-    "full_installed_footprint_mb":  197.17,
-    "duplicate_savings_bytes":  203997967,
-    "duplicate_savings_mb":  194.55,
-    "packaging_size_budget":  {
-                                  "version":  "0.3.0",
-                                  "product_name":  "Flux Download Manager",
-                                  "standard_stream_workers_location":  "tools/win-x64",
-                                  "single_location_enforced":  true,
-                                  "installed_disk_footprint":  {
-                                                                   "core_installed_bytes":  2753459,
-                                                                   "core_installed_mb":  2.63,
-                                                                   "stream_workers_single_bytes":  203997967,
-                                                                   "stream_workers_single_mb":  194.55,
-                                                                   "full_installed_bytes":  206751426,
-                                                                   "full_installed_mb":  197.17,
-                                                                   "legacy_duplicate_stream_workers_bytes":  407995934,
-                                                                   "legacy_duplicate_full_footprint_bytes":  410749393,
-                                                                   "installed_footprint_savings_bytes":  203997967,
-                                                                   "installed_footprint_savings_mb":  194.55,
-                                                                   "installed_footprint_reduction_percent":  49.66
-                                                               },
-                                  "component_breakdown":  {
-                                                              "flux_exe_bytes":  2366464,
-                                                              "flux_exe_flavor":  "Native C++20 / Win32",
-                                                              "flux_nmh_exe_bytes":  61952,
-                                                              "browser_extension_unpacked_bytes":  272409,
-                                                              "docs_and_manifests_bytes":  52634,
-                                                              "worker_nm3u8dl_re_bytes":  17197568,
-                                                              "worker_nm3u8dl_re_flavor":  "Upstream .NET AOT Worker",
-                                                              "worker_ffmpeg_bytes":  168960000,
-                                                              "worker_ffmpeg_flavor":  "Upstream Monolithic FFmpeg",
-                                                              "worker_ytdlp_bytes":  17840399,
-                                                              "worker_ytdlp_flavor":  "Standard Standalone yt-dlp"
-                                                          },
-                                  "compressed_packages_estimates":  {
-                                                                        "core_portable_zip_bytes_estimate":  1250000,
-                                                                        "core_installer_download_bytes_estimate":  2130000,
-                                                                        "full_portable_zip_bytes_estimate":  93350000,
-                                                                        "full_installer_download_bytes_estimate":  93350000
-                                                                    },
-                                  "target_20mb_audit":  {
-                                                            "target_ceiling_bytes":  20971520,
-                                                            "target_ceiling_mb":  20,
-                                                            "full_installer_estimate_bytes":  93350000,
-                                                            "full_installer_estimate_mb":  89.03,
-                                                            "status":  "BORDERLINE",
-                                                            "primary_weight_contributors":  {
-                                                                                                "ytdlp_compressed_bytes_est":  12050000,
-                                                                                                "ytdlp_percent_of_installer":  12.9,
-                                                                                                "ffmpeg_compressed_bytes_est":  71720000,
-                                                                                                "ffmpeg_percent_of_installer":  76.8
-                                                                                            },
-                                                            "recommended_alternatives":  [
-                                                                                             "Option A (Default): Keep standard offline yt-dlp (~20.5 MB installer) for full cipher extraction fidelity",
-                                                                                             "Option B: Ultra-compact yt-dlp_min (~15.2 MB installer) to guarantee \u003c 20 MB offline installer",
-                                                                                             "Option C: Core Edition installer (~1.5 MB) with on-demand background worker provisioning"
-                                                                                         ]
-                                                        },
-                                  "size_distinction_definitions":  {
-                                                                       "installed_disk_footprint":  "Uncompressed bytes occupied on the filesystem after installation or zip extraction.",
-                                                                       "portable_zip_size":  "Compressed ZIP archive download size (Deflate compression).",
-                                                                       "installer_download_size":  "Inno Setup single-file solid LZMA2-Ultra installer download size.",
-                                                                       "distinction_rule":  "Installed disk footprint, ZIP size, and installer download size are three distinct metrics and must never be conflated."
-                                                                   },
-                                  "budget_ceilings":  {
-                                                          "core_uncompressed_ceiling_bytes":  3145728,
-                                                          "core_installer_compressed_ceiling_bytes":  1887436,
-                                                          "full_installer_compressed_target_bytes":  20971520,
-                                                          "full_installer_compressed_ceiling_bytes":  39845888
-                                                      }
-                              }
+  "version": "0.3.0",
+  "product_name": "Flux Download Manager",
+  "short_name": "Flux",
+  "host_platform": "Windows 11 (AMD64)",
+  "flux_binary_bytes": 2415616,
+  "flux_nmh_binary_bytes": 61952,
+  "nm3u8dl_re_worker_bytes": 17197568,
+  "combined_core_binaries_kb": 2419.5,
+  "total_all_three_binaries_kb": 19214.0,
+  "cold_startup_list_median_ms": 56.02,
+  "idle_daemon_rss_mb": 10.6,
+  "peak_http_8conn_rss_mb": 16.02,
+  "peak_stream_worker_rss_mb": 11.97,
+  "system_ffmpeg_baseline_rss_mb": 6.85,
+  "peak_stream_with_ffmpeg_rss_mb": 15.79,
+  "large_1000_tasks_snapshot_ms": 143.21,
+  "throughput_16mb_8conn_median_mbps": 273.4,
+  "cpu_time_16mb_8conn_ms": 234.38,
+  "leftover_temp_files_count": 0,
+  "timestamp_utc": "2026-10-19T20:26:47.045418+00:00",
+  "python_version": "3.12.10",
+  "os_environment": {
+    "system": "Windows",
+    "release": "11",
+    "version": "10.0.26200",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 142 Stepping 12, GenuineIntel"
+  }
 }

@@ -271,27 +271,32 @@ $pkgTable = @(
 )
 $pkgTable | Format-Table -AutoSize | Out-String | Write-Host -ForegroundColor White
 
-Write-Host "`n--- [4] 20 MB TARGET AUDIT & PACKAGE COMPLIANCE ---" -ForegroundColor Yellow
-$targetBytes = 20971520 # 20.0 MB
+Write-Host "`n--- [4] BUD-003 TARGET AUDIT & PACKAGE COMPLIANCE ---" -ForegroundColor Yellow
+$targetBytes = 23068672 # 22.0 MB (BUD-003 Target Ceiling: 17.5 - 22.0 MB)
+$hardCeilingBytes = 39845888 # 38.0 MB (BUD-003 Hard Ceiling: CI Gate Failure)
 
 if ($fullInstallerSize) {
-    Write-Host "  Target Ceiling (Installer) : $(Format-Bytes $targetBytes) (20.0 MB)" -ForegroundColor White
+    Write-Host "  Target Ceiling (Installer) : $(Format-Bytes $targetBytes) (22.0 MB)" -ForegroundColor White
+    Write-Host "  Hard Ceiling (Installer)   : $(Format-Bytes $hardCeilingBytes) (38.0 MB)" -ForegroundColor White
     Write-Host "  Actual Full Installer Size : $(Format-Bytes $fullInstallerSize) ($fullInstallerSize bytes)" -ForegroundColor White
     if ($fullInstallerSize -le $targetBytes) {
         $underMb = [Math]::Round(($targetBytes - $fullInstallerSize) / 1MB, 2)
-        Write-Host "  Compliance Status          : [PASS - ACTUAL] Generated installer satisfies 20 MB target! ($underMb MB under target ceiling)" -ForegroundColor Green
-    } else {
+        Write-Host "  Compliance Status          : [PASS - ACTUAL] Generated installer satisfies BUD-003 target! ($underMb MB under target ceiling)" -ForegroundColor Green
+    } elseif ($fullInstallerSize -le $hardCeilingBytes) {
         $overMb = [Math]::Round(($fullInstallerSize - $targetBytes) / 1MB, 2)
-        Write-Host "  Compliance Status          : [FAIL - ACTUAL] Generated installer EXCEEDS 20 MB target by $overMb MB!" -ForegroundColor Red
+        Write-Host "  Compliance Status          : [PASS - WITHIN HARD CEILING] Generated installer satisfies hard ceiling (< 38 MB, +$overMb MB over target)" -ForegroundColor Yellow
+    } else {
+        $overMb = [Math]::Round(($fullInstallerSize - $hardCeilingBytes) / 1MB, 2)
+        Write-Host "  Compliance Status          : [FAIL - ACTUAL] Generated installer EXCEEDS 38 MB hard ceiling by $overMb MB!" -ForegroundColor Red
         if ($FailOnExceeded) {
-            throw "Budget Audit FAILED: Actual installer size ($(Format-Bytes $fullInstallerSize)) exceeds 20.0 MB target by $overMb MB!"
+            throw "Budget Audit FAILED: Actual installer size ($(Format-Bytes $fullInstallerSize)) exceeds 38.0 MB hard ceiling by $overMb MB!"
         }
     }
 } else {
-    Write-Host "  Target Ceiling (Installer) : $(Format-Bytes $targetBytes) (20.0 MB)" -ForegroundColor White
+    Write-Host "  Target Ceiling (Installer) : $(Format-Bytes $targetBytes) (22.0 MB)" -ForegroundColor White
     Write-Host "  Estimated Full Size        : $(Format-Bytes $fullInstallerEstBytes) [ESTIMATE - Installer not built yet]" -ForegroundColor White
     if ($fullInstallerEstBytes -le $targetBytes) {
-        Write-Host "  Compliance Status          : [PASS - ESTIMATE] Estimated Full installer satisfies the 20 MB target!" -ForegroundColor Green
+        Write-Host "  Compliance Status          : [PASS - ESTIMATE] Estimated Full installer satisfies BUD-003 target!" -ForegroundColor Green
     } else {
         $overMb = [Math]::Round(($fullInstallerEstBytes - $targetBytes) / 1MB, 2)
         Write-Host "  Compliance Status          : [BORDERLINE/EXCEEDS by ~$overMb MB] [ESTIMATE]" -ForegroundColor Yellow

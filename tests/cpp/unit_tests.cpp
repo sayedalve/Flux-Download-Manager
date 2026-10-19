@@ -3781,24 +3781,25 @@ bool TestAuditBehaviorImprovements() {
         ASSERT_TRUE(ti.get_piece_size(0) == 0, "get_piece_size with 0 length returns 0 safely without division by zero");
 
         // 6. Magnet link rejection in TorrentEngine
-        std::atomic<bool> cancel_flag{false};
-        std::atomic<bool> pause_flag{false};
-        std::atomic<uint64_t> downloaded{0};
-        std::atomic<uint64_t> uploaded{0};
-        std::atomic<uint64_t> total{0};
+        openidm::TaskModel t_mag;
+        t_mag.task_id = openidm::GenerateUuidV4();
+        t_mag.url = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test";
+        openidm::torrent::TorrentInfo ti_mag;
+        ti_mag.is_magnet = true;
+        std::atomic<bool> pause_req{false};
+        std::atomic<bool> cancel_req{false};
+        std::atomic<uint64_t> spd_limit{0};
         std::atomic<uint64_t> global_limit{1048576};
 
         auto mag_res = openidm::torrent::TorrentEngine::ExecuteTorrentDownload(
-            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test",
-            ".",
-            cancel_flag,
-            pause_flag,
-            downloaded,
-            uploaded,
-            total,
-            0,
-            &global_limit,
-            nullptr
+            t_mag,
+            ti_mag,
+            pause_req,
+            cancel_req,
+            spd_limit,
+            nullptr,
+            nullptr,
+            &global_limit
         );
         ASSERT_TRUE(!mag_res.ok(), "Magnet download execution rejected");
         ASSERT_TRUE(mag_res.error->code == "ERR_MAGNET_METADATA_UNSUPPORTED", "Error code is ERR_MAGNET_METADATA_UNSUPPORTED");
@@ -3826,15 +3827,16 @@ bool TestAuditBehaviorImprovements() {
 
         openidm::TaskModel t;
         t.task_id = openidm::GenerateUuidV4();
-        t.task_type = openidm::TaskType::kVodStream;
-        t.state = openidm::TaskState::kFailed;
+        t.task_type = openidm::TaskType::kStreamHls;
         t.file_name = "stream_temp.mp4";
         t.save_dir = test_dir.string();
         t.part_path = dummy_stream_file.string();
         t.url = "https://example.com/master.m3u8";
-        ASSERT_TRUE(ctrl.GetStore().UpsertTask(t).ok(), "Upsert failed stream task");
+        auto add_res = ctrl.AddTask(t, false);
+        ASSERT_TRUE(add_res.ok(), "Add stream task");
 
-        // Retry task must preserve intermediate segments for VOD stream
+        // Pause then retry
+        ASSERT_TRUE(ctrl.PauseTask(t.task_id).ok(), "Pause stream task");
         auto retry_res = ctrl.RetryTask(t.task_id);
         ASSERT_TRUE(retry_res.ok(), "Retry stream task succeeded");
         ASSERT_TRUE(std::filesystem::exists(dummy_stream_file, ec), "Stream intermediate part file preserved on retry");
@@ -3918,9 +3920,9 @@ int main() {
     const int total = 59;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
-        std::cout << "[" << idx << "/" << total << "] Running " << name << "...\n";
+        std::cout << "[" << idx << "/" << total << "] Running " << name << "..." << std::endl;
         if (fn()) {
-            std::cout << "  -> PASS\n";
+            std::cout << "  -> PASS" << std::endl;
             ++passed;
         }
     };

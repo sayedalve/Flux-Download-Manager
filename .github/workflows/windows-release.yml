@@ -54,7 +54,7 @@ jobs:
           cmake --version
           Write-Host "`n=== MSVC Compiler (cl.exe) ==="
           Get-Command cl.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-          cl.exe 2>&1 | Select-Object -First 1
+          cmd.exe /c "cl 2>&1" | Select-Object -First 1
           Write-Host "`n=== Available CMake Generators ==="
           cmake --help
 

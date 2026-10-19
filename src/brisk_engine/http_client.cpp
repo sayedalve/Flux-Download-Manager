@@ -202,6 +202,8 @@ bool IsLoopbackHost(std::string_view host) {
     return false;
 }
 
+} // namespace
+
 bool ParseContentRange(std::string_view val, uint64_t& start, uint64_t& end, uint64_t& total) {
     std::string s = Trim(val);
     if (ToLower(s.substr(0, 6)) != "bytes ") return false;
@@ -228,6 +230,8 @@ bool ParseContentRange(std::string_view val, uint64_t& start, uint64_t& end, uin
         return false;
     }
 }
+
+namespace {
 
 void PopulateHeaderField(HttpResponseMeta& meta, const std::string& k, const std::string& v) {
     std::string kl = ToLower(k);

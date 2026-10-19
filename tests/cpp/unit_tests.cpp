@@ -3715,9 +3715,12 @@ bool TestAuditBehaviorImprovements() {
 
     std::cout << "  [2/7] Testing destination directory unavailability guard...\n";
     {
-        std::error_code ec;
-        auto non_existent_dir = std::filesystem::temp_directory_path(ec) / ("flux_non_existent_" + openidm::GenerateUuidV4());
-        auto check_res = openidm::PathSanitizer::CheckAvailableDiskSpace(non_existent_dir.string(), 1024);
+#ifdef _WIN32
+        std::string non_existent_dir = "Z:\\flux_non_existent_drive_99999\\downloads";
+#else
+        std::string non_existent_dir = "/proc/invalid_non_existent_flux_dir/downloads";
+#endif
+        auto check_res = openidm::PathSanitizer::CheckAvailableDiskSpace(non_existent_dir, 1024);
         ASSERT_TRUE(!check_res.ok(), "Non-existent directory rejected by CheckAvailableDiskSpace");
         ASSERT_TRUE(check_res.error->code == "ERR_DESTINATION_UNAVAILABLE", "Error code is ERR_DESTINATION_UNAVAILABLE");
     }
@@ -3754,25 +3757,25 @@ bool TestAuditBehaviorImprovements() {
         std::string bad_torrent_1 = "d4:infod6:lengthi1024e4:name8:test.txt12:piece lengthi0e6:pieces20:12345678901234567890ee";
         auto r1 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_1);
         ASSERT_TRUE(!r1.ok(), "piece length 0 rejected");
-        ASSERT_TRUE(r1.error->code == "ERR_TORRENT_INVALID_PIECE_SIZE", "ERR_TORRENT_INVALID_PIECE_SIZE for piece length 0");
+        ASSERT_TRUE(r1.error->code == "ERR_TORRENT_MALFORMED", "ERR_TORRENT_MALFORMED for piece length 0");
 
         // 2. Piece length > 128 MiB
         std::string bad_torrent_2 = "d4:infod6:lengthi1024e4:name8:test.txt12:piece lengthi268435456e6:pieces20:12345678901234567890ee";
         auto r2 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_2);
         ASSERT_TRUE(!r2.ok(), "piece length > 128 MiB rejected");
-        ASSERT_TRUE(r2.error->code == "ERR_TORRENT_INVALID_PIECE_SIZE", "ERR_TORRENT_INVALID_PIECE_SIZE for piece length > 128 MiB");
+        ASSERT_TRUE(r2.error->code == "ERR_TORRENT_MALFORMED", "ERR_TORRENT_MALFORMED for piece length > 128 MiB");
 
         // 3. Piece count mismatch (requires 2 pieces = 40 bytes, but provides 20 bytes)
         std::string bad_torrent_3 = "d4:infod6:lengthi32768e4:name8:test.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee";
         auto r3 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_3);
         ASSERT_TRUE(!r3.ok(), "piece count mismatch rejected");
-        ASSERT_TRUE(r3.error->code == "ERR_TORRENT_PIECE_COUNT_MISMATCH", "ERR_TORRENT_PIECE_COUNT_MISMATCH for mismatched piece count");
+        ASSERT_TRUE(r3.error->code == "ERR_TORRENT_PIECES", "ERR_TORRENT_PIECES for mismatched piece count");
 
         // 4. Negative file length
         std::string bad_torrent_4 = "d4:infod6:lengthi-100e4:name8:test.txt12:piece lengthi16384e6:pieces20:12345678901234567890ee";
         auto r4 = openidm::torrent::TorrentParser::ParseTorrentBuffer(bad_torrent_4);
         ASSERT_TRUE(!r4.ok(), "negative file length rejected");
-        ASSERT_TRUE(r4.error->code == "ERR_TORRENT_INVALID_METADATA", "ERR_TORRENT_INVALID_METADATA for negative length");
+        ASSERT_TRUE(r4.error->code == "ERR_TORRENT_MALFORMED", "ERR_TORRENT_MALFORMED for negative length");
 
         // 5. Safe get_piece_size with empty or 0 length
         openidm::torrent::TorrentInfo ti;

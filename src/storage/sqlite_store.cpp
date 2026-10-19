@@ -653,16 +653,21 @@ Result<int> SqliteStore::RecoverInterruptedTasks(uint64_t rollback_margin_bytes)
             t.status_detail = "Paused (Recovered after restart)";
 
             std::error_code ec;
-            bool part_exists = !t.part_path.empty() && std::filesystem::exists(t.part_path, ec);
+            std::filesystem::path part_path = t.part_path.empty() ?
+                (std::filesystem::path(t.save_dir) / (t.file_name + ".part")) :
+                std::filesystem::path(t.part_path);
+            bool part_exists = std::filesystem::exists(part_path, ec);
+            uint64_t actual_part_sz = part_exists ? std::filesystem::file_size(part_path, ec) : 0;
+            bool has_explicit_part = !t.part_path.empty();
+            bool part_missing_on_disk = has_explicit_part && !part_exists;
 
             if (!t.segments.empty()) {
-                if (!part_exists) {
-                    t.segments.clear();
-                    t.downloaded_bytes = 0;
-                } else {
-                    uint64_t actual_part_sz = std::filesystem::file_size(t.part_path, ec);
-                    uint64_t recomputed_dl = 0;
-                    for (auto& seg : t.segments) {
+                uint64_t recomputed_dl = 0;
+                for (auto& seg : t.segments) {
+                    if (part_missing_on_disk) {
+                        seg.current_offset = seg.start_offset;
+                        seg.completed = false;
+                    } else {
                         if (!seg.completed && seg.current_offset > seg.start_offset) {
                             uint64_t delta = seg.current_offset - seg.start_offset;
                             if (delta > rollback_margin_bytes) {
@@ -671,19 +676,18 @@ Result<int> SqliteStore::RecoverInterruptedTasks(uint64_t rollback_margin_bytes)
                                 seg.current_offset = seg.start_offset;
                             }
                         }
-                        if (seg.current_offset > actual_part_sz && actual_part_sz >= seg.start_offset) {
+                        if (part_exists && seg.current_offset > actual_part_sz && actual_part_sz >= seg.start_offset) {
                             seg.current_offset = actual_part_sz;
                         }
-                        recomputed_dl += seg.downloaded_bytes();
                     }
-                    t.downloaded_bytes = recomputed_dl;
+                    recomputed_dl += seg.downloaded_bytes();
                 }
+                t.downloaded_bytes = recomputed_dl;
             } else {
-                if (!part_exists) {
+                if (part_missing_on_disk) {
                     t.downloaded_bytes = 0;
                 } else {
-                    uint64_t actual_part_sz = std::filesystem::file_size(t.part_path, ec);
-                    if (t.downloaded_bytes > actual_part_sz) {
+                    if (part_exists && actual_part_sz < t.downloaded_bytes) {
                         t.downloaded_bytes = actual_part_sz;
                     }
                     if (rollback_margin_bytes > 0 && t.downloaded_bytes > rollback_margin_bytes) {

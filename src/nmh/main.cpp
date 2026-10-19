@@ -42,6 +42,10 @@ bool ReadExact(void* buf, size_t count, FILE* stream) {
     return true;
 }
 
+bool ReadExact(FILE* stream, void* buf, size_t count) {
+    return ReadExact(buf, count, stream);
+}
+
 bool WriteExact(const void* buf, size_t count, FILE* stream) {
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     size_t total = 0;

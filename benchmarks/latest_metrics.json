@@ -1,0 +1,30 @@
+{
+  "version": "0.3.0",
+  "product_name": "Flux Download Manager",
+  "short_name": "Flux",
+  "host_platform": "Windows 11 (AMD64)",
+  "flux_binary_bytes": 1806848,
+  "flux_nmh_binary_bytes": 1110528,
+  "nm3u8dl_re_worker_bytes": 17197568,
+  "combined_core_binaries_kb": 2849.0,
+  "total_all_three_binaries_kb": 19643.5,
+  "cold_startup_list_median_ms": 36.91,
+  "idle_daemon_rss_mb": 10.05,
+  "peak_http_8conn_rss_mb": 13.84,
+  "peak_stream_worker_rss_mb": 10.75,
+  "system_ffmpeg_baseline_rss_mb": 15.04,
+  "peak_stream_with_ffmpeg_rss_mb": 10.9,
+  "large_1000_tasks_snapshot_ms": 59.59,
+  "throughput_16mb_8conn_median_mbps": 482.4,
+  "cpu_time_16mb_8conn_ms": 109.38,
+  "leftover_temp_files_count": 0,
+  "timestamp_utc": "2026-10-17T14:48:56.881488+00:00",
+  "python_version": "3.12.10",
+  "os_environment": {
+    "system": "Windows",
+    "release": "11",
+    "version": "10.0.26200",
+    "machine": "AMD64",
+    "processor": "Intel64 Family 6 Model 142 Stepping 12, GenuineIntel"
+  }
+}

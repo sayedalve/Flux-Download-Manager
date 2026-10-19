@@ -1,0 +1,10 @@
+{
+  "name": "com.flux.downloadmanager",
+  "description": "Flux Download Manager Native Messaging Host",
+  "path": "C:\\Program Files\\Flux Download Manager\\flux-nmh.exe",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://mdgmlcnpodoehidlplplfegngnjnilap/",
+    "chrome-extension://chbojfoombcanhhpoclailollapkglma/"
+  ]
+}

@@ -1,0 +1,207 @@
+name: Windows 11 Release Build & Verification
+
+on:
+  push:
+    branches: [ "main", "master", "v0.3.x" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test:
+    name: Build & Verify Windows x64
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+
+      - name: Provision Upstream Stream Workers (N_m3u8DL-RE & FFmpeg)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1
+
+      - name: Preflight Toolchain & CMake Inspection
+        shell: powershell
+        run: |
+          Write-Host "=== CMake Version ==="
+          cmake --version
+          Write-Host "`n=== MSVC Compiler (cl.exe) ==="
+          Get-Command cl.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          cl.exe 2>&1 | Select-Object -First 1
+          Write-Host "`n=== Available CMake Generators ==="
+          cmake --help
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          Write-Host "Active VisualStudioVersion: $env:VisualStudioVersion, VSINSTALLDIR: $env:VSINSTALLDIR"
+          $helpText = (cmake --help | Out-String)
+          $candidates = @()
+          if ($env:VisualStudioVersion -like "18*" -or $env:VSINSTALLDIR -like "*\18\*") {
+              $candidates += 'Visual Studio 18 2026'
+          } elseif ($env:VisualStudioVersion -like "17*" -or $env:VSINSTALLDIR -like "*2022*") {
+              $candidates += 'Visual Studio 17 2022'
+          }
+          if ($helpText -match '\*\s+(Visual Studio [^\r\n=]+?)\s*=') {
+              $candidates += $Matches[1].Trim()
+          }
+          $candidates += @('Visual Studio 18 2026', 'Visual Studio 17 2022', '')
+
+          $configured = $false
+          foreach ($gen in ($candidates | Select-Object -Unique)) {
+              Write-Host "Attempting CMake configuration with generator: '$gen'..."
+              Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+              if ($gen -eq '') {
+                  cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+              } else {
+                  cmake -B build -G "$gen" -A x64 -DCMAKE_BUILD_TYPE=Release
+              }
+              if ($LASTEXITCODE -eq 0) {
+                  $configured = $true
+                  Write-Host "Successfully configured CMake with generator: '$gen'"
+                  break
+              }
+          }
+          if (-not $configured) {
+              throw "CMake configuration failed for all candidate generators."
+          }
+
+      - name: Build Windows Targets
+        run: |
+          cmake --build build --config Release --target flux flux-nmh flux_unit_tests openidm openidm-nmh openidm_unit_tests
+
+      - name: Verify PE32+ Binaries & Subsystems
+        shell: powershell
+        run: |
+          $bins = @(
+            @{ Path = "build/Release/flux.exe"; ExpectedSubsystem = 2 },
+            @{ Path = "build/Release/flux-nmh.exe"; ExpectedSubsystem = 3 },
+            @{ Path = "build/Release/flux_unit_tests.exe"; ExpectedSubsystem = 3 }
+          )
+          foreach ($b in $bins) {
+            if (-not (Test-Path $b.Path)) {
+              throw "Binary missing: $($b.Path)"
+            }
+            $bytes = [System.IO.File]::ReadAllBytes($b.Path)
+            if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "Invalid MZ header: $($b.Path)"
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0x8664) {
+              throw "Expected AMD64 (0x8664) machine type: $($b.Path)"
+            }
+            $optOffset = $peOffset + 24
+            $magic = [BitConverter]::ToUInt16($bytes, $optOffset)
+            if ($magic -ne 0x20B) {
+              throw "Expected PE32+ (0x20B) magic: $($b.Path)"
+            }
+            $subsystem = [BitConverter]::ToUInt16($bytes, $optOffset + 68)
+            if ($subsystem -ne $b.ExpectedSubsystem) {
+              throw "Expected subsystem $($b.ExpectedSubsystem), got $subsystem for $($b.Path)"
+            }
+            Write-Host "Verified $($b.Path): AMD64 PE32+ Subsystem=$subsystem"
+          }
+
+      - name: Run C++ Unit & Regression Tests
+        shell: powershell
+        run: |
+          .\build\Release\flux_unit_tests.exe
+
+      - name: Run Browser Extension Detection Tests
+        shell: powershell
+        run: |
+          node tests/test_extension_detection.js
+
+      - name: Run End-to-End Integration & Benchmark Suite
+        shell: powershell
+        run: |
+          python tests/run_all_integration_tests.py
+
+      - name: Run Automated Performance Benchmarks
+        shell: powershell
+        run: |
+          python scripts/run-benchmarks.py
+
+      - name: Compile Inno Setup Installer
+        shell: powershell
+        run: |
+          $issPath = "installer/flux.iss"
+          if (-not (Test-Path $issPath)) {
+            $issPath = "installer/openidm.iss"
+          }
+          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
+          } elseif (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
+            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" $issPath
+          } else {
+            choco install innosetup -y
+            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $issPath
+          }
+
+      - name: Package Standalone Portable Releases (Full & Core)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "0.3.0" -PackageType Both -BuildDir "build/Release"
+          if (Test-Path "dist/Flux-Setup-x64-0.3.0.exe") {
+            $h = Get-FileHash "dist/Flux-Setup-x64-0.3.0.exe" -Algorithm SHA256
+            Add-Content -Path "dist/SHA256SUMS.txt" -Value "$($h.Hash)  dist\Flux-Setup-x64-0.3.0.exe" -Encoding utf8
+          }
+          Get-Content "dist/SHA256SUMS.txt"
+
+      - name: Upload Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flux-v0.3.0-windows-x64
+          path: |
+            dist/*-Setup-*.exe
+            dist/Flux-v0.3.0-Windows-x64-Full.zip
+            dist/Flux-v0.3.0-Windows-x64-Core.zip
+            dist/Flux-v0.3.0-Windows-x64.zip
+            dist/SHA256SUMS.txt
+            benchmarks/latest_metrics.json
+            docs/BENCHMARK_REPORT.md
+
+      - name: Create GitHub Release Draft
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: false
+          files: |
+            dist/*-Setup-*.exe
+            dist/Flux-v0.3.0-Windows-x64-Full.zip
+            dist/Flux-v0.3.0-Windows-x64-Core.zip
+            dist/Flux-v0.3.0-Windows-x64.zip
+            dist/SHA256SUMS.txt
+            LICENSE
+            THIRD_PARTY_NOTICES.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

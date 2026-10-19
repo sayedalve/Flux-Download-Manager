@@ -1,0 +1,76 @@
+# Build directories and outputs
+build/
+build*/
+bin/
+obj/
+dist/
+out/
+x64/
+Win32/
+
+# Large executable binaries & third-party workers (downloaded via scripts/fetch-workers.ps1)
+tools/*
+!tools/.gitkeep
+!tools/win-x64/
+tools/win-x64/*
+!tools/win-x64/.gitkeep
+*.exe
+*.dll
+
+# Third-party dependencies & audit artifacts
+third_party/
+idm audit/
+
+# Release archives
+*.zip
+*.tar.gz
+*.7z
+
+# Visual Studio / MSVC artifacts
+.vs/
+*.obj
+*.o
+*.lib
+*.a
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.tlog
+*.recipe
+*.lastbuildstate
+*.VC.db
+*.opendb
+*.user
+*.suo
+
+# CMake artifacts
+CMakeFiles/
+CMakeCache.txt
+CMakeScripts/
+cmake_install.cmake
+
+# Databases, temporary files, logs
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+*.part
+*.openidm.part
+tmp/
+temp/
+
+# Python & Node.js
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+.pytest_cache/
+
+# IDE / Editor directories
+.vscode/
+.idea/
+*.swp
+*~
+redesign/

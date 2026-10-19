@@ -1,0 +1,9 @@
+{
+  "name": "org.openidm.native",
+  "description": "Flux Download Manager Native Messaging Host Bridge",
+  "path": "C:\\Program Files\\Flux Download Manager\\flux-nmh.exe",
+  "type": "stdio",
+  "allowed_extensions": [
+    "extension@openidm.org"
+  ]
+}

@@ -1,18 +1,20 @@
-# OpenIDM v0.2.0 Benchmark & Performance Report
+# Flux Download Manager Benchmark & Performance Report
 
-**Date:** 2026-10-16  
 **Document Status:** Approved & Empirically Verified  
 **Host Environment:** Windows 11 (AMD64, Build 10.0.26200, Intel64 Family 6 Model 142)  
 **Compiler:** MSVC 19.51.35928.0 (Visual Studio 2026 Community) / Windows SDK 10.0.26100.0  
-**Test Suite:** `tests/run_all_integration_tests.py` & `scripts/run-benchmarks.py`  
+**Internal Test Suite:** `tests/run_all_integration_tests.py` & `scripts/run-benchmarks.py`  
+**Competitor Comparison Suite:** `.github/workflows/benchmark-comparison.yml` & `scripts/run-competitor-benchmarks.py`  
 
 ---
 
 ## 1. Executive Summary
 
-This report documents the performance, resource footprint, and memory behavior of **OpenIDM v0.2.0** on native Windows 11 x64 and provides a technical analysis of the memory measurement discrepancy observed between Linux glibc accounting and native Windows 11 process accounting.
+This report documents the performance, resource footprint, and memory behavior of **Flux Download Manager** on native Windows 11 x64 and provides a technical analysis of the memory measurement discrepancy observed between Linux glibc accounting and native Windows 11 process accounting.
 
 All 8 enforced performance budgets defined in [docs/PERFORMANCE_AND_SIZE_BUDGET.md](PERFORMANCE_AND_SIZE_BUDGET.md) are strictly satisfied on Windows 11 without relaxing any limits.
+
+For head-to-head competitive performance comparisons against **aria2 (16 connections)**, **Internet Download Manager (IDM 6.42)**, and **Free Download Manager (FDM 6.34)**, see [benchmarks/LATEST_COMPARISON.md](../benchmarks/LATEST_COMPARISON.md).
 
 ---
 
@@ -80,19 +82,39 @@ The following measurements were captured on native Windows 11 x64 by `scripts/ru
 ---
 
 ## 5. Verification Commands
-
-To reproduce all measurements on a Windows 11 development host:
-
-```powershell
-# 1. Run full 12-suite C++ unit test suite
-build\win-x64\Release\openidm_unit_tests.exe
-
-# 2. Run browser extension detection tests
-node tests/test_extension_detection.js
-
-# 3. Run all 8 integration and benchmark suites
-python tests/run_all_integration_tests.py
-
-# 4. Run automated benchmark runner and generate JSON
-python scripts/run-benchmarks.py
-```
+ 
+ To reproduce all measurements on a Windows 11 development host:
+ 
+ ```powershell
+ # 1. Run full 12-suite C++ unit test suite
+ build\win-x64\Release\openidm_unit_tests.exe
+ 
+ # 2. Run browser extension detection tests
+ node tests/test_extension_detection.js
+ 
+ # 3. Run all 8 integration and benchmark suites
+ python tests/run_all_integration_tests.py
+ 
+ # 4. Run automated benchmark runner and generate JSON
+ python scripts/run-benchmarks.py
+ ```
+ 
+ ---
+ 
+ ## 6. Automated Competitor Benchmark Lab
+ 
+ For competitive comparisons between Flux and third-party download managers, a separate dedicated lab operates inside GitHub Actions on a hosted `windows-2022` runner:
+ - **Workflow:** `.github/workflows/benchmark-comparison.yml`
+ - **Runner:** `scripts/run-competitor-benchmarks.py`
+ - **Controlled Server:** `scripts/benchmark_server.py`
+ - **Report Location:** [benchmarks/LATEST_COMPARISON.md](../benchmarks/LATEST_COMPARISON.md)
+ - **Structured Metrics:** [benchmarks/latest_comparison.json](../benchmarks/latest_comparison.json) & [benchmarks/latest_comparison.csv](../benchmarks/latest_comparison.csv)
+ 
+ ### Tested Configurations:
+ 1. **Flux (8 connections):** Default multi-connection configuration.
+ 2. **Flux (32 connections):** Maximum parallel connection saturation for rate-limited servers.
+ 3. **aria2 (16 connections):** Pinned official release `1.37.0` (`-x 16 -s 16 -k 1M`).
+ 4. **Internet Download Manager (IDM 6.42 Build 64):** Evaluated under headless CI licensing and unattended automation constraints.
+ 5. **Free Download Manager (FDM 6.34.4):** Evaluated under headless CLI availability constraints.
+ 
+ All competitor benchmark runs execute in GitHub Actions with zero synthetic numbers and strict SHA-256 verification.

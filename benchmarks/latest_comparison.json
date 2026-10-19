@@ -1,0 +1,43 @@
+{
+  "metadata": {
+    "status": "INITIALIZED_PENDING_RUNNER_EXECUTION",
+    "target_workflow": ".github/workflows/benchmark-comparison.yml",
+    "target_runner": "windows-2022",
+    "timestamp_utc": null,
+    "extended_mode": false,
+    "system_specs": null
+  },
+  "tools": {
+    "flux_8": {
+      "name": "Flux Download Manager",
+      "connections": 8,
+      "status": "READY",
+      "notes": "Native C++20 / WinHTTP segmented download engine (8 connections)"
+    },
+    "flux_32": {
+      "name": "Flux Download Manager",
+      "connections": 32,
+      "status": "READY",
+      "notes": "Native C++20 / WinHTTP segmented download engine (32 connections)"
+    },
+    "aria2_16": {
+      "name": "aria2",
+      "connections": 16,
+      "status": "READY",
+      "notes": "aria2 1.37.0 official x64 build (-x 16 -s 16 -k 1M)"
+    },
+    "idm_642": {
+      "name": "Internet Download Manager",
+      "connections": 16,
+      "status": "PENDING_RUNNER_EVALUATION",
+      "notes": "IDM 6.42 Build 64 unattended CI licensing evaluation"
+    },
+    "fdm_634": {
+      "name": "Free Download Manager",
+      "connections": 16,
+      "status": "PENDING_RUNNER_EVALUATION",
+      "notes": "FDM 6.34.4 headless CLI evaluation"
+    }
+  },
+  "scenarios": {}
+}

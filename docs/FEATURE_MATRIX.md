@@ -55,6 +55,7 @@
 | **FR-034** | Post-Download Windows Defender Antivirus Scanner & Sound Alert (with Threat Execution Block) | `src/security/antivirus_scanner.cpp`, `src/core/download_controller.cpp`, `src/ui/win32_main_window.cpp` | Windows Defender MpCmdRun Integration | `Verified by Execution` | `TestAntivirusScannerSafetyAndHandling` |
 | **FR-035** | Multi-Format Task Import/Export (JSON/CSV) with Credential Scrubbing | `src/storage/import_export.cpp` | Independent Privacy Architecture | `Verified by Execution` | `TestTaskImportExportAndMultiQueue` |
 | **FR-036** | Dual Portable Packaging (Full & Core) & Lowest-Privilege Installer (< 20 MB Full) | `scripts/package-release-zip.ps1`, `installer/flux.iss`, `scripts/build-minimal-ffmpeg.ps1` | Independent Release Architecture | `Verified by Execution` | `ISCC` compilation (19.28 MB Full, 2.89 MB Core), clean `/VERYSILENT` extraction test, `report-package-sizes.ps1` |
+| **FR-037** | Automated GitHub Actions Competitor Benchmark Lab (Flux vs aria2, IDM, FDM) | `.github/workflows/benchmark-comparison.yml`, `scripts/run-competitor-benchmarks.py`, `scripts/benchmark_server.py` | Independent Benchmarking Architecture | `Verified by Execution` | Workflow automation, localhost RFC 7233 throttled test server, SHA-256 verification, `benchmarks/LATEST_COMPARISON.md` |
 
 ---
 

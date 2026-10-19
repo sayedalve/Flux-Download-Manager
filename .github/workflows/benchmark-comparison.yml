@@ -1,0 +1,163 @@
+name: Download Manager Benchmark Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      extended_mode:
+        description: "Run extended mode (5 trials per tool instead of 3)"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    # Run weekly on Sundays at 04:00 UTC
+    - cron: '0 4 * * 0'
+
+permissions:
+  contents: write
+
+jobs:
+  benchmark-comparison:
+    name: Benchmark Comparison (Windows x64)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+
+      - name: Inspect Host & Runner Environment
+        shell: powershell
+        run: |
+          Write-Host "=== Runner Environment ==="
+          Write-Host "OS: $((Get-CimInstance Win32_OperatingSystem).Caption) ($((Get-CimInstance Win32_OperatingSystem).Version))"
+          Write-Host "Processor: $((Get-CimInstance Win32_Processor).Name)"
+          Write-Host "Logical Cores: $env:NUMBER_OF_PROCESSORS"
+          Write-Host "Total Memory (GB): $([Math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2))"
+          Write-Host "Runner Name: $env:RUNNER_NAME"
+          Write-Host "`n=== Toolchain ==="
+          cmake --version
+          cmd.exe /c "cl 2>&1" | Select-Object -First 1
+          python --version
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          $helpText = (cmake --help | Out-String)
+          $candidates = @()
+          if ($env:VisualStudioVersion -like "17*" -or $env:VSINSTALLDIR -like "*2022*") {
+              $candidates += 'Visual Studio 17 2022'
+          }
+          if ($helpText -match '\*\s+(Visual Studio [^\r\n=]+?)\s*=') {
+              $candidates += $Matches[1].Trim()
+          }
+          $candidates += @('Visual Studio 17 2022', '')
+
+          $configured = $false
+          foreach ($gen in ($candidates | Select-Object -Unique)) {
+              Write-Host "Attempting CMake configuration with generator: '$gen'..."
+              Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+              if ($gen -eq '') {
+                  cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+              } else {
+                  cmake -B build -G "$gen" -A x64 -DCMAKE_BUILD_TYPE=Release
+              }
+              if ($LASTEXITCODE -eq 0) {
+                  $configured = $true
+                  Write-Host "Successfully configured CMake with generator: '$gen'"
+                  break
+              }
+          }
+          if (-not $configured) {
+              throw "CMake configuration failed for all candidate generators."
+          }
+
+      - name: Build Flux Target
+        run: |
+          cmake --build build --config Release --target flux flux-nmh
+
+      - name: Verify Flux Binary
+        shell: powershell
+        run: |
+          $bin = "build/Release/flux.exe"
+          if (-not (Test-Path $bin)) {
+            $bin = "build/win-x64/Release/flux.exe"
+          }
+          if (-not (Test-Path $bin)) {
+            throw "Flux executable missing at expected path!"
+          }
+          Write-Host "Found Flux binary at: $bin"
+          & $bin --version
+
+      - name: Run Competitor Benchmark Comparison Suite
+        shell: powershell
+        run: |
+          $fluxBin = "build/Release/flux.exe"
+          if (-not (Test-Path $fluxBin)) {
+            $fluxBin = "build/win-x64/Release/flux.exe"
+          }
+          $extFlag = if ("${{ inputs.extended_mode }}" -eq "true") { "--extended" } else { "" }
+          Write-Host "Running: python scripts/run-competitor-benchmarks.py $extFlag --flux-bin $fluxBin"
+          python scripts/run-competitor-benchmarks.py $extFlag --flux-bin $fluxBin
+
+      - name: Publish Markdown Summary to Job Summary
+        shell: powershell
+        if: always()
+        run: |
+          $summaryFile = "benchmarks/LATEST_COMPARISON.md"
+          if (Test-Path $summaryFile) {
+            Get-Content $summaryFile -Raw -Encoding utf8 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            Write-Host "Published benchmark summary to GITHUB_STEP_SUMMARY"
+          } else {
+            Write-Host "Summary file not found: $summaryFile"
+          }
+
+      - name: Upload Benchmark Results Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-comparison-results
+          path: |
+            benchmarks/latest_comparison.json
+            benchmarks/latest_comparison.csv
+            benchmarks/LATEST_COMPARISON.md
+            benchmarks/benchmark_server.log
+          if-no-files-found: warn
+
+      - name: Commit and Push Updated Benchmark Results
+        shell: powershell
+        run: |
+          $currentBranch = "${{ github.ref_name }}"
+          Write-Host "Current branch: $currentBranch, ref: ${{ github.ref }}"
+          if ($currentBranch -eq "main" -or "${{ github.ref }}" -eq "refs/heads/main") {
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add benchmarks/latest_comparison.json benchmarks/latest_comparison.csv benchmarks/LATEST_COMPARISON.md
+            $status = git status --porcelain benchmarks/
+            if ($status) {
+              Write-Host "Changes detected in benchmarks/:"
+              git status -s benchmarks/
+              git commit -m "chore(benchmarks): update competitor benchmark results [skip ci]"
+              git push origin main
+              Write-Host "Successfully committed and pushed fresh benchmark results to main branch."
+            } else {
+              Write-Host "No benchmark file changes detected to commit."
+            }
+          } else {
+            Write-Host "Not on main branch (on '$currentBranch'); skipping automated commit to main."
+          }

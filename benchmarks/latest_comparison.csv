@@ -1,0 +1,16 @@
+Scenario_ID,Scenario_Name,Tool_ID,Tool_Name,Configured_Connections,Status,Samples,Median_Time_s,Median_Throughput_MiBs,Median_Throughput_Mbps,Peak_Working_Set_MB,Median_CPU_Time_ms,Observed_Peak_Connections,SHA256_Verified
+scenario_a_256mb_unthrottled,Scenario A: 256 MiB High-Speed Range Download (Unthrottled),flux_8,Flux Download Manager,8,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_a_256mb_unthrottled,Scenario A: 256 MiB High-Speed Range Download (Unthrottled),flux_32,Flux Download Manager,32,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_a_256mb_unthrottled,Scenario A: 256 MiB High-Speed Range Download (Unthrottled),aria2_16,aria2,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_a_256mb_unthrottled,Scenario A: 256 MiB High-Speed Range Download (Unthrottled),idm_642,Internet Download Manager,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_a_256mb_unthrottled,Scenario A: 256 MiB High-Speed Range Download (Unthrottled),fdm_634,Free Download Manager,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_b_64mb_throttled,Scenario B: 64 MiB Multi-Connection Scaling (1 MiB/s per connection),flux_8,Flux Download Manager,8,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_b_64mb_throttled,Scenario B: 64 MiB Multi-Connection Scaling (1 MiB/s per connection),flux_32,Flux Download Manager,32,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_b_64mb_throttled,Scenario B: 64 MiB Multi-Connection Scaling (1 MiB/s per connection),aria2_16,aria2,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_b_64mb_throttled,Scenario B: 64 MiB Multi-Connection Scaling (1 MiB/s per connection),idm_642,Internet Download Manager,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_b_64mb_throttled,Scenario B: 64 MiB Multi-Connection Scaling (1 MiB/s per connection),fdm_634,Free Download Manager,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_c_16mb_norange,Scenario C: 16 MiB Non-Range Server (Single-Stream Fallback),flux_8,Flux Download Manager,8,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_c_16mb_norange,Scenario C: 16 MiB Non-Range Server (Single-Stream Fallback),flux_32,Flux Download Manager,32,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_c_16mb_norange,Scenario C: 16 MiB Non-Range Server (Single-Stream Fallback),aria2_16,aria2,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_c_16mb_norange,Scenario C: 16 MiB Non-Range Server (Single-Stream Fallback),idm_642,Internet Download Manager,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A
+scenario_c_16mb_norange,Scenario C: 16 MiB Non-Range Server (Single-Stream Fallback),fdm_634,Free Download Manager,16,PENDING_CI,0,N/A,N/A,N/A,N/A,N/A,N/A,N/A

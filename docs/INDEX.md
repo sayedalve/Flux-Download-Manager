@@ -31,6 +31,8 @@
 - [UI_DESIGN_SYSTEM.md](UI_DESIGN_SYSTEM.md) — Desktop UI design system, palettes, typography, DPI math, and dialogs.
 - [BUG_FIX_LOG.md](BUG_FIX_LOG.md) — Detailed bug fix and regression test log (`BUG-001`–`BUG-014`).
 - [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md) — Final test results, benchmark comparisons, and platform verification classification.
+- [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md) — Internal performance budgets and platform verification report.
+- [../benchmarks/LATEST_COMPARISON.md](../benchmarks/LATEST_COMPARISON.md) — Automated competitor benchmark lab report (Flux vs aria2, IDM, FDM).
 - [SOURCE_MAPPING.md](SOURCE_MAPPING.md) — Exact file-by-file upstream source mapping for Brisk, Cat Catch, and N_m3u8DL-RE.
 - [PHASE_REPORTS.md](PHASE_REPORTS.md) — Implementation and verification reports across all 10 build phases.
 

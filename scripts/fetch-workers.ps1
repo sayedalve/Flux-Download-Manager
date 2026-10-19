@@ -190,7 +190,7 @@ try {
         try {
             Invoke-WebRequest -Uri $FfmpegUrl -OutFile $FfZip -UseBasicParsing
         } catch {
-            throw "Failed to download minimal FFmpeg from $FfmpegUrl: $($_.Exception.Message)`nSilent fallback to bloated upstream monolithic FFmpeg (161+ MiB) is strictly prohibited to prevent package size regressions.`nTo explicitly allow large upstream worker, specify -UseUpstreamFfmpeg."
+            throw "Failed to download minimal FFmpeg from ${FfmpegUrl}: $($_.Exception.Message)`nSilent fallback to bloated upstream monolithic FFmpeg (161+ MiB) is strictly prohibited to prevent package size regressions.`nTo explicitly allow large upstream worker, specify -UseUpstreamFfmpeg."
         }
         Expand-Archive -Path $FfZip -DestinationPath (Join-Path $TmpDir "ff") -Force
         $FoundFf = Get-ChildItem -Path (Join-Path $TmpDir "ff") -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1

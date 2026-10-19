@@ -45,7 +45,7 @@ jobs:
       - name: Provision Upstream Stream Workers (N_m3u8DL-RE & FFmpeg)
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
 
       - name: Preflight Toolchain & CMake Inspection
         shell: powershell

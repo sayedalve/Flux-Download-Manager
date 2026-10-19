@@ -103,11 +103,19 @@ var G = {
     { type: "i", regex: "https?://[^\\s\"']+\\.ism/[Mm]anifest(\\?[^\\s\"']*)?$", ext: "ism", streamType: "MSS", sourceType: SourceType.DASH_MANIFEST, state: true }
   ],
 
-  // Ordinary file extensions intercepted by DownloadInterceptor (Brisk Browser Extension style)
+  // Ordinary file extensions intercepted by DownloadInterceptor (comprehensive suite)
   InterceptFileExts: new Set([
-    "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "iso", "exe", "msi", "dmg",
-    "pdf", "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav",
-    "apk", "bin", "deb", "rpm", "docx", "xlsx", "pptx", "csv", "epub"
+    // Archives & Compressed
+    "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "tbz2", "txz", "z", "lz", "lzma", "cab", "iso", "img", "bin",
+    // Installers & Executables & Packages
+    "exe", "msi", "dmg", "pkg", "deb", "rpm", "apk", "appimage", "jar", "war", "ipa", "crx", "xpi", "whl", "nupkg",
+    // Documents & E-books & Data
+    "pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "odp", "rtf", "csv", "tsv", "epub", "mobi", "azw3", "torrent",
+    // Media & Progressive Audio/Video
+    "mp4", "mkv", "webm", "mov", "avi", "flv", "wmv", "m4v", "3gp", "ts",
+    "mp3", "m4a", "flac", "wav", "aac", "ogg", "opus", "wma",
+    // Virtual Disk Images
+    "vhd", "vhdx", "vmdk", "ova", "ovf"
   ]),
 
   // Ordinary file MIME types eligible for automatic download interception
@@ -116,19 +124,50 @@ var G = {
     "application/zip",
     "application/x-zip-compressed",
     "application/x-rar-compressed",
+    "application/vnd.rar",
     "application/x-7z-compressed",
+    "application/x-7z",
     "application/gzip",
     "application/x-gzip",
     "application/x-tar",
+    "application/x-bzip",
     "application/x-bzip2",
     "application/x-xz",
     "application/x-iso9660-image",
     "application/x-msdownload",
     "application/x-msi",
+    "application/x-dosexec",
     "application/vnd.microsoft.portable-executable",
+    "application/x-executable",
+    "application/x-sharedlib",
+    "application/x-apple-diskimage",
+    "application/x-debian-package",
+    "application/x-deb",
+    "application/x-redhat-package-manager",
+    "application/x-rpm",
+    "application/vnd.android.package-archive",
     "application/octet-stream",
+    "application/binary",
     "application/force-download",
-    "application/x-download"
+    "application/x-download",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/x-bittorrent",
+    "video/mp4",
+    "video/webm",
+    "video/x-matroska",
+    "video/quicktime",
+    "video/x-msvideo",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/x-m4a",
+    "audio/flac",
+    "audio/wav",
+    "audio/ogg"
   ]),
 
   // Known YouTube progressive (combined video+audio) itags; all other videoplayback itags are adaptive split tracks

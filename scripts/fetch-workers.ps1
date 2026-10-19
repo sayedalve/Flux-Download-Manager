@@ -10,7 +10,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$TargetDir = (Join-Path $PSScriptRoot "..\tools\win-x64"),
+    [string]$TargetDir = "",
     [string]$Nm3u8dlUrl = "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.3.0-beta/N_m3u8DL-RE_v0.3.0-beta_win-x64_20241203.zip",
     [string]$Nm3u8dlExpectedSha256 = "E5C93A8DE0C58C50922C17A8A3BABD7D2193FB43B1A7FACD0B18DE9274EF8061",
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
@@ -22,6 +22,20 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+if (-not $ScriptDir -or -not (Test-Path $ScriptDir)) {
+    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+if (-not $ScriptDir -or -not (Test-Path $ScriptDir)) {
+    $ScriptDir = (Get-Location).Path
+}
+$RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
+if (-not $TargetDir) {
+    $TargetDir = Join-Path $RepoRoot "tools\win-x64"
+}
+$TargetDir = [System.IO.Path]::GetFullPath($TargetDir)
+
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("flux_workers_" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
@@ -146,15 +160,15 @@ try {
     Assert-Pe64Executable $YtExe
 
     # Also keep tools/ root synchronized for local development convenience
-    $RootTools = Join-Path $PSScriptRoot "..\tools"
+    $RootTools = Join-Path $RepoRoot "tools"
     New-Item -ItemType Directory -Force -Path $RootTools | Out-Null
     Copy-Item -Force $NmExe (Join-Path $RootTools "N_m3u8DL-RE.exe")
     Copy-Item -Force $FfExe (Join-Path $RootTools "ffmpeg.exe")
     Copy-Item -Force $YtExe (Join-Path $RootTools "yt-dlp.exe")
 
     # If dist\tools exists, keep it in sync for distribution packaging
-    $DistToolsX64 = Join-Path $PSScriptRoot "..\dist\tools\win-x64"
-    if (Test-Path (Join-Path $PSScriptRoot "..\dist")) {
+    $DistToolsX64 = Join-Path $RepoRoot "dist\tools\win-x64"
+    if (Test-Path (Join-Path $RepoRoot "dist")) {
         New-Item -ItemType Directory -Force -Path $DistToolsX64 | Out-Null
         Copy-Item -Force $NmExe (Join-Path $DistToolsX64 "N_m3u8DL-RE.exe")
         Copy-Item -Force $FfExe (Join-Path $DistToolsX64 "ffmpeg.exe")

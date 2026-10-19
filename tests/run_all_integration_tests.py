@@ -494,7 +494,8 @@ def main():
         verify_platform_binary_format(NMH_BIN)
         verify_platform_binary_format(STREAM_WORKER)
         ver_out = subprocess.run([str(STREAM_WORKER), "--version"], capture_output=True, text=True, check=True)
-        assert "0.3.0" in ver_out.stdout or "N_m3u8DL-RE" in ver_out.stdout, f"Unexpected worker version output: {ver_out.stdout}"
+        ver_text = (ver_out.stdout + "\n" + ver_out.stderr)
+        assert "0.3.0" in ver_text or "N_m3u8DL-RE" in ver_text, f"Unexpected worker version output: {ver_out.stdout}"
         print(f"  -> PASS (Verified native {'PE32+' if IS_WINDOWS else 'ELF x86_64'} executables)")
 
         # ---------------------------------------------------------------------
@@ -579,7 +580,7 @@ def main():
             text=True,
             check=True,
         )
-        stdout_upper = probe_out.stdout.upper()
+        stdout_upper = (probe_out.stdout + "\n" + probe_out.stderr).upper()
         assert "[VIDEO]" in stdout_upper and "[SUBTITLES]" in stdout_upper, f"Expected VIDEO and SUBTITLES tracks, got stdout: {probe_out.stdout!r}, stderr: {probe_out.stderr!r}"
 
         subprocess.run(
@@ -728,7 +729,8 @@ def main():
             text=True,
             check=True,
         )
-        assert "[Sidebar Counts] All=6" in ui_snap.stdout and "[Details Panel]" in ui_snap.stdout, "Desktop UI snapshot missing panels"
+        snap_text = ui_snap.stdout + "\n" + ui_snap.stderr
+        assert "[Sidebar Counts] All=6" in snap_text and "[Details Panel]" in snap_text, "Desktop UI snapshot missing panels"
         print("  -> PASS (Native Messaging RPC, in-process AES-128 decryption, FFmpeg muxing, log redaction, and UI snapshot verified)")
 
         # ---------------------------------------------------------------------
@@ -828,7 +830,8 @@ def main():
         t_large0 = time.perf_counter()
         snap_1000 = subprocess.run([str(OPENIDM_BIN), "--db", str(large_db), "--gui-snapshot"], capture_output=True, text=True, check=True)
         large_1000_ms = (time.perf_counter() - t_large0) * 1000.0
-        assert "[Sidebar Counts] All=1000" in snap_1000.stdout, "Expected 1000 tasks in snapshot"
+        snap_1000_text = snap_1000.stdout + "\n" + snap_1000.stderr
+        assert "[Sidebar Counts] All=1000" in snap_1000_text, "Expected 1000 tasks in snapshot"
 
         # Metric 8: Verify zero leftover .flux.part / .openidm.part temporary files in dl_dir and bench_dir
         leftover_parts = (

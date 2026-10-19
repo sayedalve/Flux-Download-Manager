@@ -184,18 +184,24 @@ int main(int argc, char* argv[]) {
         auto pres = controller.ProbeStream(target_url, {}, {});
         if (!pres.ok()) {
             std::cerr << "ERROR: " << pres.error->code << ": " << pres.error->message << "\n";
+            std::cout << "ERROR: " << pres.error->code << ": " << pres.error->message << "\n";
+            std::cout.flush();
+            std::cerr.flush();
             controller.Shutdown();
             return 2;
         }
-        std::cout << "Probed " << pres.value->tracks.size() << " tracks from " << pres.value->manifest_url << "\n";
+        std::string probe_summary = "Probed " + std::to_string(pres.value->tracks.size()) + " tracks from " + pres.value->manifest_url + "\n";
         for (const auto& tr : pres.value->tracks) {
             std::string upper_type = tr.media_type;
             for (char& c : upper_type) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-            std::cout << "  [" << upper_type << "] id=" << tr.id
-                      << " res=" << tr.resolution << " bw=" << tr.bandwidth
-                      << " lang=" << tr.language << " segs=" << tr.segments_count << "\n";
+            probe_summary += "  [" + upper_type + "] id=" + tr.id
+                          + " res=" + tr.resolution + " bw=" + std::to_string(tr.bandwidth)
+                          + " lang=" + tr.language + " segs=" + std::to_string(tr.segments_count) + "\n";
         }
+        std::cout << probe_summary;
         std::cout.flush();
+        std::cerr << probe_summary;
+        std::cerr.flush();
         controller.Shutdown();
         return 0;
     }

@@ -269,3 +269,168 @@ jobs:
             throw "One or more required test suites failed on ${{ matrix.os }}. Review test results and compatibility report above."
           }
           Write-Host "All automated test suites verified successfully on ${{ matrix.os }}!" -ForegroundColor Green
+
+  # =========================================================================
+  # JOB 3: Windows 11 Desktop ARM64 Compatibility & Prism x64 Emulation Lab
+  # Executes x64 binaries on GitHub-hosted Windows 11 ARM64 Desktop image
+  # Evaluates:
+  #   - Windows 11 Desktop client kernel & servicing branch
+  #   - Prism x64-on-ARM64 emulation accuracy and compatibility
+  #   - Desktop session telemetry and UI windowing environment
+  #   - Full C++ unit tests, core downloads, persistence, and installer smoke
+  # =========================================================================
+  windows-11-arm-compatibility:
+    name: Test Windows 11 Desktop (ARM64 / x64 Emulation)
+    needs: [build-and-stage-binaries]
+    runs-on: windows-11-arm
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node & Python Dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+          npm install
+          npx playwright install chromium
+
+      - name: Download Staged Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: radium-build-binaries-x64
+          path: staged_artifacts
+
+      - name: Organize Staged Binaries
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path build/Release | Out-Null
+          New-Item -ItemType Directory -Force -Path tools/win-x64 | Out-Null
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType Directory -Force -Path test-results | Out-Null
+
+          Copy-Item -Recurse staged_artifacts/build/Release/* build/Release/ -ErrorAction SilentlyContinue
+          Copy-Item -Recurse staged_artifacts/tools/win-x64/* tools/win-x64/ -ErrorAction SilentlyContinue
+          Copy-Item -Recurse staged_artifacts/dist/* dist/ -ErrorAction SilentlyContinue
+
+          Write-Host "=== Staged Files Inspection on Windows 11 ARM64 ==="
+          Get-ChildItem -Recurse build/Release, tools/win-x64, dist | Select-Object FullName, Length
+
+      - name: Audit Windows 11 ARM & Desktop Interactive Environment
+        shell: powershell
+        run: |
+          python scripts/audit_desktop_environment.py `
+            --bin-dir build/Release `
+            --output-json test-results/desktop_telemetry.json
+
+      - name: Run C++20 Regression Tests (x64 under Prism Emulation)
+        id: cpp_tests_arm
+        shell: powershell
+        run: |
+          $exitCode = 0
+          try {
+            & "build/Release/radium_unit_tests.exe"
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running radium_unit_tests.exe: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::C++20 unit tests failed on Windows 11 ARM with exit code $exitCode"
+          }
+
+      - name: Run Core Download Operations, Pause/Resume & Persistence Suite
+        id: core_tests_arm
+        shell: powershell
+        run: |
+          $exitCode = 0
+          try {
+            python tests/test_core_operations.py --bin-dir build/Release
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running test_core_operations.py: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::Core operations suite failed on Windows 11 ARM with exit code $exitCode"
+          }
+
+      - name: Run Clean Installation Smoke Suite
+        id: installer_tests_arm
+        shell: powershell
+        run: |
+          $exitCode = 0
+          try {
+            python tests/test_installer_smoke.py --dist-dir dist
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running test_installer_smoke.py: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::Installer smoke suite failed on Windows 11 ARM with exit code $exitCode"
+          }
+
+      - name: Run Browser Extension Runtime Suite (Chromium Playwright)
+        id: browser_tests_arm
+        shell: powershell
+        run: |
+          $exitCode = 0
+          try {
+            node tests/browser/test_extension_runtime.js
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running test_extension_runtime.js: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::Browser extension runtime suite failed on Windows 11 ARM with exit code $exitCode"
+          }
+
+      - name: Generate Windows 11 ARM Compatibility Report
+        shell: powershell
+        run: |
+          python scripts/generate-compatibility-report.py `
+            --results-dir test-results `
+            --output-md COMPATIBILITY_REPORT_windows-11-arm.md `
+            --output-json test-results/compatibility_report_windows-11-arm.json `
+            --os-label "windows-11-arm"
+
+      - name: Output Compatibility Report to Job Summary
+        shell: powershell
+        run: |
+          Get-Content "COMPATIBILITY_REPORT_windows-11-arm.md" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload Test Evidence & Compatibility Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-evidence-windows-11-arm
+          path: |
+            COMPATIBILITY_REPORT_windows-11-arm.md
+            test-results/
+            test-results/browser-extension/
+
+      - name: Assert All Required Test Suites Succeeded
+        shell: powershell
+        run: |
+          if ($env:test_failed -eq "true") {
+            throw "One or more required test suites failed on Windows 11 ARM. Review test results and compatibility report above."
+          }
+          Write-Host "All automated test suites verified successfully on Windows 11 ARM64!" -ForegroundColor Green

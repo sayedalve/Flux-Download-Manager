@@ -314,39 +314,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int argc = 0;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
 
-    // If stdout/stderr was redirected to a pipe or file by caller, connect CRT stdout to it
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD outType = (hOut && hOut != INVALID_HANDLE_VALUE) ? GetFileType(hOut) : FILE_TYPE_UNKNOWN;
-    if (outType == FILE_TYPE_PIPE || outType == FILE_TYPE_DISK) {
-        int fd_out = _open_osfhandle(reinterpret_cast<intptr_t>(hOut), _O_TEXT);
-        if (fd_out >= 0) {
-            int target_fd = (_fileno(stdout) >= 0) ? _fileno(stdout) : 1;
-            _dup2(fd_out, target_fd);
-            setvbuf(stdout, nullptr, _IONBF, 0);
-        }
-    } else if (argc > 1 && AttachConsole(ATTACH_PARENT_PROCESS)) {
-        FILE* fp = nullptr;
-        freopen_s(&fp, "CONOUT$", "w", stdout);
-        freopen_s(&fp, "CONOUT$", "w", stderr);
-    }
-
-    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
-    DWORD errType = (hErr && hErr != INVALID_HANDLE_VALUE) ? GetFileType(hErr) : FILE_TYPE_UNKNOWN;
-    if (errType == FILE_TYPE_PIPE || errType == FILE_TYPE_DISK) {
-        int fd_err = _open_osfhandle(reinterpret_cast<intptr_t>(hErr), _O_TEXT);
-        if (fd_err >= 0) {
-            int target_err_fd = (_fileno(stderr) >= 0) ? _fileno(stderr) : 2;
-            _dup2(fd_err, target_err_fd);
-            setvbuf(stderr, nullptr, _IONBF, 0);
+    // If CLI arguments were passed and we're not redirected to a pipe/file, attach to parent console
+    if (argc > 1) {
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD outType = (hOut && hOut != INVALID_HANDLE_VALUE) ? GetFileType(hOut) : FILE_TYPE_UNKNOWN;
+        if (outType != FILE_TYPE_PIPE && outType != FILE_TYPE_DISK) {
+            if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+                FILE* fp = nullptr;
+                freopen_s(&fp, "CONOUT$", "w", stdout);
+                freopen_s(&fp, "CONOUT$", "w", stderr);
+            }
         }
     }
 
     std::ios::sync_with_stdio(true);
+
     std::vector<std::string> utf8_args;
     std::vector<char*> argv_ptrs;
     for (int i = 0; i < argc; ++i) {
         int len = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, nullptr, 0, nullptr, nullptr);
-        std::string s(std::max(0, len - 1), '\0');
+        std::string s(std::max(0, len > 0 ? len - 1 : 0), '\0');
         if (len > 1) {
             WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, s.data(), len, nullptr, nullptr);
         }

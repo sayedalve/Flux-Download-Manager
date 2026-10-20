@@ -76,3 +76,4 @@ test-results/
 *~
 redesign/
 *antigravity*.txt
+benchmarks/*local*

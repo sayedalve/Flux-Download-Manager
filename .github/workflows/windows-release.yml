@@ -488,8 +488,7 @@ jobs:
           & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" "/DTargetArch=ARM64" $issPath
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for ARM64 Full installer!" }
 
-          Write-Host "`
-Compiling Native ARM64 Core-Only Installer..."
+          Write-Host "`nCompiling Native ARM64 Core-Only Installer..."
           & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" "/DTargetArch=ARM64" "/DCoreOnly" $issPath
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for ARM64 Core installer!" }
 
@@ -497,8 +496,7 @@ Compiling Native ARM64 Core-Only Installer..."
         shell: powershell
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "$env:RADIUM_VERSION" -Architecture ARM64 -PackageType Both -BuildDir "build/Release"
-          Write-Host "`
-=== Final SHA-256 Release Checksums (ARM64) ==="
+          Write-Host "`n=== Final SHA-256 Release Checksums (ARM64) ==="
           Get-Content "dist/SHA256SUMS.txt"
 
       - name: Security & Distribution Integrity Audit (ARM64)

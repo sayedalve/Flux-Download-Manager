@@ -395,6 +395,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -436,7 +441,32 @@ jobs:
       - name: Configure CMake for Native ARM64
         shell: powershell
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release
+          $generators = @(
+              'Visual Studio 18 2026',
+              'Visual Studio 17 2022',
+              'Ninja',
+              ''
+          )
+          $configured = $false
+          foreach ($gen in $generators) {
+              Write-Host "Trying CMake generator: '$gen' for ARM64..."
+              if (Test-Path "build") { Remove-Item -Recurse -Force "build" }
+              if ($gen -eq '') {
+                  cmake -B build -A ARM64 -DCMAKE_BUILD_TYPE=Release
+              } elseif ($gen -eq 'Ninja') {
+                  cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+              } else {
+                  cmake -B build -G "$gen" -A ARM64 -DCMAKE_BUILD_TYPE=Release
+              }
+              if ($LASTEXITCODE -eq 0) {
+                  $configured = $true
+                  Write-Host "Successfully configured CMake with generator: '$gen'"
+                  break
+              }
+          }
+          if (-not $configured) {
+              throw "CMake configuration failed for all candidate generators on ARM64."
+          }
 
       - name: Build Native ARM64 Targets
         run: |

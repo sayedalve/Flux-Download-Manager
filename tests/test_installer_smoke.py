@@ -249,8 +249,12 @@ def main():
         print("\n[Step 4/8] Launching Installed Executable (--version & --list)...")
         flux_exe = install_dir / "flux.exe"
         ver_proc = subprocess.run([str(flux_exe), "--version"], capture_output=True, text=True, check=True)
-        assert "Flux Download Manager" in ver_proc.stdout or "Flux" in ver_proc.stdout, f"Unexpected version output: {ver_proc.stdout}"
-        print(f"  -> PASS: Application responds cleanly: {ver_proc.stdout.strip()}")
+        ver_output = (ver_proc.stdout + "\n" + ver_proc.stderr).strip()
+        assert "Flux Download Manager" in ver_output or "Flux" in ver_output, (
+            f"Unexpected version output. stdout='{ver_proc.stdout}', stderr='{ver_proc.stderr}'"
+        )
+        first_line = ver_output.splitlines()[0] if ver_output else ""
+        print(f"  -> PASS: Application responds cleanly: {first_line}")
 
         # Step 5: Start Local Test Server & Real HTTP Download
         print("\n[Step 5/8] Performing Real HTTP Download via Installed Application...")
@@ -318,7 +322,10 @@ def main():
             [str(flux_exe), "--db", str(smoke_db), "--list"],
             capture_output=True, text=True, check=True
         )
-        assert "smoke_4mb.bin" in list_res.stdout or "COMPLETED" in list_res.stdout, "State missing on process restart!"
+        list_output = list_res.stdout + "\n" + list_res.stderr
+        assert "smoke_4mb.bin" in list_output or "COMPLETED" in list_output, (
+            f"State missing on process restart! stdout='{list_res.stdout}', stderr='{list_res.stderr}'"
+        )
         print("  -> PASS: Database persistence and restart verified cleanly")
 
         # Step 8: Safe Uninstallation & User Data Preservation Check

@@ -318,8 +318,8 @@ jobs:
         with:
           name: installation-smoke-logs
           path: |
-            $env:TEMP\flux_install_*.log
-            $env:TEMP\flux_smoke_*\
+            ${{ runner.temp }}/flux_install_*.log
+            ${{ runner.temp }}/flux_smoke_*/**
           if-no-files-found: ignore
 
   # =========================================================================

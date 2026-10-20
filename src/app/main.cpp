@@ -65,7 +65,13 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--version" || arg == "-v") {
-            std::cout << "Flux Download Manager v0.3.0 (Flux) [Brisk Engine + Cat Catch Media Detection + N_m3u8DL-RE Pipeline]\n";
+            const char* ver_str = "Flux Download Manager v0.3.0 (Flux) [Brisk Engine + Cat Catch Media Detection + N_m3u8DL-RE Pipeline]\n";
+            std::cout << ver_str;
+            std::cerr << ver_str;
+            std::cout.flush();
+            std::cerr.flush();
+            std::fflush(stdout);
+            std::fflush(stderr);
             return 0;
         } else if (arg == "--db" && i + 1 < argc) {
             cfg.state_db_path = argv[++i];
@@ -297,7 +303,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (outType == FILE_TYPE_PIPE || outType == FILE_TYPE_DISK) {
         int fd_out = _open_osfhandle(reinterpret_cast<intptr_t>(hOut), _O_TEXT);
         if (fd_out >= 0) {
-            _dup2(fd_out, _fileno(stdout));
+            int target_fd = (_fileno(stdout) >= 0) ? _fileno(stdout) : 1;
+            _dup2(fd_out, target_fd);
             setvbuf(stdout, nullptr, _IONBF, 0);
         }
     } else if (argc > 1 && AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -311,7 +318,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (errType == FILE_TYPE_PIPE || errType == FILE_TYPE_DISK) {
         int fd_err = _open_osfhandle(reinterpret_cast<intptr_t>(hErr), _O_TEXT);
         if (fd_err >= 0) {
-            _dup2(fd_err, _fileno(stderr));
+            int target_err_fd = (_fileno(stderr) >= 0) ? _fileno(stderr) : 2;
+            _dup2(fd_err, target_err_fd);
             setvbuf(stderr, nullptr, _IONBF, 0);
         }
     }
@@ -331,6 +339,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     for (auto& s : utf8_args) {
         argv_ptrs.push_back(s.data());
     }
-    return main(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
+    int ret = main(static_cast<int>(argv_ptrs.size()), argv_ptrs.data());
+    std::cout.flush();
+    std::cerr.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    return ret;
 }
 #endif

@@ -3513,6 +3513,21 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int sel_idx = 0;
             std::string initial_vfilter = existing_task.has_value() ? existing_task->stream_options.video_filter : "best";
             std::string low_init = ToLowerStr(initial_vfilter);
+            int target_itag = 0;
+            if (existing_task.has_value() && !existing_task->stream_options.cached_manifest_body.empty() &&
+                (existing_task->stream_options.cached_manifest_body.front() == '{' || existing_task->stream_options.cached_manifest_body.front() == '[')) {
+                try {
+                    auto mroot = openidm::json::Parse(existing_task->stream_options.cached_manifest_body);
+                    if (mroot.is_object()) {
+                        if (mroot["selectedItag"].as_int64(0) > 0) target_itag = static_cast<int>(mroot["selectedItag"].as_int64(0));
+                        else if (mroot["itag"].as_int64(0) > 0) target_itag = static_cast<int>(mroot["itag"].as_int64(0));
+                        if ((low_init.empty() || low_init == "best" || low_init == "auto") && mroot["resolution"].is_string()) {
+                            low_init = ToLowerStr(mroot["resolution"].as_string());
+                        }
+                    }
+                } catch (...) {}
+            }
+
             bool matched_explicit = false;
             for (size_t i = 0; i < ctx->quality_choices.size(); ++i) {
                 const auto& qc = ctx->quality_choices[i];
@@ -3522,15 +3537,20 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     disp += qc.size_estimated ? (L" (~" + Utf8ToW(sz_str) + L" est.)") : (L" (" + Utf8ToW(sz_str) + L")");
                 }
                 SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(disp.c_str()));
-                if (!matched_explicit && !low_init.empty() && low_init != "best" && low_init != "auto") {
-                    std::string low_id = ToLowerStr(qc.id);
-                    std::string low_res = ToLowerStr(qc.resolution);
-                    std::string low_vf = ToLowerStr(qc.video_filter);
-                    if (low_id == low_init || low_res == low_init || low_vf == low_init ||
-                        (!low_id.empty() && low_init.find(low_id) != std::string::npos) ||
-                        (!low_init.empty() && low_id.find(low_init) != std::string::npos)) {
+                if (!matched_explicit) {
+                    if (target_itag > 0 && qc.itag == target_itag) {
                         sel_idx = static_cast<int>(i);
                         matched_explicit = true;
+                    } else if (!low_init.empty() && low_init != "best" && low_init != "auto") {
+                        std::string low_id = ToLowerStr(qc.id);
+                        std::string low_res = ToLowerStr(qc.resolution);
+                        std::string low_vf = ToLowerStr(qc.video_filter);
+                        if (low_id == low_init || low_res == low_init || low_vf == low_init ||
+                            (!low_id.empty() && low_init.find(low_id) != std::string::npos) ||
+                            (!low_init.empty() && low_id.find(low_init) != std::string::npos)) {
+                            sel_idx = static_cast<int>(i);
+                            matched_explicit = true;
+                        }
                     }
                 }
             }
@@ -3964,23 +3984,21 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                 if (!qc.is_audio_only && !qc.ext.empty()) ext = qc.ext;
                                 t.file_name = stem + " [" + qc.resolution + "]." + ext;
                             }
-                            if (!qc.video_url.empty() || !qc.paired_audio_url.empty()) {
-                                if (!t.stream_options.cached_manifest_body.empty() &&
-                                    (t.stream_options.cached_manifest_body.front() == '{' || t.stream_options.cached_manifest_body.front() == '[')) {
-                                    try {
-                                        auto jroot = openidm::json::Parse(t.stream_options.cached_manifest_body);
-                                        if (jroot.is_object()) {
-                                            if (!qc.video_url.empty()) jroot["videoUrl"] = qc.video_url;
-                                            if (!qc.paired_audio_url.empty()) jroot["audioUrl"] = qc.paired_audio_url;
-                                            jroot["requiresCipherExtraction"] = qc.video_url.empty();
-                                            jroot["requiresAudioMux"] = !qc.paired_audio_url.empty();
-                                            jroot["resolution"] = qc.resolution;
-                                            jroot["videoFilter"] = qc.video_filter;
-                                            if (qc.itag > 0) jroot["selectedItag"] = qc.itag;
-                                            t.stream_options.cached_manifest_body = jroot.dump();
-                                        }
-                                    } catch (...) {}
-                                }
+                            if (!t.stream_options.cached_manifest_body.empty() &&
+                                (t.stream_options.cached_manifest_body.front() == '{' || t.stream_options.cached_manifest_body.front() == '[')) {
+                                try {
+                                    auto jroot = openidm::json::Parse(t.stream_options.cached_manifest_body);
+                                    if (jroot.is_object()) {
+                                        if (!qc.video_url.empty()) jroot["videoUrl"] = qc.video_url;
+                                        if (!qc.paired_audio_url.empty()) jroot["audioUrl"] = qc.paired_audio_url;
+                                        jroot["requiresCipherExtraction"] = qc.video_url.empty();
+                                        jroot["requiresAudioMux"] = !qc.paired_audio_url.empty();
+                                        if (!qc.resolution.empty()) jroot["resolution"] = qc.resolution;
+                                        if (!qc.video_filter.empty()) jroot["videoFilter"] = qc.video_filter;
+                                        if (qc.itag > 0) jroot["selectedItag"] = qc.itag;
+                                        t.stream_options.cached_manifest_body = jroot.dump();
+                                    }
+                                } catch (...) {}
                             }
                         }
 

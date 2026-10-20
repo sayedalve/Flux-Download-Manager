@@ -275,7 +275,9 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
 
     const lastCand = (typeof window !== "undefined" && window.__fluxLastCandidate) ? window.__fluxLastCandidate : null;
     const topQ = (lastCand && Array.isArray(lastCand.qualities) && lastCand.qualities.length > 0)
-      ? (lastCand.qualities.find(q => !q.isAudioOnly) || lastCand.qualities[0])
+      ? (lastCand.qualities.find(q => !q.isAudioOnly && String(q.resolution || "").toLowerCase().includes("1080")) ||
+         lastCand.qualities.find(q => !q.isAudioOnly) ||
+         lastCand.qualities[0])
       : null;
     const qSuffix = (topQ && topQ.resolution) ? ` [${topQ.resolution}]` : "";
 
@@ -735,7 +737,9 @@ function initContentScript() {
           if (typeof document !== "undefined" && document.querySelectorAll) {
             const hosts = document.querySelectorAll("[data-flux-shadow-host]");
             const topQ = (Array.isArray(ev.data.qualities) && ev.data.qualities.length > 0)
-              ? (ev.data.qualities.find(q => !q.isAudioOnly) || ev.data.qualities[0])
+              ? (ev.data.qualities.find(q => !q.isAudioOnly && String(q.resolution || "").toLowerCase().includes("1080")) ||
+                 ev.data.qualities.find(q => !q.isAudioOnly) ||
+                 ev.data.qualities[0])
               : null;
             if (topQ) {
               ev.data.qualityId = topQ.id || topQ.resolution || "1080p";
@@ -925,7 +929,9 @@ function initContentScript() {
     const lastCand = (typeof window !== "undefined" && window.__fluxLastCandidate) ? window.__fluxLastCandidate : null;
     let topQ = null;
     if (lastCand && Array.isArray(lastCand.qualities)) {
-      topQ = lastCand.qualities.find(q => !q.isAudioOnly) || lastCand.qualities[0];
+      topQ = lastCand.qualities.find(q => !q.isAudioOnly && String(q.resolution || "").toLowerCase().includes("1080")) ||
+             lastCand.qualities.find(q => !q.isAudioOnly) ||
+             lastCand.qualities[0];
     }
     const candidateId = mediaMeta.candidateId || (lastCand && lastCand.candidateId) || "";
     const qualityId = mediaMeta.qualityId || (topQ && (topQ.id || topQ.resolution)) || (lastCand && lastCand.qualityId) || "";

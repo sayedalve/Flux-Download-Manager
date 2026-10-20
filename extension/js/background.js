@@ -1453,17 +1453,26 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   // Resolve selected video quality (from Popup quality dropdown, Video Overlay dropdown, or options.qualityId)
   const qualitiesList = Array.isArray(candidate.qualities) ? candidate.qualities : [];
   let chosenQuality = options.selectedQuality || null;
-  if (!chosenQuality && qualitiesList.length > 0) {
-    const reqQ = String(options.qualityId || options.resolution || "").toLowerCase();
+  const reqQ = String(options.qualityId || options.resolution || "").toLowerCase();
+  if (qualitiesList.length > 0) {
     if (reqQ && reqQ !== "best" && reqQ !== "auto") {
-      chosenQuality = qualitiesList.find(q =>
+      const explicitMatch = qualitiesList.find(q =>
         String(q.id || "").toLowerCase() === reqQ ||
         String(q.resolution || "").toLowerCase() === reqQ ||
-        String(q.videoFilter || "").toLowerCase() === reqQ
-      ) || null;
+        String(q.videoFilter || "").toLowerCase() === reqQ ||
+        (reqQ.includes("1080") && String(q.resolution || "").toLowerCase().includes("1080")) ||
+        (reqQ.includes("720") && String(q.resolution || "").toLowerCase().includes("720")) ||
+        (reqQ.includes("480") && String(q.resolution || "").toLowerCase().includes("480")) ||
+        (reqQ.includes("360") && String(q.resolution || "").toLowerCase().includes("360"))
+      );
+      if (explicitMatch) {
+        chosenQuality = explicitMatch;
+      }
     }
     if (!chosenQuality) {
-      chosenQuality = qualitiesList[0];
+      chosenQuality = qualitiesList.find(q => !q.isAudioOnly && String(q.resolution || "").toLowerCase().includes("1080")) ||
+                      qualitiesList.find(q => !q.isAudioOnly) ||
+                      qualitiesList[0];
     }
   }
 

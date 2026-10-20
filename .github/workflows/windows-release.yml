@@ -15,7 +15,7 @@ jobs:
   # =========================================================================
   # JOB 1: Build Targets, Run In-Tree Regression Tests & Assemble Packages
   # =========================================================================
-  build-and-package:
+  build-and-package-x64:
     name: Build & In-Tree Verification (Windows x64)
     runs-on: windows-2022
     outputs:
@@ -378,12 +378,197 @@ jobs:
             test-results/browser-extension/
           if-no-files-found: ignore
 
+
+  # =========================================================================
+  # JOB 2: Build Native ARM64 Targets & Assemble Release Packages
+  # Compiles genuine native ARM64 binaries (0xAA64) on Windows 11 ARM
+  # =========================================================================
+  build-and-package-arm64:
+    name: Build & In-Tree Verification (Native Windows ARM64)
+    runs-on: windows-11-arm
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+
+      - name: Resolve and Validate Release Version
+        id: version
+        shell: powershell
+        run: |
+          $rawRef = "${{ github.ref_name }}"
+          $refType = "${{ github.ref_type }}"
+          Write-Host "Triggered by ${refType} - '$rawRef'"
+
+          if ($refType -eq "tag" -or $rawRef -match '^v?\d+\.\d+\.\d+') {
+            if ($rawRef -match '^v?(\d+\.\d+\.\d+.*)$') {
+              $ver = $Matches[1]
+            } else {
+              throw "Invalid version tag format: '$rawRef'."
+            }
+          } else {
+            $cmakePath = "CMakeLists.txt"
+            $ver = "0.3.2"
+            if (Test-Path $cmakePath) {
+              $cmakeContent = Get-Content $cmakePath -Raw
+              if ($cmakeContent -match 'project\s*\(\s*(?:Radium|Flux)\s+VERSION\s+(\d+\.\d+\.\d+)') {
+                $ver = $Matches[1]
+              }
+            }
+          }
+          Write-Host "Canonical ARM64 release version: $ver"
+          "RADIUM_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Configure CMake for Native ARM64
+        shell: powershell
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Native ARM64 Targets
+        run: |
+          cmake --build build --config Release --target radium radium-nmh radium_unit_tests openidm openidm-nmh openidm_unit_tests N_m3u8DL-RE
+
+      - name: Provision Upstream Stream Workers
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
+
+      - name: Verify PE32+ ARM64 (0xAA64) Executable Headers
+        shell: powershell
+        run: |
+          $bins = @(
+            @{ Path = "build/Release/radium.exe"; ExpectedSubsystem = 2 },
+            @{ Path = "build/Release/radium-nmh.exe"; ExpectedSubsystem = 3 },
+            @{ Path = "build/Release/radium_unit_tests.exe"; ExpectedSubsystem = 3 },
+            @{ Path = "build/Release/N_m3u8DL-RE.exe"; ExpectedSubsystem = 3 }
+          )
+          foreach ($b in $bins) {
+            if (-not (Test-Path $b.Path)) { throw "Expected ARM64 binary missing: $($b.Path)" }
+            $bytes = [System.IO.File]::ReadAllBytes($b.Path)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne 0xAA64) {
+              throw "Verification FAILED: $($b.Path) is not native ARM64 (0xAA64); machine=0x$($machine.ToString('X4'))"
+            }
+            $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 92)
+            if ($subsystem -ne $b.ExpectedSubsystem) {
+              throw "Verification FAILED: $($b.Path) subsystem mismatch (expected $($b.ExpectedSubsystem), got $subsystem)"
+            }
+            Write-Host "Verified Genuine Native ARM64 PE32+ Binary: $($b.Path) [Subsystem=$subsystem]" -ForegroundColor Green
+          }
+
+      - name: Run C++ Unit & Regression Tests (Native ARM64 Execution)
+        shell: powershell
+        run: |
+          .\build\Release\radium_unit_tests.exe
+
+      - name: Compile Inno Setup Installers (ARM64 Full & Core)
+        shell: powershell
+        run: |
+          $issPath = "installer/radium.iss"
+          $isccExe = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $isccExe)) {
+            choco install innosetup -y
+          }
+          Write-Host "Compiling Native ARM64 Full Installer..."
+          & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" "/DTargetArch=ARM64" $issPath
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for ARM64 Full installer!" }
+
+          Write-Host "`
+Compiling Native ARM64 Core-Only Installer..."
+          & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" "/DTargetArch=ARM64" "/DCoreOnly" $issPath
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for ARM64 Core installer!" }
+
+      - name: Package Standalone Portable Releases (ARM64 Full & Core)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "$env:RADIUM_VERSION" -Architecture ARM64 -PackageType Both -BuildDir "build/Release"
+          Write-Host "`
+=== Final SHA-256 Release Checksums (ARM64) ==="
+          Get-Content "dist/SHA256SUMS.txt"
+
+      - name: Security & Distribution Integrity Audit (ARM64)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/verify-release-security.ps1 -DistDir "dist" -ToolsDir "tools/win-x64" -Architecture ARM64
+
+      - name: Upload Release Distribution Packages (ARM64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: radium-dist-windows-arm64
+          path: dist/
+
+  # =========================================================================
+  # JOB 3: Clean Installation Smoke Tests on Native Windows 11 ARM Runner
+  # =========================================================================
+  clean-install-smoke-test-arm64:
+    name: Clean Installation Smoke Test (Windows 11 ARM64)
+    needs: [build-and-package-arm64]
+    runs-on: windows-11-arm
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download Staged Release Packages (ARM64)
+        uses: actions/download-artifact@v4
+        with:
+          name: radium-dist-windows-arm64
+          path: dist
+
+      - name: Verify Downloaded ARM64 Installer Assets
+        shell: powershell
+        run: |
+          Write-Host "=== Staged Release Packages for ARM64 Clean Install Test ==="
+          Get-ChildItem -Recurse -Path dist
+          $installer = Get-ChildItem -Recurse -Path dist -Filter "Radium-Setup-ARM64-*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "Downloaded release artifacts do not contain a valid Radium ARM64 setup installer!"
+          }
+          Write-Host "Found ARM64 installer: $($installer.FullName)"
+
+      - name: Execute Clean Installation Smoke Suite (ARM64)
+        shell: powershell
+        run: |
+          python tests/test_installer_smoke.py --dist-dir dist --arch ARM64
+
+      - name: Upload Installation Test Logs (ARM64)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installation-smoke-logs-arm64
+          path: |
+            ${{ runner.temp }}/radium_install_*.log
+            ${{ runner.temp }}/radium_smoke_*/**
+          if-no-files-found: ignore
+
   # =========================================================================
   # JOB 4: Publish Official GitHub Release (Guarded by Validation)
   # =========================================================================
   publish-release:
-    name: Publish Official GitHub Release
-    needs: [build-and-package, clean-install-smoke-test, browser-extension-runtime-test]
+    name: Publish Official GitHub Release (x64 & ARM64)
+    needs: [build-and-package-x64, clean-install-smoke-test-x64, browser-extension-runtime-test, build-and-package-arm64, clean-install-smoke-test-arm64]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-2022
     permissions:
@@ -395,22 +580,47 @@ jobs:
         with:
           submodules: false
 
-      - name: Download Staged Release Packages
+      - name: Download Staged x64 Release Packages
         uses: actions/download-artifact@v4
         with:
           name: radium-dist-windows-x64
           path: dist
 
+      - name: Download Staged ARM64 Release Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: radium-dist-windows-arm64
+          path: dist
+
+      - name: Generate Consolidated SHA256SUMS.txt for All Release Assets
+        shell: powershell
+        run: |
+          $ver = "${{ needs.build-and-package-x64.outputs.version }}"
+          Write-Host "Generating Authoritative Multi-Architecture SHA256SUMS for Radium v$ver..."
+          $distFiles = Get-ChildItem -Path dist -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" }
+          $entries = @()
+          foreach ($f in $distFiles) {
+            $h = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
+            $entries += "$h  dist\$($f.Name)"
+            Write-Host "  $h  dist\$($f.Name)"
+          }
+          $entries | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding utf8
+          Write-Host "`n=== Consolidated SHA256SUMS.txt ==="
+          Get-Content "dist/SHA256SUMS.txt"
+
       - name: Verify Release Assets Before Publishing
         shell: powershell
         run: |
-          $ver = "${{ needs.build-and-package.outputs.version }}"
-          Write-Host "Publishing Verified GitHub Release for Radium v$ver..."
+          $ver = "${{ needs.build-and-package-x64.outputs.version }}"
+          Write-Host "Publishing Verified GitHub Release for Radium v$ver (x64 + ARM64)..."
           Get-ChildItem -Recurse -Path dist
           $expectedPatterns = @(
             "Radium-Setup-x64-*.exe",
+            "Radium-Setup-ARM64-*.exe",
             "Radium-v*-Windows-x64-Full.zip",
             "Radium-v*-Windows-x64-Core.zip",
+            "Radium-v*-Windows-ARM64-Full.zip",
+            "Radium-v*-Windows-ARM64-Core.zip",
             "SHA256SUMS.txt"
           )
           foreach ($p in $expectedPatterns) {
@@ -432,9 +642,15 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/**/Radium-Setup-x64-*.exe
+            dist/**/Radium-Setup-x64-Core-*.exe
+            dist/**/Radium-Setup-ARM64-*.exe
+            dist/**/Radium-Setup-ARM64-Core-*.exe
             dist/**/Radium-v*-Windows-x64-Full.zip
             dist/**/Radium-v*-Windows-x64-Core.zip
             dist/**/Radium-v*-Windows-x64.zip
+            dist/**/Radium-v*-Windows-ARM64-Full.zip
+            dist/**/Radium-v*-Windows-ARM64-Core.zip
+            dist/**/Radium-v*-Windows-ARM64.zip
             dist/**/SHA256SUMS.txt
             LICENSE
             THIRD_PARTY_NOTICES.md

@@ -9,6 +9,8 @@ param(
     [string]$Version = "",
     [ValidateSet("Full", "Core", "Both")]
     [string]$PackageType = "Both",
+    [ValidateSet("x64", "ARM64")]
+    [string]$Architecture = "x64",
     [string]$BuildDir = "",
     [string]$OutputDir = "",
     [switch]$SkipHash = $false,
@@ -50,10 +52,11 @@ if (-not $OutputDir) {
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   Radium Download Manager -- Windows x64 Release Packager         " -ForegroundColor Cyan
+Write-Host "   Radium Download Manager -- Windows $Architecture Release Packager" -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  Version      : $Version" -ForegroundColor White
 Write-Host "  Package Type : $PackageType" -ForegroundColor White
+Write-Host "  Architecture : $Architecture" -ForegroundColor White
 Write-Host "  Output Dir   : $OutputDir" -ForegroundColor White
 
 # 2. Locate Core Executables
@@ -118,10 +121,35 @@ foreach ($c in $nmhCandidates) {
     }
 }
 
-# Pre-flight binary existence validation
+# Pre-flight binary architecture and existence validation
+$expectedMachine = if ($Architecture -eq "ARM64") { 0xAA64 } else { 0x8664 }
+$expectedArchName = if ($Architecture -eq "ARM64") { "ARM64 (0xAA64)" } else { "x64 AMD64 (0x8664)" }
+
+function Test-BinaryArchitecture([string]$FilePath, [uint16]$TargetMachine) {
+    if (-not (Test-Path $FilePath)) { return $false }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+        if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) { return $false }
+        $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+        $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+        return ($machine -eq $TargetMachine)
+    } catch {
+        return $false
+    }
+}
+
 $missing = @()
-if (-not $FluxExe) { $missing += "radium.exe / flux.exe (searched: $($fluxCandidates -join ', '))" }
-if (-not $FluxNmhExe) { $missing += "radium-nmh.exe / flux-nmh.exe (searched: $($nmhCandidates -join ', '))" }
+if (-not $FluxExe) { 
+    $missing += "radium.exe / flux.exe (searched: $($fluxCandidates -join ', '))" 
+} elseif (-not (Test-BinaryArchitecture $FluxExe $expectedMachine)) {
+    throw "Packaging error: Binary $FluxExe does not match target architecture $expectedArchName"
+}
+
+if (-not $FluxNmhExe) { 
+    $missing += "radium-nmh.exe / flux-nmh.exe (searched: $($nmhCandidates -join ', '))" 
+} elseif (-not (Test-BinaryArchitecture $FluxNmhExe $expectedMachine)) {
+    throw "Packaging error: Binary $FluxNmhExe does not match target architecture $expectedArchName"
+}
 
 if ($missing.Count -gt 0) {
     Write-Error "Pre-flight validation failed! The following required core binaries were not found:`n - $($missing -join "`n - ")`nPlease build Radium before running packaging:`n  cmake --build build --config Release`nor`n  .\scripts\build-windows-msvc.ps1"
@@ -355,8 +383,8 @@ Official Upstream Projects:
             name = "Radium Download Manager"
             version = $Version
             edition = $Type
-            platform = "Windows 11 / Windows 10 x64"
-            architecture = "x64"
+            platform = if ($Architecture -eq "ARM64") { "Windows 11 ARM64" } else { "Windows 11 / Windows 10 x64" }
+            architecture = $Architecture
             buildDate = [DateTime]::UtcNow.ToString("o")
             gitCommit = $gitCommit
             repository = "https://github.com/sayedalve/Radium-Download-Manager"
@@ -395,18 +423,19 @@ Official Upstream Projects:
 # 5. Execute Requested Packaging Runs
 $createdZips = @()
 
+$zipPrefix = "Radium-v$Version-Windows-$Architecture"
 if ($PackageType -in @("Full", "Both") -and $Nm3u8dlExe -and $FfmpegExe) {
-    $fullZip = Build-PackageArchive -Type "Full" -ZipFileName "Radium-v$Version-Windows-x64-Full.zip"
+    $fullZip = Build-PackageArchive -Type "Full" -ZipFileName "$zipPrefix-Full.zip"
     $createdZips += $fullZip
 
-    # Also stage legacy alias Radium-v$Version-Windows-x64.zip for backward compatibility
-    $compatZip = Join-Path $OutputDir "Radium-v$Version-Windows-x64.zip"
+    # Also stage legacy alias Radium-v$Version-Windows-<arch>.zip for backward compatibility
+    $compatZip = Join-Path $OutputDir "$zipPrefix.zip"
     Copy-Item -Force $fullZip $compatZip
     $createdZips += $compatZip
 }
 
 if ($PackageType -in @("Core", "Both")) {
-    $coreZip = Build-PackageArchive -Type "Core" -ZipFileName "Radium-v$Version-Windows-x64-Core.zip"
+    $coreZip = Build-PackageArchive -Type "Core" -ZipFileName "$zipPrefix-Core.zip"
     $createdZips += $coreZip
 }
 
@@ -425,8 +454,12 @@ if (-not $SkipHash -and $createdZips.Count -gt 0) {
         $filesToHash += $z
     }
     $setupCandidates = @(
+        (Join-Path $OutputDir "Radium-Setup-$Architecture-$Version.exe"),
+        (Join-Path $OutputDir "Radium-Setup-$Architecture-Core-$Version.exe"),
         (Join-Path $OutputDir "Radium-Setup-x64-$Version.exe"),
-        (Join-Path $OutputDir "Radium-Setup-x64-Core-$Version.exe")
+        (Join-Path $OutputDir "Radium-Setup-x64-Core-$Version.exe"),
+        (Join-Path $OutputDir "Radium-Setup-ARM64-$Version.exe"),
+        (Join-Path $OutputDir "Radium-Setup-ARM64-Core-$Version.exe")
     )
     foreach ($sc in $setupCandidates) {
         if (Test-Path $sc) {

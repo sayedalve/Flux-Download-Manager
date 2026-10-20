@@ -7,6 +7,8 @@
 param(
     [string]$DistDir = "",
     [string]$ToolsDir = "",
+    [ValidateSet("x64", "ARM64")]
+    [string]$Architecture = "x64",
     [switch]$EnforceSigning = $false
 )
 
@@ -90,17 +92,25 @@ foreach ($w in $workers) {
         throw "Security Audit FAILED: Worker $($w.Name) exceeds maximum budget ceiling of $($w.MaxBytes) bytes (actual: $($item.Length))!"
     }
 
-    # Verify PE32+ header and AMD64 architecture (0x8664)
+    # Verify PE32+ header and target architecture (0x8664 for x64, 0xAA64 for ARM64)
     $bytes = [System.IO.File]::ReadAllBytes($wPath)
     if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
         throw "Security Audit FAILED: Invalid MZ executable header for $($w.Name)"
     }
     $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
     $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-    if ($machine -ne 0x8664) {
-        throw "Security Audit FAILED: $($w.Name) is not x64 (0x8664); machine type = 0x$($machine.ToString('X4'))"
+    $expectedMachine = if ($Architecture -eq "ARM64") { 0xAA64 } else { 0x8664 }
+    $expectedName = if ($Architecture -eq "ARM64") { "ARM64 (0xAA64)" } else { "AMD64 (0x8664)" }
+    # Note on ARM64: Upstream x64 stream workers (such as ffmpeg/yt-dlp) run seamlessly via Windows 11 Prism emulation
+    # if a native ARM64 build is not provisioned. In-tree N_m3u8DL-RE builds natively for ARM64.
+    if ($Architecture -eq "ARM64" -and ($machine -eq 0x8664 -or $machine -eq 0xAA64)) {
+        $actualArch = if ($machine -eq 0xAA64) { "Native ARM64" } else { "x64 (Prism Emulated)" }
+        Write-Host "  [OK] Verified $($w.Name) architecture: $actualArch" -ForegroundColor Green
+    } elseif ($machine -ne $expectedMachine) {
+        throw "Security Audit FAILED: $($w.Name) is not $expectedName; machine type = 0x$($machine.ToString('X4'))"
+    } else {
+        Write-Host "  [OK] Verified $($w.Name) $expectedName PE32+ architecture" -ForegroundColor Green
     }
-    Write-Host "  [OK] Verified $($w.Name) AMD64 PE32+ architecture" -ForegroundColor Green
 }
 Write-Host "  -> PASS: All bundled stream workers conform to size and architecture security constraints." -ForegroundColor Green
 
@@ -163,11 +173,11 @@ if (Test-Path $issPath) {
     if ($issContent -notmatch 'PrivilegesRequired\s*=\s*lowest') {
         throw "Security Audit FAILED: Inno Setup installer must enforce 'PrivilegesRequired=lowest'!"
     }
-    if ($issContent -notmatch 'ArchitecturesAllowed\s*=\s*x64compatible') {
-        throw "Security Audit FAILED: Inno Setup installer must enforce 'ArchitecturesAllowed=x64compatible'!"
+    if ($issContent -notmatch 'ArchitecturesAllowed\s*=\s*(?:x64compatible|arm64)') {
+        throw "Security Audit FAILED: Inno Setup installer must enforce 'ArchitecturesAllowed=x64compatible' or 'ArchitecturesAllowed=arm64'!"
     }
     Write-Host "  [OK] Inno Setup script enforces lowest privilege (non-elevated) per-user installation." -ForegroundColor Green
-    Write-Host "  [OK] Inno Setup script restricts installation strictly to x64-compatible architectures." -ForegroundColor Green
+    Write-Host "  [OK] Inno Setup script restricts installation strictly to supported 64-bit architectures (x64 / ARM64)." -ForegroundColor Green
 }
 Write-Host "  -> PASS: Path traversal and privilege elevation guards verified." -ForegroundColor Green
 

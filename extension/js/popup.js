@@ -120,7 +120,11 @@ function renderDetectedMediaList(candidates, options = {}) {
     const safeName = escapeHtml(rawName);
     const sourceHost = escapeHtml(extractSourceHost(item.tabUrl || item.url));
     const activeQuality = (Array.isArray(item.qualities) && item.qualities.length > 0)
-      ? (item.qualities.find(q => String(q.id || q.resolution).toLowerCase() === String(item.resolution || "").toLowerCase()) || item.qualities[0])
+      ? (item.qualities.find(q =>
+          String(q.id || "").toLowerCase() === String(item.resolution || "").toLowerCase() ||
+          String(q.resolution || "").toLowerCase() === String(item.resolution || "").toLowerCase() ||
+          String(q.videoFilter || "").toLowerCase() === String(item.resolution || "").toLowerCase()
+        ) || item.qualities[0])
       : null;
     const effSize = activeQuality ? (activeQuality.size || item.size || 0) : (item.size || 0);
     const effEstimated = activeQuality ? Boolean(activeQuality.sizeEstimated) : false;
@@ -150,7 +154,11 @@ function renderDetectedMediaList(candidates, options = {}) {
         const szText = q.size > 0 ? (` · ${q.sizeEstimated ? "~" : ""}${formatMediaSize(q.size)}`) : "";
         const qlbl = escapeHtml((q.label || q.resolution || qid) + szText);
         let isSelected = false;
-        if (!hasSel && selKey && (String(q.id || "").toLowerCase() === selKey || String(q.resolution || "").toLowerCase() === selKey)) {
+        if (!hasSel && selKey && (
+          String(q.id || "").toLowerCase() === selKey ||
+          String(q.resolution || "").toLowerCase() === selKey ||
+          String(q.videoFilter || "").toLowerCase() === selKey
+        )) {
           isSelected = true;
           hasSel = true;
         }
@@ -288,7 +296,12 @@ function initPopupUI() {
         const candId = selTarget.getAttribute("data-id");
         const cand = currentCandidates.find(c => c.candidateId === candId);
         if (cand && Array.isArray(cand.qualities)) {
-          const chosen = cand.qualities.find(q => (q.id || q.resolution) === selTarget.value);
+          const val = String(selTarget.value || "").toLowerCase();
+          const chosen = cand.qualities.find(q =>
+            String(q.id || "").toLowerCase() === val ||
+            String(q.resolution || "").toLowerCase() === val ||
+            String(q.videoFilter || "").toLowerCase() === val
+          );
           if (chosen) {
             cand.resolution = chosen.resolution || chosen.id;
             cand.selectedQualityId = chosen.id;
@@ -316,10 +329,14 @@ function initPopupUI() {
         const itemContainer = targetBtn.closest ? targetBtn.closest(".media-item") : null;
         const qualitySelect = itemContainer ? itemContainer.querySelector(".quality-select") : null;
         const itemCand = currentCandidates.find(c => c.candidateId === candidateId);
-        const selectedQualityId = qualitySelect ? qualitySelect.value : (itemCand ? (itemCand.selectedQualityId || itemCand.resolution) : "");
+        const selectedQualityId = String(qualitySelect ? qualitySelect.value : (itemCand ? (itemCand.selectedQualityId || itemCand.resolution) : "")).toLowerCase();
         let chosenQ = null;
         if (itemCand && Array.isArray(itemCand.qualities)) {
-          chosenQ = itemCand.qualities.find(q => (q.id || q.resolution) === selectedQualityId) || itemCand.qualities[0];
+          chosenQ = itemCand.qualities.find(q =>
+            String(q.id || "").toLowerCase() === selectedQualityId ||
+            String(q.resolution || "").toLowerCase() === selectedQualityId ||
+            String(q.videoFilter || "").toLowerCase() === selectedQualityId
+          ) || itemCand.qualities[0];
           if (chosenQ) {
             itemCand.resolution = chosenQ.resolution || chosenQ.id;
             itemCand.selectedQualityId = chosenQ.id;
@@ -591,10 +608,14 @@ function initPopupUI() {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
           const itemEl = mediaListEl ? mediaListEl.querySelector(`.media-item[data-id="${item.candidateId}"]`) : null;
           const qSelect = itemEl ? itemEl.querySelector(".quality-select") : null;
-          const qId = qSelect ? qSelect.value : (item.selectedQualityId || item.resolution || "");
+          const qId = String(qSelect ? qSelect.value : (item.selectedQualityId || item.resolution || "")).toLowerCase();
           let chosenQ = null;
           if (Array.isArray(item.qualities)) {
-            chosenQ = item.qualities.find(q => (q.id || q.resolution) === qId) || item.qualities[0];
+            chosenQ = item.qualities.find(q =>
+              String(q.id || "").toLowerCase() === qId ||
+              String(q.resolution || "").toLowerCase() === qId ||
+              String(q.videoFilter || "").toLowerCase() === qId
+            ) || item.qualities[0];
           }
           chrome.runtime.sendMessage({
             action: "downloadMedia",

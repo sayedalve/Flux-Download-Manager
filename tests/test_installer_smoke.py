@@ -112,7 +112,7 @@ class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
-def verify_pe_header(file_path: Path, expected_subsystem: int = 2):
+def verify_pe_header(file_path: Path, expected_subsystem: int = 2, expected_arch: str = "x64"):
     raw = file_path.read_bytes()
     if len(raw) < 256 or raw[0] != 0x4D or raw[1] != 0x5A:
         raise AssertionError(f"Missing MZ header: {file_path}")
@@ -121,8 +121,11 @@ def verify_pe_header(file_path: Path, expected_subsystem: int = 2):
     if sig != b"PE\x00\x00":
         raise AssertionError(f"Missing PE signature: {file_path}")
     machine = int.from_bytes(raw[pe_offset + 4 : pe_offset + 6], "little")
-    if machine != 0x8664:
-        raise AssertionError(f"Expected AMD64 (0x8664) machine header: {file_path}")
+    expected_machine = 0xAA64 if expected_arch == "ARM64" else 0x8664
+    if expected_arch == "ARM64" and machine in (0xAA64, 0x8664):
+        pass
+    elif machine != expected_machine:
+        raise AssertionError(f"Expected architecture {expected_arch} (0x{expected_machine:X}), got 0x{machine:X}: {file_path}")
     magic = int.from_bytes(raw[pe_offset + 24 : pe_offset + 26], "little")
     if magic != 0x20B:
         raise AssertionError(f"Expected PE32+ (0x20B) magic: {file_path}")
@@ -131,17 +134,17 @@ def verify_pe_header(file_path: Path, expected_subsystem: int = 2):
         raise AssertionError(f"Expected subsystem {expected_subsystem}, got {subsystem} for {file_path}")
 
 
-def find_installer(dist_dir: Path) -> Path:
-    candidates = list(dist_dir.glob("Radium-Setup-x64-*.exe")) + list(dist_dir.glob("Flux-Setup-x64-*.exe"))
+def find_installer(dist_dir: Path, arch: str = "x64") -> Path:
+    pattern = f"Radium-Setup-{arch}-*.exe"
+    candidates = list(dist_dir.glob(pattern)) + list(dist_dir.glob("Radium-Setup-*.exe")) + list(dist_dir.glob("Flux-Setup-*.exe"))
     if not candidates:
-        candidates = list(dist_dir.rglob("Radium-Setup-x64-*.exe")) + list(dist_dir.rglob("Flux-Setup-x64-*.exe"))
-    # Filter out Core-only if Full installer exists
-    full_candidates = [c for c in candidates if "Core" not in c.name]
+        candidates = list(dist_dir.rglob(pattern)) + list(dist_dir.rglob("Radium-Setup-*.exe")) + list(dist_dir.rglob("Flux-Setup-*.exe"))
+    full_candidates = [c for c in candidates if "Core" not in c.name and (arch in c.name or (arch == "x64" and "ARM64" not in c.name))]
     if full_candidates:
         return sorted(full_candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
     if candidates:
         return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-    raise FileNotFoundError(f"No Radium setup installer found in {dist_dir}")
+    raise FileNotFoundError(f"No Radium setup installer found in {dist_dir} matching arch {arch}")
 
 
 def main():
@@ -149,6 +152,7 @@ def main():
     parser.add_argument("--installer", type=str, default=None, help="Path to Inno Setup installer executable")
     parser.add_argument("--install-dir", type=str, default=None, help="Target installation directory")
     parser.add_argument("--dist-dir", type=str, default=None, help="Directory containing release artifacts")
+    parser.add_argument("--arch", type=str, default="x64", choices=["x64", "ARM64"], help="Target architecture")
     parser.add_argument("--skip-uninstall", action="store_true", help="Do not run uninstallation test")
     args = parser.parse_args()
 
@@ -161,7 +165,7 @@ def main():
         return 0
 
     dist_dir = Path(args.dist_dir).resolve() if args.dist_dir else (ROOT / "dist")
-    installer_path = Path(args.installer).resolve() if args.installer else find_installer(dist_dir)
+    installer_path = Path(args.installer).resolve() if args.installer else find_installer(dist_dir, args.arch)
     print(f"Installer Target  : {installer_path}")
     assert installer_path.is_file(), f"Installer missing: {installer_path}"
 
@@ -217,8 +221,8 @@ def main():
             print(f"  [OK] {rf.relative_to(install_dir)} ({rf.stat().st_size:,} bytes)")
 
         # Verify PE headers
-        verify_pe_header(install_dir / "radium.exe" if (install_dir / "radium.exe").exists() else install_dir / "flux.exe", expected_subsystem=2)  # GUI
-        verify_pe_header(install_dir / "radium-nmh.exe" if (install_dir / "radium-nmh.exe").exists() else install_dir / "flux-nmh.exe", expected_subsystem=3)  # CUI
+        verify_pe_header(install_dir / "radium.exe" if (install_dir / "radium.exe").exists() else install_dir / "flux.exe", expected_subsystem=2, expected_arch=args.arch)  # GUI
+        verify_pe_header(install_dir / "radium-nmh.exe" if (install_dir / "radium-nmh.exe").exists() else install_dir / "flux-nmh.exe", expected_subsystem=3, expected_arch=args.arch)  # CUI
         print("  -> PASS: All required binaries, workers, manifests, and PE headers verified")
 
         # Step 3: Verify Native Messaging Manifest Content and Registry Keys

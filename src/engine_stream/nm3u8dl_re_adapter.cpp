@@ -1951,10 +1951,10 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                         if (qid == req_filter || qres == req_filter || qvf == req_filter ||
                             (target_height > 0 && qh == target_height) ||
                             (wants_audio_only && q["isAudioOnly"].as_bool(false))) {
-                            if (selected_itag <= 0) selected_itag = itag;
+                            selected_itag = itag;
                             selected_width = qw;
                             selected_height = qh;
-                            if (selected_resolution.empty()) selected_resolution = q["resolution"].as_string();
+                            selected_resolution = q["resolution"].as_string();
                             std::string qv = StripGooglevideoRangeParams(q["videoUrl"].as_string());
                             std::string qa = StripGooglevideoRangeParams(q["pairedAudioUrl"].as_string());
                             if (!qv.empty()) {
@@ -1975,15 +1975,15 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 // YouTube labels the quality as "1080p", but vertical pixels are 960 or 800.
                 if (!wants_audio_only) {
                     std::string res_low = ToLowerStr(selected_resolution);
-                    if (res_low.find("2160") != std::string::npos || selected_width >= 3840) {
+                    if (res_low.find("2160") != std::string::npos || (res_low.empty() && selected_width >= 3840)) {
                         target_height = 2160;
-                    } else if (res_low.find("1440") != std::string::npos || selected_width >= 2560) {
+                    } else if (res_low.find("1440") != std::string::npos || (res_low.empty() && selected_width >= 2560)) {
                         target_height = 1440;
-                    } else if (res_low.find("1080") != std::string::npos || selected_width >= 1800) {
+                    } else if (res_low.find("1080") != std::string::npos || (res_low.empty() && selected_width >= 1800)) {
                         target_height = 1080;
-                    } else if (res_low.find("720") != std::string::npos || (selected_width >= 1200 && target_height < 720)) {
+                    } else if (res_low.find("720") != std::string::npos || (res_low.empty() && selected_width >= 1200)) {
                         target_height = 720;
-                    } else if (res_low.find("480") != std::string::npos || (selected_width >= 800 && target_height < 480)) {
+                    } else if (res_low.find("480") != std::string::npos || (res_low.empty() && selected_width >= 800)) {
                         target_height = 480;
                     }
                 }

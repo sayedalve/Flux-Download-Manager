@@ -21,23 +21,41 @@
 #define MyAppNmhName "radium-nmh.exe"
 
 ; Resolve executable source directory dynamically across build configurations
+#ifndef TargetArch
+  #define TargetArch "x64"
+#endif
+
 #ifndef SourceDir
-  #if FileExists("..\build\win-x64\Release\radium.exe")
-    #define SourceDir "..\build\win-x64\Release"
-  #elif FileExists("..\dist\radium.exe")
-    #define SourceDir "..\dist"
-  #elif FileExists("..\dist\Radium.exe")
-    #define SourceDir "..\dist"
-  #elif FileExists("..\build\Release\radium.exe")
-    #define SourceDir "..\build\Release"
-  #elif FileExists("..\build\win-x64\radium.exe")
-    #define SourceDir "..\build\win-x64"
-  #elif FileExists("..\build\win-x64\Release\flux.exe")
-    #define SourceDir "..\build\win-x64\Release"
-  #elif FileExists("..\dist\Flux.exe")
-    #define SourceDir "..\dist"
+  #if TargetArch == "ARM64"
+    #if FileExists("..\build\win-arm64\Release\radium.exe")
+      #define SourceDir "..\build\win-arm64\Release"
+    #elif FileExists("..\dist\arm64\radium.exe")
+      #define SourceDir "..\dist\arm64"
+    #elif FileExists("..\build\Release\radium.exe")
+      #define SourceDir "..\build\Release"
+    #elif FileExists("..\build\win-arm64\radium.exe")
+      #define SourceDir "..\build\win-arm64"
+    #else
+      #define SourceDir "..\build\Release"
+    #endif
   #else
-    #define SourceDir "..\build\win-x64\Release"
+    #if FileExists("..\build\win-x64\Release\radium.exe")
+      #define SourceDir "..\build\win-x64\Release"
+    #elif FileExists("..\dist\radium.exe")
+      #define SourceDir "..\dist"
+    #elif FileExists("..\dist\Radium.exe")
+      #define SourceDir "..\dist"
+    #elif FileExists("..\build\Release\radium.exe")
+      #define SourceDir "..\build\Release"
+    #elif FileExists("..\build\win-x64\radium.exe")
+      #define SourceDir "..\build\win-x64"
+    #elif FileExists("..\build\win-x64\Release\flux.exe")
+      #define SourceDir "..\build\win-x64\Release"
+    #elif FileExists("..\dist\Flux.exe")
+      #define SourceDir "..\dist"
+    #else
+      #define SourceDir "..\build\win-x64\Release"
+    #endif
   #endif
 #endif
 
@@ -68,12 +86,22 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+#if TargetArch == "ARM64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#ifdef CoreOnly
+  #define BaseFilename "Radium-Setup-ARM64-Core-" + MyAppVersion
+#else
+  #define BaseFilename "Radium-Setup-ARM64-" + MyAppVersion
+#endif
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #ifdef CoreOnly
   #define BaseFilename "Radium-Setup-x64-Core-" + MyAppVersion
 #else
   #define BaseFilename "Radium-Setup-x64-" + MyAppVersion
+#endif
 #endif
 OutputDir=..\dist
 OutputBaseFilename={#BaseFilename}

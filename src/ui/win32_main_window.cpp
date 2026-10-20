@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ui/win32_main_window.hpp"
 
 #include "brisk_engine/http_client.hpp"
@@ -3331,6 +3331,8 @@ struct QualityChoice {
     std::string paired_audio_url;
     bool is_audio_only{false};
     std::string ext{"mp4"};
+    int width{0};
+    int itag{0};
 };
 
 struct NewDownloadDialogContext {
@@ -3475,6 +3477,8 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                             qc.label = q["label"].as_string();
                             qc.resolution = q["resolution"].as_string();
                             qc.height = static_cast<int>(q["height"].as_int64(0));
+                            qc.width = static_cast<int>(q["width"].as_int64(0));
+                            qc.itag = static_cast<int>(q["itag"].as_int64(0));
                             qc.size = q["size"].as_int64(-1);
                             qc.size_estimated = q["sizeEstimated"].as_bool(false);
                             qc.video_filter = q["videoFilter"].as_string(qc.id);
@@ -3968,10 +3972,11 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                         if (jroot.is_object()) {
                                             if (!qc.video_url.empty()) jroot["videoUrl"] = qc.video_url;
                                             if (!qc.paired_audio_url.empty()) jroot["audioUrl"] = qc.paired_audio_url;
-                                            jroot["requiresCipherExtraction"] = false;
+                                            jroot["requiresCipherExtraction"] = qc.video_url.empty();
                                             jroot["requiresAudioMux"] = !qc.paired_audio_url.empty();
                                             jroot["resolution"] = qc.resolution;
                                             jroot["videoFilter"] = qc.video_filter;
+                                            if (qc.itag > 0) jroot["selectedItag"] = qc.itag;
                                             t.stream_options.cached_manifest_body = jroot.dump();
                                         }
                                     } catch (...) {}

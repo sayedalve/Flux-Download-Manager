@@ -1921,20 +1921,40 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
     }
 
     // 1. Parse structured manifest body if provided as JSON
+    int selected_itag = 0;
+    int selected_width = 0;
+    int selected_height = 0;
+    std::string selected_resolution;
+
     if (!task.stream_options.cached_manifest_body.empty() &&
         (task.stream_options.cached_manifest_body.front() == '{' || task.stream_options.cached_manifest_body.front() == '[')) {
         try {
             auto root = json::Parse(task.stream_options.cached_manifest_body);
             if (root.is_object()) {
+                if (root["selectedItag"].as_int64(0) > 0) {
+                    selected_itag = static_cast<int>(root["selectedItag"].as_int64(0));
+                } else if (root["itag"].as_int64(0) > 0) {
+                    selected_itag = static_cast<int>(root["itag"].as_int64(0));
+                }
+                if (root["resolution"].is_string() && !root["resolution"].as_string().empty() && root["resolution"].as_string() != "Auto") {
+                    selected_resolution = root["resolution"].as_string();
+                }
+
                 if (root["qualities"].is_array() && !req_filter.empty() && req_filter != "best") {
                     for (const auto& q : root["qualities"].as_array()) {
                         std::string qid = ToLowerStr(q["id"].as_string());
                         std::string qres = ToLowerStr(q["resolution"].as_string());
                         std::string qvf = ToLowerStr(q["videoFilter"].as_string());
                         int qh = static_cast<int>(q["height"].as_int64(0));
+                        int qw = static_cast<int>(q["width"].as_int64(0));
+                        int itag = static_cast<int>(q["itag"].as_int64(0));
                         if (qid == req_filter || qres == req_filter || qvf == req_filter ||
                             (target_height > 0 && qh == target_height) ||
                             (wants_audio_only && q["isAudioOnly"].as_bool(false))) {
+                            if (selected_itag <= 0) selected_itag = itag;
+                            selected_width = qw;
+                            selected_height = qh;
+                            if (selected_resolution.empty()) selected_resolution = q["resolution"].as_string();
                             std::string qv = StripGooglevideoRangeParams(q["videoUrl"].as_string());
                             std::string qa = StripGooglevideoRangeParams(q["pairedAudioUrl"].as_string());
                             if (!qv.empty()) {
@@ -1949,6 +1969,25 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                         }
                     }
                 }
+
+                // Normalize target_height based on nominal selected resolution or dimensions:
+                // For widescreen / scope videos (e.g. 1920x960 2:1 or 1920x800 2.39:1),
+                // YouTube labels the quality as "1080p", but vertical pixels are 960 or 800.
+                if (!wants_audio_only) {
+                    std::string res_low = ToLowerStr(selected_resolution);
+                    if (res_low.find("2160") != std::string::npos || selected_width >= 3840) {
+                        target_height = 2160;
+                    } else if (res_low.find("1440") != std::string::npos || selected_width >= 2560) {
+                        target_height = 1440;
+                    } else if (res_low.find("1080") != std::string::npos || selected_width >= 1800) {
+                        target_height = 1080;
+                    } else if (res_low.find("720") != std::string::npos || (selected_width >= 1200 && target_height < 720)) {
+                        target_height = 720;
+                    } else if (res_low.find("480") != std::string::npos || (selected_width >= 800 && target_height < 480)) {
+                        target_height = 480;
+                    }
+                }
+
                 // Never fall back to lower-resolution progressive root["videoUrl"] when a specific quality was requested!
                 if (video_url.empty() && target_height == 0 && !requires_cipher) {
                     video_url = StripGooglevideoRangeParams(root["videoUrl"].as_string());
@@ -2567,6 +2606,16 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
 
         std::string out_tmpl = (task_tmp_dir / ("output.%(ext)s")).string();
         std::string ytdlp_fmt = BuildYtDlpFormatSelector(req_filter, target_height, wants_audio_only, fmt);
+        if (selected_itag > 0) {
+            if (wants_audio_only) {
+                ytdlp_fmt = std::to_string(selected_itag) + "/" + ytdlp_fmt;
+            } else {
+                ytdlp_fmt = std::to_string(selected_itag) + "+140/" +
+                            std::to_string(selected_itag) + "+ba/" +
+                            std::to_string(selected_itag) + "+251/" +
+                            ytdlp_fmt;
+            }
+        }
         std::filesystem::path ffmpeg_path = m_cfg.ffmpeg_binary_path;
         if (ffmpeg_path.empty() || !std::filesystem::exists(ffmpeg_path, ec)) {
             ffmpeg_path = PathSanitizer::FindWorkerBinary("ffmpeg", PathSanitizer::GetExecutableDir());
@@ -2574,18 +2623,31 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
 
         auto cache_dir = PathSanitizer::GetDefaultAppDataDir() / "cache" / "yt-dlp";
         std::filesystem::create_directories(cache_dir, ec);
+        auto target_solver_dir = cache_dir / "challenge-solver";
+        if (!std::filesystem::exists(target_solver_dir / "lib.json", ec)) {
+            std::filesystem::path bundled_solver = PathSanitizer::GetExecutableDir() / "tools" / "win-x64" / "challenge-solver";
+            if (!std::filesystem::exists(bundled_solver, ec)) {
+                bundled_solver = PathSanitizer::GetExecutableDir() / "tools" / "challenge-solver";
+            }
+            if (std::filesystem::exists(bundled_solver, ec)) {
+                std::filesystem::create_directories(target_solver_dir, ec);
+                std::filesystem::copy(bundled_solver, target_solver_dir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+            }
+        }
 
         std::vector<std::string> yt_args = {
             "--newline",
             "--no-playlist",
             "--no-warnings",
             "--cache-dir", cache_dir.string(),
+            "--remote-components", "ejs:github",
             "-N", "8",
             "--concurrent-fragments", "8",
             "--retries", "3",
             "--fragment-retries", "3",
             "--file-access-retries", "3",
             "--socket-timeout", "15",
+            "--extractor-args", "youtube:player_client=web_embedded",
             "-f", ytdlp_fmt,
             "--merge-output-format", fmt,
             "-o", out_tmpl
@@ -2979,7 +3041,7 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
         // Fallback retry 2: If requested format failed or was throttled, retry with clean arguments
         // BUT NEVER downgrade to 360p (format 18) when a specific resolution was requested!
         if ((yt_exit != 0 || !has_output) && !cancel_requested.load() && !pause_requested.load()) {
-            std::string retry_fmt = BuildYtDlpFormatSelector(req_filter, target_height, wants_audio_only, fmt);
+            std::string retry_fmt = ytdlp_fmt;
 
             OPENIDM_LOG_WARN("Nm3u8dlAdapter", "yt-dlp initial attempt failed (exit=" + std::to_string(yt_exit) +
                              "), retrying YouTube download for format: " + retry_fmt);
@@ -2988,12 +3050,14 @@ Result<std::filesystem::path> Nm3u8dlReAdapter::ExecuteYouTubeExtraction(
                 "--no-playlist",
                 "--no-warnings",
                 "--cache-dir", cache_dir.string(),
+                "--remote-components", "ejs:github",
                 "-N", "4",
                 "--concurrent-fragments", "4",
                 "--retries", "3",
                 "--fragment-retries", "3",
                 "--file-access-retries", "3",
                 "--socket-timeout", "20",
+                "--extractor-args", "youtube:player_client=web_embedded,mweb",
                 "-f", retry_fmt,
                 "--merge-output-format", fmt,
                 "-o", out_tmpl

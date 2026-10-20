@@ -231,24 +231,24 @@ jobs:
           }
 
           Write-Host "Compiling Full Offline Installer..."
-          & $isccExe "/DMyAppVersion=$env:FLUX_VERSION" $issPath
+          & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" $issPath
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for Full installer!" }
 
           Write-Host "`nCompiling Core-Only Installer..."
-          & $isccExe "/DMyAppVersion=$env:FLUX_VERSION" "/DCoreOnly" $issPath
+          & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" "/DCoreOnly" $issPath
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for Core installer!" }
 
       - name: Package Standalone Portable Releases (Full & Core)
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "$env:FLUX_VERSION" -PackageType Both -BuildDir "build/Release"
+          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "$env:RADIUM_VERSION" -PackageType Both -BuildDir "build/Release"
           Write-Host "`n=== Final SHA-256 Release Checksums ==="
           Get-Content "dist/SHA256SUMS.txt"
 
       - name: Packaging Size Budget Audit & Verification
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/report-package-sizes.ps1 -Version "$env:FLUX_VERSION" -DistDir "dist" -UpdateMetrics -FailOnExceeded
+          powershell -ExecutionPolicy Bypass -File scripts/report-package-sizes.ps1 -Version "$env:RADIUM_VERSION" -DistDir "dist" -UpdateMetrics -FailOnExceeded
 
       - name: Security & Distribution Integrity Audit
         shell: powershell

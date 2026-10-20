@@ -338,18 +338,26 @@ function updateTabBadge(tabId) {
 async function collectCookiesForDownload(targetUrl, referrerUrl = "") {
   const cookieMap = new Map();
   const urlsToQuery = [];
-  if (targetUrl && !targetUrl.startsWith("blob:") && !targetUrl.startsWith("data:")) {
-    urlsToQuery.push(targetUrl);
-  }
-  if (referrerUrl && !referrerUrl.startsWith("blob:") && !referrerUrl.startsWith("data:")) {
-    try {
-      const refOrigin = new URL(referrerUrl).origin;
-      const targetOrigin = targetUrl ? new URL(targetUrl).origin : "";
-      if (refOrigin !== targetOrigin) {
-        urlsToQuery.push(referrerUrl);
-      }
-    } catch (_) {}
-  }
+  const domainsToQuery = new Set();
+
+  const addTarget = (u) => {
+    if (u && !u.startsWith("blob:") && !u.startsWith("data:")) {
+      urlsToQuery.push(u);
+      try {
+        const h = new URL(u).hostname;
+        if (h) {
+          domainsToQuery.add(h);
+          const parts = h.split(".");
+          if (parts.length >= 2) {
+            domainsToQuery.add("." + parts.slice(-2).join("."));
+          }
+        }
+      } catch (_) {}
+    }
+  };
+
+  addTarget(targetUrl);
+  if (referrerUrl) addTarget(referrerUrl);
 
   if (typeof chrome !== "undefined" && chrome.cookies && typeof chrome.cookies.getAll === "function") {
     for (const u of urlsToQuery) {
@@ -358,9 +366,39 @@ async function collectCookiesForDownload(targetUrl, referrerUrl = "") {
           let settled = false;
           const timer = setTimeout(() => {
             if (!settled) { settled = true; resolve([]); }
-          }, 350);
+          }, 1500);
           try {
             chrome.cookies.getAll({ url: u }, (cList) => {
+              if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                if (chrome.runtime) void chrome.runtime.lastError;
+                resolve(cList || []);
+              }
+            });
+          } catch (_) {
+            if (!settled) { settled = true; clearTimeout(timer); resolve([]); }
+          }
+        });
+        if (Array.isArray(list)) {
+          for (const c of list) {
+            if (c && c.name && !cookieMap.has(c.name)) {
+              cookieMap.set(c.name, c.value);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    for (const dom of domainsToQuery) {
+      try {
+        const list = await new Promise((resolve) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (!settled) { settled = true; resolve([]); }
+          }, 1000);
+          try {
+            chrome.cookies.getAll({ domain: dom }, (cList) => {
               if (!settled) {
                 settled = true;
                 clearTimeout(timer);
@@ -1475,7 +1513,9 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
       audioUrl: effectiveAudioUrl,
       videoFilter: effectiveVideoFilter,
       requiresCipherExtraction: effectiveRequiresCipher,
-      qualities: qualitiesList
+      qualities: qualitiesList,
+      selectedQuality: chosenQuality,
+      selectedItag: (chosenQuality && chosenQuality.itag) ? chosenQuality.itag : 0
     });
     extractorJson = JSON.stringify(updatedDesc);
   }
@@ -1559,6 +1599,8 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     videoId: candidate.videoId || "",
     resolution: effectiveResolution,
     qualityId: (chosenQuality && chosenQuality.id) ? chosenQuality.id : (options.qualityId || ""),
+    itag: (chosenQuality && chosenQuality.itag) ? chosenQuality.itag : 0,
+    selectedItag: (chosenQuality && chosenQuality.itag) ? chosenQuality.itag : 0,
     requiresCipherExtraction: effectiveRequiresCipher,
     extractorJson,
     pageTitle: baseTitle,

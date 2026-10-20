@@ -1137,7 +1137,7 @@ class BenchmarkHarness:
         lines.append(f"**Processor:** `{specs['processor']}` ({specs['logical_cpus']} logical cores)  ")
         lines.append(f"**System RAM:** `{specs['total_ram_gb']} GB`  ")
         lines.append(f"**Runner Label:** `{specs['runner_label']}` (GitHub Actions: `{specs['is_github_actions']}`)  ")
-        lines.append(f"**Commit SHA:** [`{specs['git_commit'][:7]}`](https://github.com/sayedalve/Flux-Download-Manager/commit/{specs['git_commit']})  ")
+        lines.append(f"**Commit SHA:** [`{specs['git_commit'][:7]}`](https://github.com/sayedalve/Radium-Download-Manager/commit/{specs['git_commit']})  ")
         lines.append("\n---\n")
 
         lines.append("## 1. Executive Summary & Tool Testability Status\n")

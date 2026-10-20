@@ -1017,6 +1017,9 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
                     jdesc["audioUrl"] = au;
                     jdesc["watchUrl"] = params["tabUrl"].as_string();
                     jdesc["videoId"] = params["videoId"].as_string();
+                    if (params.contains("resolution")) jdesc["resolution"] = params["resolution"].as_string();
+                    if (params.contains("itag")) jdesc["selectedItag"] = params["itag"].as_int64(0);
+                    else if (params.contains("selectedItag")) jdesc["selectedItag"] = params["selectedItag"].as_int64(0);
                     cached_body = json::Value(std::move(jdesc)).dump();
                 } else if (manifest_url.empty() || manifest_url == params["tabUrl"].as_string()) {
                     manifest_url = vu.empty() ? au : vu;

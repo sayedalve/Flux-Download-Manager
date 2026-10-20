@@ -165,7 +165,7 @@ try {
             Write-Warning "[LARGE FALLBACK] Explicitly using monolithic upstream FFmpeg (161+ MiB). Package size will exceed 20 MB budget."
         } else {
             # Pinned minimal FFmpeg 7.1 Windows x64 build from verified release
-            $FfmpegUrl = "https://github.com/sayedalve/Flux-Download-Manager/releases/download/stream-tools-v1/ffmpeg-minimal-7.1-win-x64.zip"
+            $FfmpegUrl = "https://github.com/sayedalve/Radium-Download-Manager/releases/download/stream-tools-v1/ffmpeg-minimal-7.1-win-x64.zip"
             if (-not $FfmpegExpectedSha256) {
                 $FfmpegExpectedSha256 = "CBCC7523D458E84309893719C96FFD3EF7ADCE490616CF5FD26B680FB80DF5CF"
             }

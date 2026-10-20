@@ -141,3 +141,13 @@ As verified in the [N_m3u8DL-RE v0.6.0 documentation](https://github.com/nilaoda
    - When the user resumes the stream download with the same `--tmp-dir` and `--save-name`, `N_m3u8DL-RE` automatically detects already-downloaded `.ts`/`.m4s` segment files in `--tmp-dir` and skips re-downloading completed segments!
 3. **Cancellation & Cleanup:**
    - If the user cancels the task, `Nm3u8dlReAdapter` closes the Job Object handle (immediately killing `N_m3u8DL-RE.exe` and any child `ffmpeg.exe`), overwrites and deletes `job.rsp`, and recursively deletes `%LOCALAPPDATA%\\OpenIDM\\tmp\\<task_uuid>\\`.
+
+---
+
+## 6. YouTube Adaptive Stream Extraction Pipeline (`FR-023`)
+
+For YouTube streams and watch URLs requiring JS signature decryption, adaptive format pairing, or worker extraction:
+1. **Player Client Configuration:** `Nm3u8dlReAdapter` invokes `yt-dlp.exe` with `--extractor-args "youtube:player_client=web_embedded,web"` to bypass GVS bot detection blocks on unauthenticated endpoints.
+2. **JavaScript Challenge Solver Execution:** Node.js (`--js-runtimes "node:<path>"`) is automatically located in standard tools directories or system installation (`C:\Program Files\nodejs\node.exe`) to execute YouTube decipher challenges.
+3. **Exact Format Preservation:** The pipeline selects exact itag combinations (e.g. `137+140` for 1080p MP4) or resolution-constrained format selectors. It strictly forbids silent fallback to low resolutions (such as format 18 / 360p).
+4. **Post-Download Media Quality Verification:** `VerifyMediaQuality` probes probed dimensions with `ffprobe.exe` (or `ffmpeg.exe`), asserting that widescreen scope formats (e.g. 1920x960 2:1) satisfy 1080p requirements (`width >= 1800`), and rejecting degraded files with `ERR_STREAM_QUALITY_MISMATCH`.

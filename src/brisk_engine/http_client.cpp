@@ -722,7 +722,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         }
 
         HINTERNET hSession = WinHttpOpen(
-            L"Flux/0.3.1 (Windows NT 10.0; Win64; x64)",
+            L"Radium/0.3.2 (Windows NT 10.0; Win64; x64)",
             access_type,
             proxy_name,
             proxy_bypass,
@@ -1052,7 +1052,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             req << k << ": " << v << "\r\n";
         }
         if (!has_ua) {
-            req << "User-Agent: Flux/0.3.1 (Windows NT 10.0; Win64; x64)\r\n";
+            req << "User-Agent: Radium/0.3.2 (Windows NT 10.0; Win64; x64)\r\n";
         }
         if (range_start.has_value()) {
             req << "Range: bytes=" << *range_start << "-";

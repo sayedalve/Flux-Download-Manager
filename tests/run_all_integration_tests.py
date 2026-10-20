@@ -863,7 +863,7 @@ def main():
         assert leftover_temp_count == 0, f"Found {leftover_temp_count} uncleaned temporary part files"
 
         metrics = {
-            "version": "0.3.0",
+            "version": "0.3.1",
             "product_name": "Flux Download Manager",
             "short_name": "Flux",
             "host_platform": f"{platform.system()} {platform.release()} ({platform.machine()})",

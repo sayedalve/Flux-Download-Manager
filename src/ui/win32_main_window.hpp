@@ -15,6 +15,7 @@
 #include "core/download_controller.hpp"
 #include "ipc/ipc_server.hpp"
 #include "ui/design_system.hpp"
+#include "common/version.hpp"
 
 namespace openidm::ui {
 
@@ -275,7 +276,7 @@ struct BrowserIntegrationStatusView {
 
 struct AboutDialogView {
     std::string app_name{"Flux Download Manager"};
-    std::string version{"0.3.0"};
+    std::string version{FLUX_VERSION_STRING};
     std::string license{"GPL-3.0-or-later"};
     std::string target_platform{"Windows 11 x64 (Native Win32 + Direct2D/GDI)"};
     std::vector<std::string> upstream_attributions;

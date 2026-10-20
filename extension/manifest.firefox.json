@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Flux Download Manager (Flux Browser Integration)",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Automatic download capture and multi-layered video/stream detection (HLS/DASH/MP4/WebM/YouTube) for Flux Download Manager.",
   "browser_specific_settings": {
     "gecko": {

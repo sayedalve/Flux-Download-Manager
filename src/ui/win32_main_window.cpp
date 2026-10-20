@@ -2757,7 +2757,7 @@ std::string DesktopView::RenderQueueTableText() const {
     auto rows = BuildVisibleTaskRows(0, 500);
     std::ostringstream oss;
     oss << "========================================================================================================================\n";
-    oss << " Flux Download Manager v0.3.0 — Cosmic Dark Edition  |  Category: " << CategoryToLabel(m_selected_category)
+    oss << " Flux Download Manager v" << FLUX_VERSION_STRING << " — Cosmic Dark Edition  |  Category: " << CategoryToLabel(m_selected_category)
         << "  |  Theme: " << m_theme_name << "\n";
     oss << "========================================================================================================================\n";
     oss << std::left

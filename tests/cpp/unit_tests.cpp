@@ -12,6 +12,7 @@
 #include "common/json_mini.hpp"
 #include "common/logger.hpp"
 #include "common/path_sanitizer.hpp"
+#include "common/version.hpp"
 #include "core/download_controller.hpp"
 #include "engine_stream/nm3u8dl_re_adapter.hpp"
 #include "archive/zip_preview.hpp"
@@ -775,7 +776,7 @@ bool TestFluxBrandingAndLegacyDataMigration() {
 
     openidm::ui::AboutDialogView about;
     ASSERT_TRUE(about.app_name == "Flux Download Manager", "About dialog app name is Flux Download Manager");
-    ASSERT_TRUE(about.version == "0.3.0", "About dialog version is 0.3.0");
+    ASSERT_TRUE(about.version == FLUX_VERSION_STRING, "About dialog version matches FLUX_VERSION_STRING");
 
     // Test migration logic: create mock legacy OpenIDM directory and verify clean copy
     std::error_code ec;

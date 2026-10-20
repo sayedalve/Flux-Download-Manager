@@ -22,12 +22,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "Flux Open Source Team"
             VALUE "FileDescription",  "Flux Download Manager — Native Windows 11 Desktop Application"
-            VALUE "FileVersion",      "0.3.0.0"
+            VALUE "FileVersion",      "0.3.1.0"
             VALUE "InternalName",     "flux.exe"
             VALUE "LegalCopyright",   "Copyright (C) 2026 Flux Team. Licensed under GPL-3.0-or-later."
             VALUE "OriginalFilename", "flux.exe"
             VALUE "ProductName",      "Flux Download Manager"
-            VALUE "ProductVersion",   "0.3.0.0"
+            VALUE "ProductVersion",   "0.3.1.0"
         END
     END
     BLOCK "VarFileInfo"

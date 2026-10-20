@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "ipc/ipc_server.hpp"
 #include "common/path_sanitizer.hpp"
+#include "common/version.hpp"
 #include "common/ipc_path.hpp"
 
 #include "common/json_mini.hpp"
@@ -505,7 +506,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         auto s = m_controller.GetSettings();
         json::Value res = json::Object{};
-        res["appVersion"] = "0.3.0";
+        res["appVersion"] = FLUX_VERSION_STRING;
         res["protocolVersion"] = "1.0";
         res["captureEnabled"] = m_capture_enabled.load();
         res["workersAvailable"] = m_controller.AreWorkersAvailable();

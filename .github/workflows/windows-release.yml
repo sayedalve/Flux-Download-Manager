@@ -64,7 +64,7 @@ jobs:
             }
           } else {
             $cmakePath = "CMakeLists.txt"
-            $ver = "0.3.0"
+            $ver = "0.3.1"
             if (Test-Path $cmakePath) {
               $cmakeContent = Get-Content $cmakePath -Raw
               if ($cmakeContent -match 'project\s*\(\s*Flux\s+VERSION\s+(\d+\.\d+\.\d+)') {

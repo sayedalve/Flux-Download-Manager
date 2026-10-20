@@ -250,7 +250,7 @@ def main():
         flux_exe = install_dir / "flux.exe"
         ver_proc = subprocess.run([str(flux_exe), "--version"], capture_output=True, text=True, check=True)
         ver_output = (ver_proc.stdout + "\n" + ver_proc.stderr).strip()
-        assert "Flux Download Manager" in ver_output or "Flux" in ver_output, (
+        assert ("Flux Download Manager" in ver_output or "Flux" in ver_output) and ("0.3.1" in ver_output or "0.3" in ver_output), (
             f"Unexpected version output. stdout='{ver_proc.stdout}', stderr='{ver_proc.stderr}'"
         )
         first_line = ver_output.splitlines()[0] if ver_output else ""

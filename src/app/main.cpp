@@ -14,6 +14,7 @@
 #include "common/json_mini.hpp"
 #include "common/logger.hpp"
 #include "common/path_sanitizer.hpp"
+#include "common/version.hpp"
 #include "core/download_controller.hpp"
 #include "ipc/ipc_server.hpp"
 #include "ui/win32_main_window.hpp"
@@ -38,6 +39,31 @@
 namespace {
 std::atomic<bool> g_terminate_daemon{false};
 void SignalHandler(int) { g_terminate_daemon.store(true); }
+
+void WriteConsoleOutput(const std::string& str, bool is_error = false) {
+#ifdef _WIN32
+    HANDLE hStd = GetStdHandle(is_error ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
+    if (hStd && hStd != INVALID_HANDLE_VALUE) {
+        DWORD outType = GetFileType(hStd);
+        if (outType == FILE_TYPE_PIPE || outType == FILE_TYPE_DISK || outType == FILE_TYPE_CHAR) {
+            DWORD written = 0;
+            if (WriteFile(hStd, str.data(), static_cast<DWORD>(str.size()), &written, nullptr) && written > 0) {
+                FlushFileBuffers(hStd);
+                return;
+            }
+        }
+    }
+#endif
+    if (is_error) {
+        std::cerr << str;
+        std::cerr.flush();
+        std::fflush(stderr);
+    } else {
+        std::cout << str;
+        std::cout.flush();
+        std::fflush(stdout);
+    }
+}
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -65,13 +91,7 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--version" || arg == "-v") {
-            const char* ver_str = "Flux Download Manager v0.3.0 (Flux) [Brisk Engine + Cat Catch Media Detection + N_m3u8DL-RE Pipeline]\n";
-            std::cout << ver_str;
-            std::cerr << ver_str;
-            std::cout.flush();
-            std::cerr.flush();
-            std::fflush(stdout);
-            std::fflush(stderr);
+            WriteConsoleOutput(FLUX_FULL_VERSION_STRING, false);
             return 0;
         } else if (arg == "--db" && i + 1 < argc) {
             cfg.state_db_path = argv[++i];
@@ -158,7 +178,7 @@ int main(int argc, char* argv[]) {
     openidm::DownloadController controller(cfg);
     auto init_res = controller.Initialize();
     if (!init_res.ok()) {
-        std::cerr << "ERROR: Failed to initialize Flux controller: " << init_res.error->message << "\n";
+        WriteConsoleOutput("ERROR: Failed to initialize Flux controller: " + init_res.error->message + "\n", true);
         return 1;
     }
 
@@ -180,7 +200,7 @@ int main(int argc, char* argv[]) {
 
     if (mode == "list") {
         openidm::ui::DesktopView view(controller);
-        std::cout << view.RenderQueueTableText();
+        WriteConsoleOutput(view.RenderQueueTableText(), false);
         controller.Shutdown();
         return 0;
     }
@@ -188,7 +208,7 @@ int main(int argc, char* argv[]) {
     if (mode == "gui-snapshot") {
         openidm::ui::DesktopView view(controller, nullptr);
         view.SelectFirstRow();
-        std::cout << view.RenderFullDesktopSnapshotText();
+        WriteConsoleOutput(view.RenderFullDesktopSnapshotText(), false);
         controller.Shutdown();
         return 0;
     }
@@ -196,10 +216,8 @@ int main(int argc, char* argv[]) {
     if (mode == "probe") {
         auto pres = controller.ProbeStream(target_url, {}, {});
         if (!pres.ok()) {
-            std::cerr << "ERROR: " << pres.error->code << ": " << pres.error->message << "\n";
-            std::cout << "ERROR: " << pres.error->code << ": " << pres.error->message << "\n";
-            std::cout.flush();
-            std::cerr.flush();
+            std::string err_str = "ERROR: " + pres.error->code + ": " + pres.error->message + "\n";
+            WriteConsoleOutput(err_str, true);
             controller.Shutdown();
             return 2;
         }
@@ -211,10 +229,7 @@ int main(int argc, char* argv[]) {
                           + " res=" + tr.resolution + " bw=" + std::to_string(tr.bandwidth)
                           + " lang=" + tr.language + " segs=" + std::to_string(tr.segments_count) + "\n";
         }
-        std::cout << probe_summary;
-        std::cout.flush();
-        std::cerr << probe_summary;
-        std::cerr.flush();
+        WriteConsoleOutput(probe_summary, false);
         controller.Shutdown();
         return 0;
     }
@@ -233,18 +248,20 @@ int main(int argc, char* argv[]) {
         }
         auto added = controller.AddTask(std::move(t), true, true);
         if (!added.ok()) {
-            std::cerr << "ERROR: " << added.error->message << "\n";
+            WriteConsoleOutput("ERROR: " + added.error->message + "\n", true);
             controller.Shutdown();
             return 1;
         }
         auto done = controller.WaitForTaskCompletion(added.value->task_id, 120000);
         controller.Shutdown();
         if (!done.ok() || done.value->state != openidm::TaskState::kCompleted) {
-            std::cerr << "ERROR: Task failed: " << (done.ok() ? done.value->error_message : done.error->message) << "\n";
+            std::string err_msg = "ERROR: Task failed: " + (done.ok() ? done.value->error_message : done.error->message) + "\n";
+            WriteConsoleOutput(err_msg, true);
             return 2;
         }
-        std::cout << "COMPLETED: " << (std::filesystem::path(done.value->save_dir) / done.value->file_name).string()
-                  << " (" << done.value->downloaded_bytes << " bytes)\n";
+        std::string comp_msg = "COMPLETED: " + (std::filesystem::path(done.value->save_dir) / done.value->file_name).string()
+                             + " (" + std::to_string(done.value->downloaded_bytes) + " bytes)\n";
+        WriteConsoleOutput(comp_msg, false);
         return 0;
     }
 
@@ -258,7 +275,7 @@ int main(int argc, char* argv[]) {
         server.SetHeadlessDaemonMode(true);
         auto sres = server.Start();
         if (!sres.ok()) {
-            std::cerr << "ERROR: Failed to start IPC server: " << sres.error->message << "\n";
+            WriteConsoleOutput("ERROR: Failed to start IPC server: " + sres.error->message + "\n", true);
             controller.Shutdown();
 #ifdef _WIN32
             if (hShutdownEvent) CloseHandle(hShutdownEvent);

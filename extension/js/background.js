@@ -1454,20 +1454,18 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   const qualitiesList = Array.isArray(candidate.qualities) ? candidate.qualities : [];
   let chosenQuality = options.selectedQuality || null;
   const reqQ = String(options.qualityId || options.resolution || "").toLowerCase();
-  if (qualitiesList.length > 0) {
+  if (!chosenQuality && qualitiesList.length > 0) {
     if (reqQ && reqQ !== "best" && reqQ !== "auto") {
-      const explicitMatch = qualitiesList.find(q =>
+      chosenQuality = qualitiesList.find(q =>
         String(q.id || "").toLowerCase() === reqQ ||
         String(q.resolution || "").toLowerCase() === reqQ ||
-        String(q.videoFilter || "").toLowerCase() === reqQ ||
+        String(q.videoFilter || "").toLowerCase() === reqQ
+      ) || qualitiesList.find(q =>
         (reqQ.includes("1080") && String(q.resolution || "").toLowerCase().includes("1080")) ||
         (reqQ.includes("720") && String(q.resolution || "").toLowerCase().includes("720")) ||
         (reqQ.includes("480") && String(q.resolution || "").toLowerCase().includes("480")) ||
         (reqQ.includes("360") && String(q.resolution || "").toLowerCase().includes("360"))
-      );
-      if (explicitMatch) {
-        chosenQuality = explicitMatch;
-      }
+      ) || null;
     }
     if (!chosenQuality) {
       chosenQuality = qualitiesList.find(q => !q.isAudioOnly && String(q.resolution || "").toLowerCase().includes("1080")) ||

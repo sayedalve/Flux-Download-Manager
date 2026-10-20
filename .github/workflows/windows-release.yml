@@ -273,9 +273,9 @@ jobs:
   # =========================================================================
   # JOB 2: Clean Installation Smoke Tests on Fresh Runner
   # =========================================================================
-  clean-install-smoke-test:
+  clean-install-smoke-test-x64:
     name: Clean Installation Smoke Test (Fresh Runner)
-    needs: [build-and-package]
+    needs: [build-and-package-x64]
     runs-on: windows-2022
     permissions:
       contents: read
@@ -339,7 +339,7 @@ jobs:
   # =========================================================================
   browser-extension-runtime-test:
     name: Browser Extension Runtime Test (Chromium)
-    needs: [build-and-package]
+    needs: [build-and-package-x64]
     runs-on: windows-2022
     permissions:
       contents: read

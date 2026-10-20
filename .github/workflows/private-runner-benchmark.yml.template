@@ -1,0 +1,121 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Flux Download Manager — Private / Self-Hosted Competitor Benchmark Template
+#
+# USAGE INSTRUCTIONS:
+# This workflow template is designed for execution on a self-hosted or private Windows
+# runner where licensed/paid applications (such as Internet Download Manager 6.43.15
+# and Free Download Manager 6.33.1.6648) are legitimately installed and activated.
+#
+# To use:
+# 1. Copy this file into your private companion repository as:
+#    .github/workflows/private-runner-benchmark.yml
+# 2. Configure `runs-on: [self-hosted, windows, x64]` or your specific runner tag.
+# 3. Trigger via workflow_dispatch.
+# 4. Reports will be saved to:
+#    - benchmarks/LATEST_COMPARISON_LOCAL.md
+#    - benchmarks/latest_comparison_local.json
+#    - benchmarks/latest_comparison_local.csv
+
+name: Private Runner Benchmark Lab (IDM + FDM + Flux + aria2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      extended_mode:
+        description: "Run extended mode (5 trials per tool instead of 3)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  local-competitor-benchmark:
+    name: Local Workstation / Self-Hosted Competitor Benchmark
+    # Set to your self-hosted runner label
+    runs-on: [self-hosted, windows, x64]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Benchmark Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install psutil pywinauto pywin32
+
+      - name: Inspect Installed Competitor Software
+        shell: powershell
+        run: |
+          Write-Host "=== Inspecting Installed Benchmarking Tools ==="
+          $idmPath = "C:\Program Files (x86)\Internet Download Manager\IDMan.exe"
+          if (Test-Path $idmPath) {
+            $idmVer = (Get-Item $idmPath).VersionInfo.ProductVersion
+            Write-Host "IDM Found: $idmPath (v$idmVer)"
+          } else {
+            Write-Host "IDM not found at standard path."
+          }
+
+          $fdmPath = "C:\Program Files\Softdeluxe\Free Download Manager\fdm.exe"
+          if (Test-Path $fdmPath) {
+            $fdmVer = (Get-Item $fdmPath).VersionInfo.ProductVersion
+            Write-Host "FDM Found: $fdmPath (v$fdmVer)"
+          } else {
+            Write-Host "FDM not found at standard path."
+          }
+
+      - name: Configure CMake for Flux
+        shell: powershell
+        run: |
+          cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Flux Target
+        run: |
+          cmake --build build --config Release --target flux
+
+      - name: Execute Full Competitor Benchmark Suite (Local Mode)
+        shell: powershell
+        run: |
+          $fluxBin = "build/Release/flux.exe"
+          if (-not (Test-Path $fluxBin)) {
+            $fluxBin = "build/win-x64/Release/flux.exe"
+          }
+          $extFlag = if ("${{ inputs.extended_mode }}" -eq "true") { "--extended" } else { "" }
+          Write-Host "Running: python scripts/run-competitor-benchmarks.py --mode local $extFlag --flux-bin $fluxBin"
+          python scripts/run-competitor-benchmarks.py --mode local $extFlag --flux-bin $fluxBin
+
+      - name: Publish Markdown Summary to Job Summary
+        shell: powershell
+        if: always()
+        run: |
+          $summaryFile = "benchmarks/LATEST_COMPARISON_LOCAL.md"
+          if (Test-Path $summaryFile) {
+            Get-Content $summaryFile -Raw -Encoding utf8 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+            Write-Host "Published local benchmark summary to GITHUB_STEP_SUMMARY"
+          }
+
+      - name: Upload Local Benchmark Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-benchmark-comparison-results
+          path: |
+            benchmarks/latest_comparison_local.json
+            benchmarks/latest_comparison_local.csv
+            benchmarks/LATEST_COMPARISON_LOCAL.md
+            benchmarks/benchmark_server.log
+          if-no-files-found: warn

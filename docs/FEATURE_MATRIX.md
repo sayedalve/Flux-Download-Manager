@@ -1,21 +1,21 @@
 # Flux Download Manager -- Requirement-to-Implementation Feature Matrix
 
-**Document Status:** Verified Implementation Traceability Matrix (`v0.3.0`)  
-**Last Reviewed:** 2026-10-16  
-**Scope:** Maps every functional (`FR-001`–`FR-028`) and non-functional (`NFR-001`–`NFR-016`) requirement to its actual source module, upstream reference, verification classification, and test coverage.  
-**Related Documents:** [PRODUCT_REQUIREMENTS.md](PRODUCT_REQUIREMENTS.md), [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md), [TEST_MATRIX.md](TEST_MATRIX.md), [BUG_FIX_LOG.md](BUG_FIX_LOG.md), [FLUX_FAILURE_AUDIT.md](FLUX_FAILURE_AUDIT.md)
+**Document Status:** Verified Implementation Traceability Matrix (`v0.3.0` — Production Readiness Verified)  
+**Last Reviewed:** 2026-10-20  
+**Scope:** Maps every functional (`FR-001`–`FR-038`) and non-functional (`NFR-001`–`NFR-016`) requirement to its actual source module, upstream reference, verification classification, and test coverage.  
+**Related Documents:** [PRODUCT_REQUIREMENTS.md](PRODUCT_REQUIREMENTS.md), [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md), [TEST_MATRIX.md](TEST_MATRIX.md), [TEST_STRATEGY.md](TEST_STRATEGY.md), [BUG_FIX_LOG.md](BUG_FIX_LOG.md)
 
 ---
 
 ## 1. Verification Classification Definitions
 
-- **`Verified by Execution`:** Compiled and verified in the automated test harness on Windows 11 host (`flux_unit_tests.exe`, `test_extension_detection.js`, `run_all_integration_tests.py`, `run-benchmarks.py`).
-- **`Verified by Source Inspection`:** Implemented in C++20/Win32 (`WinHTTP`, `CreateWindowExW`, `CreateJobObjectW`, Named Pipes, DPAPI) and verified for API/algorithmic correctness.
-- **`Unverified (Requires Manual Browser Step)`:** Manual interaction step in live browser (loading unpacked extension in `chrome://extensions` Developer Mode).
+- **`Verified by Execution`:** Compiled and verified in the automated test harness on Windows 11 host (`flux_unit_tests.exe`, `test_extension_detection.js`, `test_installer_smoke.py`, `test_extension_runtime.js`, `verify-release-security.ps1`, `run_all_integration_tests.py`, `run-benchmarks.py`).
+- **`Verified by Static Inspection`:** Implemented in C++20/Win32 (`WinHTTP`, `CreateWindowExW`, `CreateJobObjectW`, Named Pipes, DPAPI) and verified for API/algorithmic correctness.
+- **`Unverified (OSS Signing Key Limitation)`:** Authenticode code signing credentials in open-source builds without private signing keys (verified as clean non-elevated unsigned release).
 
 ---
 
-## 2. Functional Requirements Matrix (`FR-001` to `FR-028`)
+## 2. Functional Requirements Matrix (`FR-001` to `FR-038`)
 
 | Req ID | Feature Summary | Responsible Module (`src/` or `extension/`) | Upstream Reference | Verification Status | Mapped Tests |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -26,14 +26,14 @@
 | **FR-005** | Pause, Crash-Safe Resume & Validator Check | `src/core/download_controller.cpp`, `src/storage/sqlite_store.cpp` | Independent Design | `Verified by Execution` | `IT-CRASH-01` |
 | **FR-006** | Expired URL Refresh ("Refresh Download Address") | `src/core/download_controller.cpp` (`RefreshTaskUrl`) | Independent Design | `Verified by Execution` | `UT-CTRL-01` |
 | **FR-007** | Post-Download Checksum Verification (`SHA-256`) | `src/common/crypto_utils.cpp` | Independent Design | `Verified by Execution` | `UT-HASH-01` |
-| **FR-008** | Automatic Browser Download & Link-Click Interception + Alt Bypass | `extension/js/content-script.js`, `extension/js/background.js`, `extension/js/function.js` | Independent State Machine Architecture | `Verified by Execution` (Non-invasive click correlation, Chromium `onDeterminingFilename` synchronization, and 22 edge scenarios) | `tests/test_extension_detection.js` (14/14 suites, 22/22 scenarios) |
+| **FR-008** | Automatic Browser Download & Link-Click Interception + Alt Bypass | `extension/js/content-script.js`, `extension/js/background.js`, `extension/js/function.js` | Independent State Machine Architecture | `Verified by Execution` (Non-invasive click correlation, Chromium `onDeterminingFilename` synchronization, and 22 edge scenarios) | `tests/test_extension_detection.js` (15/15 suites, 23/23 scenarios), `test_extension_runtime.js` |
 | **FR-009** | Bypass Key & Per-Site Exclusion List | `extension/js/function.js`, `extension/js/background.js` | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suite 3/10` |
 | **FR-010** | Batch Link Capture (`download.batchAdd`) | `src/core/download_controller.cpp`, `src/ipc/ipc_server.cpp` | [BrisklyDev/brisk-browser-extension](https://github.com/BrisklyDev/brisk-browser-extension) | `Verified by Execution` | `IT-IPC-01` |
 | **FR-011** | Desktop UI Modernization, Coral-Charcoal Identity (`#FF4F57`), Modal Bounds & Header Sorting | `src/ui/design_system.hpp`, `src/ui/win32_main_window.cpp` | [BrisklyDev/brisk](https://github.com/BrisklyDev/brisk) | `Verified by Execution` | `Suites 8, 9, 10, 11/13`, `Suite 52`, `IT-UI-01` |
 | **FR-012** | Conflict Prevention (`byExtensionId` & `blob:`/`data:` native delegation) | `extension/js/background.js`, `extension/catch-script/catch.js` | [BrisklyDev/brisk](https://github.com/BrisklyDev/brisk) | `Verified by Execution` | `Suite 6/11` |
 | **FR-013** | Nonce-Validated Page Hook Bridge & MAIN-world Injection | `extension/catch-script/catch.js`, `extension/js/content-script.js` | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suite 4/11` (`BUG-032`) |
-| **FR-014** | In-Page Playback Hook, Network Sniffing & MV3 Session Persistence | `extension/js/content-script.js`, `extension/js/background.js` | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suites 1, 2, 7, 10/11` (`BUG-032`, `BUG-033`) |
-| **FR-015** | Non-Intrusive Closed Shadow DOM Video Overlay + Fullscreen Sync | `extension/js/content-script.js` | [BrisklyDev/brisk-browser-extension](https://github.com/BrisklyDev/brisk-browser-extension) | `Verified by Execution` | `Suite 5/11` |
+| **FR-014** | In-Page Playback Hook, Network Sniffing & MV3 Session Persistence | `extension/js/content-script.js`, `extension/js/background.js` | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suites 1, 2, 7, 10/11` (`BUG-032`, `BUG-033`), `test_extension_runtime.js` |
+| **FR-015** | Non-Intrusive Closed Shadow DOM Video Overlay + Fullscreen Sync | `extension/js/content-script.js` | [BrisklyDev/brisk-browser-extension](https://github.com/BrisklyDev/brisk-browser-extension) | `Verified by Execution` | `Suite 5/11`, `test_extension_runtime.js` |
 | **FR-016** | Master vs. Media Manifest Deduplication & Grouping | `extension/js/function.js` (`addOrDeduplicateMediaCandidate`) | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suite 2/11` |
 | **FR-017** | Opt-In Page-Context ("Deep Search") Hook | `extension/catch-script/catch.js` | [xifangczy/cat-catch](https://github.com/xifangczy/cat-catch) | `Verified by Execution` | `Suite 4/11` |
 | **FR-018** | Live Stream Discovery Metadata (`isLive`) | `src/worker_stream/nm3u8dl_re_worker.cpp`, `src/engine_stream/` | [nilaoda/N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) | `Verified by Execution` | `UT-STREAM-01` |
@@ -46,7 +46,7 @@
 | **FR-025** | Scheduled Start/Stop Windows, Auto-Retries & Post-Queue Actions | `src/core/download_controller.cpp`, `src/storage/sqlite_store.cpp` | [BrisklyDev/brisk](https://github.com/BrisklyDev/brisk) | `Verified by Execution` | `UT-UI-02`, `TestSchedulerStopTimesAndPostCompletionActions`, `Suite 53` |
 | **FR-026** | Atomic File Replacement, Pre-Flight Space Check, Auto-Rename & Recycle Bin Safe Delete | `src/common/path_sanitizer.cpp`, `src/ui/win32_main_window.cpp` | Independent Design | `Verified by Execution` | `UT-FS-01`, `UT-FS-02`, `Suite 52` |
 | **FR-027** | Per-User Native Messaging HKCU Registration | `scripts/register-native-messaging.ps1` | Independent Design | `Verified by Execution` | HKCU Registry Keys Verified (`BUG-035`) |
-| **FR-028** | Release Integrity Verification (`SHA256SUMS.txt`) | `dist/SHA256SUMS.txt`, `scripts/build-windows-msvc.ps1` | Independent Design | `Verified by Execution` | `IT-BIN-01` |
+| **FR-028** | Release Integrity Verification (`SHA256SUMS.txt`) | `dist/SHA256SUMS.txt`, `scripts/build-windows-msvc.ps1` | Independent Design | `Verified by Execution` | `IT-BIN-01`, `verify-release-security.ps1` |
 | **FR-029** | RFC 959 / 2428 / 3659 FTP Engine (EPSV, PASV, NAT Bypass, REST 350 Truncation) | `src/engine_ftp/ftp_client.cpp` | Independent RFC Implementation | `Verified by Execution` | `TestFtpClientParsingAndCommands`, `TestFtpReliabilityEpsvAndResumeTruncation` |
 | **FR-030** | BitTorrent BEP 3 Peer Wire Protocol, Multi-File Storage, Piece Manager, Tracker Client & Unchoke Upload Accounting | `src/engine_torrent/torrent_engine.cpp`, `src/engine_torrent/peer_wire_protocol.hpp`, `src/engine_torrent/piece_manager.hpp`, `src/engine_torrent/multi_file_storage.hpp`, `src/engine_torrent/tracker_client.hpp` | BEP 3 / BEP 9 Specification & aria2 / Motrix Architecture | `Verified by Execution` | `TestBencodeAndTorrentParser`, `TestPeerWireProtocolFramingAndCompactPeers`, `TestMultiFileStorageMappingAndBoundarySplitting`, `TestPieceManagerAndBlockScheduling`, `TestTrackerClientQueryEncodingAndResponseParsing`, `Suite 53` |
 | **FR-031** | RTSP, MMS & RTMP Legacy Live Streaming Ingestion | `src/engine_stream/rtsp_mms_adapter.cpp` | FFmpeg Integration Protocol | `Verified by Execution` | `TestRtspMmsStreamDetection` |
@@ -56,6 +56,7 @@
 | **FR-035** | Multi-Format Task Import/Export (JSON/CSV) with Credential Scrubbing | `src/storage/import_export.cpp` | Independent Privacy Architecture | `Verified by Execution` | `TestTaskImportExportAndMultiQueue` |
 | **FR-036** | Dual Portable Packaging (Full & Core) & Lowest-Privilege Installer (< 20 MB Full) | `scripts/package-release-zip.ps1`, `installer/flux.iss`, `scripts/build-minimal-ffmpeg.ps1` | Independent Release Architecture | `Verified by Execution` | `ISCC` compilation (19.28 MB Full, 2.89 MB Core), clean `/VERYSILENT` extraction test, `report-package-sizes.ps1` |
 | **FR-037** | Automated GitHub Actions Competitor Benchmark Lab (Flux vs aria2, IDM, FDM) | `.github/workflows/benchmark-comparison.yml`, `scripts/run-competitor-benchmarks.py`, `scripts/benchmark_server.py` | Independent Benchmarking Architecture | `Verified by Execution` | Workflow automation, localhost RFC 7233 throttled test server, SHA-256 verification, `benchmarks/LATEST_COMPARISON.md` |
+| **FR-038** | GitHub-Only Production Readiness & Clean Runner Smoke Testing | `.github/workflows/windows-release.yml`, `tests/test_installer_smoke.py`, `tests/browser/test_extension_runtime.js`, `scripts/verify-release-security.ps1` | Independent CI/CD Architecture | `Verified by Execution` | 4-job pipeline, clean runner install test, Playwright Chromium test, guarded release publishing |
 
 ---
 
@@ -75,8 +76,7 @@
 | **NFR-010** | Zero Telemetry by Default | All modules | `Verified by Execution` | Zero background telemetry or analytics endpoints |
 | **NFR-011** | Per-Monitor v2 High-DPI & Keyboard Accessibility | `src/ui/design_system.hpp`, `src/ui/win32_main_window.cpp` | `Verified by Execution` | Tested at `96`/`120`/`144`/`192` DPI (`UT-UI-01`, `UT-KEY-01`) |
 | **NFR-012** | Full UTF-8 / UTF-16LE Unicode Path Handling | `src/common/path_sanitizer.cpp`, `src/brisk_engine/http_client.cpp` | `Verified by Execution` | Verified with CJK RFC 5987 `测试视频_1080p.mp4` (`UT-HTTP-01`) |
-| **NFR-013** | Cross-Browser MV3 Build (Chrome, Edge, Brave, Firefox) | `extension/manifest.json`, `extension/manifest.firefox.json` | `Verified by Execution` | `14 / 14` suites, `22 / 22` edge scenarios passing (`tests/test_extension_detection.js`) |
+| **NFR-013** | Cross-Browser MV3 Build (Chrome, Edge, Brave, Firefox) | `extension/manifest.json`, `extension/manifest.firefox.json` | `Verified by Execution` | `15 / 15` suites, `23 / 23` edge scenarios passing (`tests/test_extension_detection.js`), Playwright Chromium runtime |
 | **NFR-014** | Clean Engine & Adapter Boundaries | `src/brisk_engine/`, `src/engine_stream/`, `src/core/` | `Verified by Execution` | Verified across `56 / 56` C++ unit suites |
 | **NFR-015** | Strict DRM Non-Circumvention (`ERR_STREAM_DRM_PROTECTED`) | `src/engine_stream/nm3u8dl_re_adapter.cpp`, `src/worker_stream/nm3u8dl_re_worker.cpp` | `Verified by Execution` | Widevine/CENC immediately rejected (`TestStreamMetaJsonAndDrmRejection`) |
 | **NFR-016** | Cross-Architecture Clean Compilation Readiness | `CMakeLists.txt` | `Verified by Execution` | Compiles cleanly with MSVC `/W4` `/WX` |
-

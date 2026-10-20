@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Flux Extension Test - Download Fixtures</title>
+  <style>
+    body { font-family: sans-serif; padding: 24px; background: #1a1b1e; color: #fff; }
+    a, button { display: inline-block; margin: 8px 0; padding: 10px 16px; background: #2d2e32; color: #fff; border: 1px solid #444; border-radius: 6px; text-decoration: none; cursor: pointer; }
+    a:hover, button:hover { background: #3d3e42; border-color: #FF4F57; }
+  </style>
+</head>
+<body>
+  <h1>Flux Download Interception Test Page</h1>
+  <p>Standard links and buttons to test browser download interception and fallback.</p>
+
+  <div>
+    <a id="link-zip" href="/files/archive.zip">Download Test ZIP (4 MiB)</a>
+  </div>
+  <div>
+    <a id="link-iso" href="/files/system.iso">Download Test ISO Image (8 MiB)</a>
+  </div>
+  <div>
+    <a id="link-attachment" href="/files/attachment_data">Download Attachment File (Content-Disposition)</a>
+  </div>
+  <div>
+    <button id="btn-fetch-dl" onclick="triggerJsDownload()">Trigger JavaScript Download</button>
+  </div>
+
+  <script>
+    function triggerJsDownload() {
+      window.location.href = '/files/script_export.pdf';
+    }
+  </script>
+</body>
+</html>

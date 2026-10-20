@@ -1,0 +1,13 @@
+{
+  "name": "flux-download-manager",
+  "version": "0.3.0",
+  "description": "Flux Download Manager Browser Extension & E2E Runtime Test Suite",
+  "private": true,
+  "scripts": {
+    "test:unit": "node tests/test_extension_detection.js",
+    "test:browser": "node tests/browser/test_extension_runtime.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

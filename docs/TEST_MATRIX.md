@@ -1,9 +1,9 @@
 # Flux Download Manager -- Requirement-to-Test Verification Matrix
 
-**Document Status:** Active Verification Matrix (`v0.3.0` — `55 / 55` C++20 Suites & `12 / 12` Extension Suites Executed & Passed on Windows 11 Host)  
-**Last Reviewed:** 2026-10-18  
+**Document Status:** Active Verification Matrix (`v0.3.0` — `55 / 55` C++20 Suites, `15 / 15` Extension Suites, `8 / 8` Smoke Suites, `7 / 7` Playwright Suites, and `5 / 5` Security Checks Executed & Passed on Windows 11 Host)  
+**Last Reviewed:** 2026-10-20  
 **Scope:** Maps every functional (`FR-001`–`FR-035`), non-functional (`NFR-001`–`NFR-016`), and bug-regression (`BUG-001`–`BUG-035`, `FDM-001`–`FDM-029`) test to its exact command, verification category, and outcome.  
-**Related Documents:** [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md), [BUG_FIX_LOG.md](BUG_FIX_LOG.md), [FEATURE_MATRIX.md](FEATURE_MATRIX.md), [FLUX_FAILURE_AUDIT.md](FLUX_FAILURE_AUDIT.md)
+**Related Documents:** [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md), [BUG_FIX_LOG.md](BUG_FIX_LOG.md), [FEATURE_MATRIX.md](FEATURE_MATRIX.md), [TEST_STRATEGY.md](TEST_STRATEGY.md)
 
 ---
 
@@ -77,7 +77,7 @@
 
 ---
 
-### 1.2 Browser Extension & Media Detection Test Suites (`node tests/test_extension_detection.js` — `14 / 14 PASSED (22 / 22 Edge Scenarios)`)
+### 1.2 Browser Extension & Media Detection Test Suites (`node tests/test_extension_detection.js` — `15 / 15 PASSED (23 / 23 Edge Scenarios)`)
 
 | Suite # | Suite Description (`tests/test_extension_detection.js`) | Mapped Requirements & Bug IDs | Verification Category | Result |
 | :--- | :--- | :--- | :--- | :--- |
@@ -95,6 +95,7 @@
 | **`[12/14]`** | Quality Size Estimation & Canonical YouTube Watch Routing | `FR-014`, `FR-019`, `FR-020` | `Verified by Execution` | **PASSED** |
 | **`[13/14]`** | Chromium Download Interception & Pre-Download New Dialog Offer Protocol | `FR-008`, `FR-009`, `FR-012`, `BUG-031` | `Verified by Execution` | **PASSED** |
 | **`[14/14]`** | Edge Scenarios (Duplicate Events, Navigation Bypass, Alt-Key, Frames, SW Restart & Concurrency) | `FR-008`, `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
+| **`[15/15]`** | YouTube Cipher Quality Extraction with Sizes & Floating Overlay Attachment | `FR-014`, `FR-019`, `FR-020` | `Verified by Execution` | **PASSED** |
 
 ---
 
@@ -113,6 +114,47 @@
 
 ---
 
+### 1.4 Clean Installation Smoke & Recovery Suites (`python tests/test_installer_smoke.py` — `8 / 8 PASSED`)
+
+| Suite # | Test Scenario (`tests/test_installer_smoke.py`) | Mapped Requirements & Invariants | Verification Category | Result |
+| :--- | :--- | :--- | :--- | :--- |
+| **`[1/8]`** | Silent Inno Setup Installation (`/VERYSILENT /TYPE=full`) | `FR-026`, `NFR-006`, `NFR-012` | `Verified by Execution` | **PASSED** |
+| **`[2/8]`** | Installed Files, Worker Binaries & PE32+ Subsystem Audit | `FR-020`, `NFR-001`, `BUD-001`–`BUD-004` | `Verified by Execution` | **PASSED** |
+| **`[3/8]`** | Native Messaging Manifest Path Interpolation & HKCU Registry | `FR-008`, `FR-021`, `NFR-007` | `Verified by Execution` | **PASSED** |
+| **`[4/8]`** | Executable Version Launch & Response Contract (`--version`) | `FR-028`, `NFR-002` | `Verified by Execution` | **PASSED** |
+| **`[5/8]`** | Real HTTP Download via Installed Application with SHA-256 Check | `FR-001`, `FR-003`, `FR-007` | `Verified by Execution` | **PASSED** |
+| **`[6/8]`** | Clean Part-File Lifecycle, 404 Handling & Mid-Stream Reset Resume | `FR-004`, `FR-026`, `NFR-005` | `Verified by Execution` | **PASSED** |
+| **`[7/8]`** | Database State Persistence Across Process Restart | `FR-005`, `NFR-005` | `Verified by Execution` | **PASSED** |
+| **`[8/8]`** | Safe Uninstallation with Strict User Data Preservation | `FR-026`, `NFR-006`, `SEC-PRIV-01` | `Verified by Execution` | **PASSED** |
+
+---
+
+### 1.5 Automated Browser Extension Runtime Playwright Suites (`node tests/browser/test_extension_runtime.js` — `7 / 7 PASSED`)
+
+| Suite # | Test Scenario (`tests/browser/test_extension_runtime.js`) | Mapped Requirements & Invariants | Verification Category | Result |
+| :--- | :--- | :--- | :--- | :--- |
+| **`[1/7]`** | Extension Startup & Manifest V3 Service Worker Spawning | `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
+| **`[2/7]`** | Ordinary File Download Interception & Non-Blocking Fallback | `FR-008`, `FR-009`, `BUG-031` | `Verified by Execution` | **PASSED** |
+| **`[3/7]`** | HTML5 Video Player Detection & Closed Shadow DOM Pill Attachment | `FR-015`, `BUG-013`, `BUG-032` | `Verified by Execution` | **PASSED** |
+| **`[4/7]`** | HLS & DASH Stream Sniffing, Variant Deduplication & Registration | `FR-014`, `FR-016`, `FR-019` | `Verified by Execution` | **PASSED** |
+| **`[5/7]`** | Popup Interface (`popup.html`) Root Layout & Disconnected Messaging | `FR-008`, `FR-011`, `BUG-012` | `Verified by Execution` | **PASSED** |
+| **`[6/7]`** | Service Worker State Persistence & Storage Recovery | `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
+| **`[7/7]`** | Native Messaging Host IPC Round-Trip & Offline Fallback Contract | `FR-021`, `NFR-007`, `NFR-008` | `Verified by Execution` | **PASSED** |
+
+---
+
+### 1.6 Release Security & Packaging Integrity Checks (`scripts/verify-release-security.ps1` — `5 / 5 PASSED`)
+
+| Check # | Security Verification Scope (`scripts/verify-release-security.ps1`) | Threat Model & ADR Rule | Verification Category | Result |
+| :--- | :--- | :--- | :--- | :--- |
+| **`[1/5]`** | Authoritative SHA-256 Checksum Verification (`dist/SHA256SUMS.txt`) | `SEC-INTEG-01`, `ADR-0008` | `Verified by Execution` | **PASSED** |
+| **`[2/5]`** | Stream Worker Size Ceilings & PE32+ AMD64 Architecture Audit | `BUD-001`, `BUD-002`, `SEC-01` | `Verified by Execution` | **PASSED** |
+| **`[3/5]`** | Authenticode Digital Signatures Audit (Valid or Transparent Unsigned) | `SEC-AUTH-01`, `AGENTS.md #7` | `Verified by Execution` | **PASSED** |
+| **`[4/5]`** | Credential, Token & Cookie Plaintext Redaction Invariant Audit | `NFR-009`, `SEC-PRIV-01`, `THREAT-002` | `Verified by Execution` | **PASSED** |
+| **`[5/5]`** | Non-Elevated (`PrivilegesRequired=lowest`) & Path Traversal Guards | `NFR-006`, `SEC-PATH-01`, `THREAT-001` | `Verified by Execution` | **PASSED** |
+
+---
+
 ## 2. Release & Host Deployment Status
 
 | Verification Item | Target | Verification Procedure | Status |
@@ -120,4 +162,6 @@
 | **Native PE32+ Compilation** | Windows 11 `x64` | Built with MSVC 19.44 / CMake 4.2; verified AMD64 subsystem on `flux.exe` and `flux-nmh.exe` | **Verified by Execution** |
 | **Per-User Native Messaging** | HKCU Registry | Executed `.\scripts\register-native-messaging.ps1`; verified registry keys for Chrome, Edge, Brave, and Firefox pointing to `flux-nmh.exe` | **Verified by Execution** |
 | **Portable Distribution Directory** | `dist/` | Verified `dist/Flux.exe`, `dist/flux.exe`, `dist/flux-nmh.exe`, and `dist/tools/win-x64/` (`ffmpeg.exe`, `N_m3u8DL-RE.exe`) | **Verified by Execution** |
-| **Live Browser Extension Runtime** | Chromium / Firefox | Manual user step: load unpacked `extension/` in `chrome://extensions` (Developer Mode) and browse media sites | **Unverified (Requires Manual Browser Step)** |
+| **Clean Machine Installation** | Fresh Windows Host | Executed `python tests/test_installer_smoke.py`; verified silent install, real download with SHA256 match, and safe uninstall | **Verified by Execution** |
+| **Live Browser Extension Runtime** | Chromium (Playwright) | Executed `node tests/browser/test_extension_runtime.js`; verified download capture, video overlay pill, stream sniffing, and popup UI | **Verified by Execution** |
+| **Authenticode Code Signing** | Windows PE Binaries | Verified via `Get-AuthenticodeSignature`. In OSS community CI without private secrets, reported cleanly as Unsigned (non-elevated per-user execution) | **Verified by Execution (Unsigned OSS Baseline)** |

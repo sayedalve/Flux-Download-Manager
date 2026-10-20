@@ -1,4 +1,4 @@
-name: Windows 11 Release Build & Verification
+name: Windows 11 Production Release Build & Verification
 
 on:
   push:
@@ -9,12 +9,17 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build-and-test:
-    name: Build & Verify Windows x64
+  # =========================================================================
+  # JOB 1: Build Targets, Run In-Tree Regression Tests & Assemble Packages
+  # =========================================================================
+  build-and-package:
+    name: Build & In-Tree Verification (Windows x64)
     runs-on: windows-2022
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout Code
@@ -58,7 +63,6 @@ jobs:
               throw "Invalid version tag format: '$rawRef'. Expected semantic version like 'v0.3.1' or '0.3.1'."
             }
           } else {
-            # On branch builds (e.g. main), extract canonical base version from CMakeLists.txt
             $cmakePath = "CMakeLists.txt"
             $ver = "0.3.0"
             if (Test-Path $cmakePath) {
@@ -70,7 +74,6 @@ jobs:
             Write-Host "Non-tag build on branch '$rawRef'; using repository base version: $ver"
           }
 
-          # 2. Validate version is clean SemVer
           if ($ver -notmatch '^\d+\.\d+\.\d+([.-].+)?$') {
             throw "Resolved version '$ver' is not valid SemVer (e.g. 0.3.1, 0.3.1-beta.1)"
           }
@@ -87,8 +90,6 @@ jobs:
           Write-Host "`n=== MSVC Compiler (cl.exe) ==="
           Get-Command cl.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
           cmd.exe /c "cl 2>&1" | Select-Object -First 1
-          Write-Host "`n=== Available CMake Generators ==="
-          cmake --help
 
       - name: Configure CMake
         shell: powershell
@@ -104,7 +105,7 @@ jobs:
           if ($helpText -match '\*\s+(Visual Studio [^\r\n=]+?)\s*=') {
               $candidates += $Matches[1].Trim()
           }
-          $candidates += @('Visual Studio 18 2026', 'Visual Studio 17 2022', '')
+          $candidates += @('Visual Studio 17 2022', '')
 
           $configured = $false
           foreach ($gen in ($candidates | Select-Object -Unique)) {
@@ -208,22 +209,33 @@ jobs:
         run: |
           python scripts/run-benchmarks.py
 
-      - name: Compile Inno Setup Installer
+      - name: Compile Inno Setup Installers (Full & Core)
         shell: powershell
         run: |
           $issPath = "installer/flux.iss"
           if (-not (Test-Path $issPath)) {
             $issPath = "installer/openidm.iss"
           }
-          $isccArgs = @("/DMyAppVersion=$env:FLUX_VERSION", $issPath)
-          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs
-          } elseif (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
-            & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" @isccArgs
-          } else {
-            choco install innosetup -y
-            & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @isccArgs
+          $isccExe = $null
+          $isccCandidates = @(
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          )
+          foreach ($cand in $isccCandidates) {
+            if (Test-Path $cand) { $isccExe = $cand; break }
           }
+          if (-not $isccExe) {
+            choco install innosetup -y
+            $isccExe = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+
+          Write-Host "Compiling Full Offline Installer..."
+          & $isccExe "/DMyAppVersion=$env:FLUX_VERSION" $issPath
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for Full installer!" }
+
+          Write-Host "`nCompiling Core-Only Installer..."
+          & $isccExe "/DMyAppVersion=$env:FLUX_VERSION" "/DCoreOnly" $issPath
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed for Core installer!" }
 
       - name: Package Standalone Portable Releases (Full & Core)
         shell: powershell
@@ -237,21 +249,168 @@ jobs:
         run: |
           powershell -ExecutionPolicy Bypass -File scripts/report-package-sizes.ps1 -Version "$env:FLUX_VERSION" -DistDir "dist" -UpdateMetrics -FailOnExceeded
 
-      - name: Upload Release Artifacts
+      - name: Security & Distribution Integrity Audit
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/verify-release-security.ps1 -DistDir "dist" -ToolsDir "tools/win-x64"
+
+      - name: Upload Release Distribution Packages
         uses: actions/upload-artifact@v4
         with:
-          name: flux-v${{ env.FLUX_VERSION }}-windows-x64
+          name: flux-dist-windows-x64
+          path: dist/
+
+      - name: Upload Build Evidence & Benchmark Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: flux-evidence-windows-x64
           path: |
-            dist/*-Setup-*.exe
-            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Full.zip
-            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Core.zip
-            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64.zip
-            dist/SHA256SUMS.txt
             benchmarks/latest_metrics.json
             docs/BENCHMARK_REPORT.md
+            build/benchmark_results.json
+
+  # =========================================================================
+  # JOB 2: Clean Installation Smoke Tests on Fresh Runner
+  # =========================================================================
+  clean-install-smoke-test:
+    name: Clean Installation Smoke Test (Fresh Runner)
+    needs: [build-and-package]
+    runs-on: windows-2022
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download Staged Release Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: flux-dist-windows-x64
+          path: dist
+
+      - name: Verify Downloaded Installer Assets
+        shell: powershell
+        run: |
+          Write-Host "=== Staged Release Packages for Clean Install Test ==="
+          Get-ChildItem -Recurse -Path dist
+          $installer = Get-ChildItem -Recurse -Path dist -Filter "Flux-Setup-x64-*.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "Downloaded release artifacts do not contain a valid Flux setup installer!"
+          }
+          Write-Host "Found installer: $($installer.FullName)"
+
+      - name: Execute Clean Installation Smoke Suite
+        shell: powershell
+        run: |
+          python tests/test_installer_smoke.py --dist-dir dist
+
+      - name: Upload Installation Test Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installation-smoke-logs
+          path: |
+            $env:TEMP\flux_install_*.log
+            $env:TEMP\flux_smoke_*\
+          if-no-files-found: ignore
+
+  # =========================================================================
+  # JOB 3: Browser Extension Runtime Tests (Playwright + Chromium)
+  # =========================================================================
+  browser-extension-runtime-test:
+    name: Browser Extension Runtime Test (Chromium)
+    needs: [build-and-package]
+    runs-on: windows-2022
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright & Dependencies
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: Execute Browser Extension Runtime Playwright Tests
+        run: |
+          node tests/browser/test_extension_runtime.js
+
+      - name: Upload Browser Test Evidence & Screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-extension-test-evidence
+          path: |
+            test-results/browser-extension/
+          if-no-files-found: ignore
+
+  # =========================================================================
+  # JOB 4: Publish Official GitHub Release (Guarded by Validation)
+  # =========================================================================
+  publish-release:
+    name: Publish Official GitHub Release
+    needs: [build-and-package, clean-install-smoke-test, browser-extension-runtime-test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2022
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Download Staged Release Packages
+        uses: actions/download-artifact@v4
+        with:
+          name: flux-dist-windows-x64
+          path: dist
+
+      - name: Verify Release Assets Before Publishing
+        shell: powershell
+        run: |
+          $ver = "${{ needs.build-and-package.outputs.version }}"
+          Write-Host "Publishing Verified GitHub Release for Flux v$ver..."
+          Get-ChildItem -Recurse -Path dist
+          $expectedPatterns = @(
+            "Flux-Setup-x64-*.exe",
+            "Flux-v*-Windows-x64-Full.zip",
+            "Flux-v*-Windows-x64-Core.zip",
+            "SHA256SUMS.txt"
+          )
+          foreach ($p in $expectedPatterns) {
+            $f = Get-ChildItem -Recurse -Path dist -Filter $p | Select-Object -First 1
+            if (-not $f) {
+              throw "Release validation failed: Required artifact missing matching '$p'"
+            }
+            $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash
+            Write-Host "Verified asset: $($f.Name) [SHA256: $hash]"
+          }
 
       - name: Publish Official GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: "Flux Download Manager ${{ github.ref_name }}"
@@ -260,11 +419,13 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/Flux-Setup-x64-${{ env.FLUX_VERSION }}.exe
-            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Full.zip
-            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64-Core.zip
-            dist/Flux-v${{ env.FLUX_VERSION }}-Windows-x64.zip
-            dist/SHA256SUMS.txt
+            dist/**/Flux-Setup-x64-*.exe
+            dist/**/Flux-v*-Windows-x64-Full.zip
+            dist/**/Flux-v*-Windows-x64-Core.zip
+            dist/**/Flux-v*-Windows-x64.zip
+            dist/**/SHA256SUMS.txt
+            LICENSE
+            THIRD_PARTY_NOTICES.md
             LICENSE
             THIRD_PARTY_NOTICES.md
         env:

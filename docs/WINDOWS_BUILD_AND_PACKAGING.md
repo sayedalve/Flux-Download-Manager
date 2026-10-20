@@ -86,3 +86,15 @@ powershell -ExecutionPolicy Bypass -File scripts\package-release-zip.ps1 -Versio
 - **Upgrade & Uninstall Safety:**
   - Uses `AppMutex=Local\Flux_SingleInstance,Local\OpenIDM_SingleInstance` to ensure clean shutdown before binary replacement.
   - Cleanly preserves `%LOCALAPPDATA%\Flux\state.db` and user download directories during uninstall and upgrades.
+
+
+---
+
+## 5. GitHub-Only Automated Production Verification & Release Pipeline
+
+All routine production builds, full regression verification, clean-machine installation tests, browser extension runtime tests, and release publications are strictly automated via GitHub Actions on hosted `windows-2022` runners:
+
+1. **Deterministic Build & Regression (`build-and-package`):** Builds MSVC C++20 executables, executes `flux_unit_tests.exe`, `test_extension_detection.js`, `run_all_integration_tests.py`, and `run-benchmarks.py`. Compiles both Full and Core Inno Setup installers, packages portable ZIPs, and enforces package size budgets (`report-package-sizes.ps1 -FailOnExceeded`) and security checksums (`verify-release-security.ps1`).
+2. **Clean Installation Smoke Test (`clean-install-smoke-test`):** On an isolated fresh runner, downloads the generated installer and executes `tests/test_installer_smoke.py`: runs silent install, verifies all worker binaries and manifests, confirms HKCU registry entries, performs a real loopback HTTP download with exact SHA256 match, tests mid-stream reset auto-resume, verifies zero leftover `.part` files, tests database state persistence across restart, and validates safe uninstallation preserving `%LOCALAPPDATA%\Flux`.
+3. **Browser Extension Runtime Test (`browser-extension-runtime-test`):** On an isolated fresh runner, launches Chromium via Playwright with the real unpacked extension loaded (`tests/browser/test_extension_runtime.js`): validates download interception, closed Shadow DOM video overlay attachment, dynamic HLS/DASH manifest detection, popup UI filtering, and service worker persistence.
+4. **Guarded Release Publishing (`publish-release`):** Strictly blocked until jobs 1, 2, and 3 have all passed; executes only on semantic version tags (`v*`), ensuring no unverified or broken build can ever be published.

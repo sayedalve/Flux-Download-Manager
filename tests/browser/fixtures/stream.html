@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Flux Extension Test - Stream Manifest Fixtures</title>
+  <style>
+    body { font-family: sans-serif; padding: 24px; background: #1a1b1e; color: #fff; }
+    button { padding: 10px 16px; background: #2d2e32; color: #fff; border: 1px solid #444; border-radius: 6px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Flux HLS & DASH Stream Detection Test Page</h1>
+  <p>Tests HLS .m3u8 manifest parsing, variant deduplication, and DASH .mpd detection.</p>
+
+  <div>
+    <button id="btn-load-hls" onclick="loadHlsManifest()">Simulate HLS Playback</button>
+    <button id="btn-load-dash" onclick="loadDashManifest()">Simulate DASH Playback</button>
+  </div>
+
+  <div id="status" style="margin-top: 15px; color: #888;">Idle</div>
+
+  <script>
+    async function loadHlsManifest() {
+      document.getElementById('status').textContent = 'Fetching HLS master playlist...';
+      const res = await fetch('/media/master.m3u8');
+      const text = await res.text();
+      document.getElementById('status').textContent = 'HLS master playlist loaded (' + text.length + ' chars)';
+      // Also fetch variant playlist
+      await fetch('/media/720p.m3u8');
+    }
+
+    async function loadDashManifest() {
+      document.getElementById('status').textContent = 'Fetching DASH MPD manifest...';
+      const res = await fetch('/media/manifest.mpd');
+      const text = await res.text();
+      document.getElementById('status').textContent = 'DASH MPD manifest loaded (' + text.length + ' chars)';
+    }
+  </script>
+</body>
+</html>

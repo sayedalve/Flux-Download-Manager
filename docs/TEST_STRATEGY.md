@@ -48,3 +48,57 @@ To avoid storing large binary video files in Git, `tests/integration/generate_fi
    - `/range/stall-worker3.bin` — Stops sending bytes on the 3rd connection after `256 KiB` for 20 seconds (`IT-HTTP-04`).
    - `/range/expiring-token.bin?token=t1` — Accepts `token=t1` for the first `10 MiB`, then returns `403 Forbidden` until resumed with `token=t2` (`IT-HTTP-06`).
    - `/range/etag-mutating.bin` — Changes `ETag` from `"v1"` to `"v2"` while paused (`IT-HTTP-05`).
+
+---
+
+## 4. GitHub-Only Production Readiness Testing Architecture (`windows-release.yml`)
+
+To decouple developers from local workstation build or install burdens and ensure clean-machine determinism, all release validation is executed on GitHub-hosted `windows-2022` runners across four isolated pipeline jobs:
+
+```mermaid
+flowchart TD
+    PR["Pull Request / Push"] --> Job1["1. build-and-package<br/>MSVC Build, Unit Tests, Integration Tests, Benchmarks, Inno Setup, Portable ZIPs, Size & Security Audit"]
+    Job1 --> Job2["2. clean-install-smoke-test<br/>Fresh Runner: Silent Install, Workers Audit, Registry, Real HTTP Download & SHA256, Restart, Uninstall Safety"]
+    Job1 --> Job3["3. browser-extension-runtime-test<br/>Fresh Runner: Playwright Chromium, Unpacked MV3 Extension, Video Overlay, HLS/DASH Sniffing, Popup UI, SW Restart"]
+    Job2 --> Job4["4. publish-release<br/>Tag Only: v*<br/>Verified Release Publishing"]
+    Job3 --> Job4
+```
+
+### 4.1 Job Breakdown & Responsibilities
+
+1. **Job 1: `build-and-package` (Windows x64):**
+   - Compiles native C++20 targets (`flux.exe`, `flux-nmh.exe`, `flux_unit_tests.exe`, `N_m3u8DL-RE.exe`).
+   - Executes C++ regression suite (`flux_unit_tests.exe`), Node.js extension unit tests (`test_extension_detection.js`), Python integration tests (`run_all_integration_tests.py`), and performance benchmarks (`run-benchmarks.py`).
+   - Compiles Inno Setup 6 installers (Full Offline and Core-Only) and packages standalone portable ZIP archives (`package-release-zip.ps1`).
+   - Audits package size budgets (`report-package-sizes.ps1 -FailOnExceeded`) and release security integrity (`verify-release-security.ps1`).
+   - Uploads distribution packages and test evidence as GitHub Actions artifacts.
+
+2. **Job 2: `clean-install-smoke-test` (Fresh `windows-2022` Host):**
+   - Downloads packaged release artifacts without sharing previous filesystem state.
+   - Executes `python tests/test_installer_smoke.py`:
+     - Installs Full setup installer silently (`/VERYSILENT /DIR=... /TYPE=full`).
+     - Verifies application version, PE32+ AMD64 headers, bundled stream workers (`N_m3u8DL-RE.exe`, `ffmpeg.exe`, `yt-dlp.exe`), extension assets, and native messaging manifests (`com.flux.downloadmanager.chromium.json`).
+     - Confirms HKCU registry bindings for Chrome and Edge.
+     - Performs a real HTTP download through installed `flux.exe` against a controlled local test server and verifies exact byte size and SHA-256 digest.
+     - Injects network reset to verify auto-resume, verifies 404 error exit code, checks zero leftover `.part` files, and verifies database restart persistence.
+     - Uninstalls silently (`unins000.exe /VERYSILENT`) and verifies binary removal while strictly preserving `%LOCALAPPDATA%\Flux` user data.
+
+3. **Job 3: `browser-extension-runtime-test` (Playwright Chromium on Fresh Host):**
+   - Downloads packaged extension and installs Playwright with Chromium.
+   - Executes `node tests/browser/test_extension_runtime.js`:
+     - Launches Chromium with real unpacked Manifest V3 extension loaded.
+     - Tests ordinary download link interception and non-blocking browser fallback.
+     - Verifies HTML5 video detection, content script isolated world execution, and closed Shadow DOM overlay pill attachment.
+     - Sniffs dynamic HLS `.m3u8` variant playlists and DASH `.mpd` manifests.
+     - Navigates to popup UI (`popup.html`), verifying root rendering, search filtering, and disconnected state messaging.
+     - Audits MV3 service worker lifecycle and `chrome.storage.local` session recovery.
+     - Captures full-page screenshots and structured JSON test reports.
+
+4. **Job 4: `publish-release` (Tag Gated):**
+   - Strictly requires `needs: [build-and-package, clean-install-smoke-test, browser-extension-runtime-test]`.
+   - Executes only on version tags (`refs/tags/v*`).
+   - Holds exclusive `contents: write` permission to publish official GitHub Releases via `softprops/action-gh-release@v2`.
+
+5. **Nightly Compatibility Lab (`nightly-live-compatibility.yml`):**
+   - Scheduled daily at 02:00 UTC to test against live public websites (`tests/test_live_brave_verification.py`), ensuring upstream website changes never block deterministic release builds or pull requests.
+

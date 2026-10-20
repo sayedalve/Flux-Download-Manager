@@ -1,0 +1,72 @@
+name: Nightly Live Website & Browser Compatibility Lab
+
+on:
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-compatibility-audit:
+    name: Live Website & Public Media Compatibility (Windows x64)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Flux Targets
+        run: |
+          cmake --build build --config Release --target flux flux-nmh
+
+      - name: Provision Upstream Stream Workers
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
+
+      - name: Register Native Messaging Host
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/register-native-messaging.ps1 -BuildDir build/win-x64/Release
+
+      - name: Execute Live Verification Suite
+        shell: powershell
+        continue-on-error: true
+        id: live_test
+        run: |
+          python tests/test_live_brave_verification.py
+
+      - name: Upload Live Compatibility Logs & Evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-live-compatibility-evidence
+          path: |
+            test-results/
+            build/benchmark_results.json
+          if-no-files-found: ignore

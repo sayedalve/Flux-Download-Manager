@@ -1,0 +1,215 @@
+name: Windows Cloud Compatibility Matrix & Testing Lab
+
+on:
+  push:
+    branches: [ "main", "master", "v0.3.x" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # =========================================================================
+  # JOB 1: Build Radium Binaries & Package Artifacts (Windows Server 2022)
+  # Built once and shared across downstream test matrix to avoid duplicate builds
+  # =========================================================================
+  build-and-stage-binaries:
+    name: Build & Package Binaries (MSVC C++20)
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+
+      - name: Resolve Version
+        id: version
+        shell: powershell
+        run: |
+          $ver = "0.3.1"
+          $cmakePath = "CMakeLists.txt"
+          if (Test-Path $cmakePath) {
+            $cmakeContent = Get-Content $cmakePath -Raw
+            if ($cmakeContent -match 'project\s*\(\s*(?:Radium|Flux)\s+VERSION\s+(\d+\.\d+\.\d+)') {
+              $ver = $Matches[1]
+            }
+          }
+          Write-Host "Resolved Radium Version: $ver"
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "RADIUM_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "FLUX_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure CMake
+        shell: powershell
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Windows Targets
+        run: |
+          cmake --build build --config Release --target radium radium-nmh radium_unit_tests openidm openidm-nmh openidm_unit_tests N_m3u8DL-RE
+
+      - name: Provision Upstream Stream Workers
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
+
+      - name: Compile Inno Setup Installers
+        shell: powershell
+        run: |
+          $issPath = "installer/radium.iss"
+          $isccExe = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $isccExe)) {
+            choco install innosetup -y
+          }
+          Write-Host "Compiling Radium Full Installer..."
+          & $isccExe "/DMyAppVersion=$env:RADIUM_VERSION" $issPath
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed!" }
+
+      - name: Package Standalone Portable Releases
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File scripts/package-release-zip.ps1 -Version "$env:RADIUM_VERSION" -PackageType Both -BuildDir "build/Release"
+
+      - name: Stage Built Binaries & Release Packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: radium-build-binaries-x64
+          path: |
+            build/Release/radium.exe
+            build/Release/radium-nmh.exe
+            build/Release/radium_unit_tests.exe
+            build/Release/N_m3u8DL-RE.exe
+            tools/win-x64/**
+            dist/**
+
+  # =========================================================================
+  # JOB 2: Compatibility Test Matrix across Windows Server 2022 & 2025
+  # Executes tests concurrently on fresh runners without rebuilding
+  # =========================================================================
+  compatibility-matrix-testing:
+    name: Test Matrix (${{ matrix.os }})
+    needs: [build-and-stage-binaries]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node & Python Dependencies
+        shell: powershell
+        run: |
+          python -m pip install --upgrade pip
+          pip install cryptography
+          npm install
+          npx playwright install chromium
+
+      - name: Download Staged Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: radium-build-binaries-x64
+          path: staged_artifacts
+
+      - name: Organize Staged Binaries
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path build/Release | Out-Null
+          New-Item -ItemType Directory -Force -Path tools/win-x64 | Out-Null
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType Directory -Force -Path test-results | Out-Null
+
+          Copy-Item -Recurse staged_artifacts/build/Release/* build/Release/ -ErrorAction SilentlyContinue
+          Copy-Item -Recurse staged_artifacts/tools/win-x64/* tools/win-x64/ -ErrorAction SilentlyContinue
+          Copy-Item -Recurse staged_artifacts/dist/* dist/ -ErrorAction SilentlyContinue
+
+          Write-Host "=== Staged Files Inspection on ${{ matrix.os }} ==="
+          Get-ChildItem -Recurse build/Release
+          Get-ChildItem -Recurse dist
+
+      - name: Inspect Runner Environment & Kernel Details
+        shell: powershell
+        run: |
+          $osInfo = Get-CimInstance Win32_OperatingSystem
+          Write-Host "OS Caption   : $($osInfo.Caption)"
+          Write-Host "OS Version   : $($osInfo.Version)"
+          Write-Host "Build Number : $($osInfo.BuildNumber)"
+          Write-Host "Architecture : $($osInfo.OSArchitecture)"
+
+      - name: Run C++20 Regression Tests (62 Suites)
+        shell: powershell
+        run: |
+          .\build\Release\radium_unit_tests.exe
+
+      - name: Run Core Operations, Pause/Resume & Concurrency Tests
+        shell: powershell
+        run: |
+          python tests/test_core_operations.py --bin-dir build/Release --output-json test-results/core_operations_${{ matrix.os }}.json
+
+      - name: Run Clean Installation Smoke Suite
+        shell: powershell
+        run: |
+          python tests/test_installer_smoke.py --dist-dir dist
+
+      - name: Run Browser Extension Runtime Suite (Chromium Playwright)
+        shell: powershell
+        run: |
+          node tests/browser/test_extension_runtime.js
+
+      - name: Generate OS Compatibility Report
+        shell: powershell
+        run: |
+          python scripts/generate-compatibility-report.py `
+            --results-dir test-results `
+            --output-md COMPATIBILITY_REPORT_${{ matrix.os }}.md `
+            --output-json test-results/compatibility_report_${{ matrix.os }}.json `
+            --os-label "${{ matrix.os }}"
+
+      - name: Output Compatibility Report to Job Summary
+        shell: powershell
+        run: |
+          Get-Content "COMPATIBILITY_REPORT_${{ matrix.os }}.md" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload Test Evidence & Compatibility Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compatibility-evidence-${{ matrix.os }}
+          path: |
+            COMPATIBILITY_REPORT_${{ matrix.os }}.md
+            test-results/
+            test-results/browser-extension/

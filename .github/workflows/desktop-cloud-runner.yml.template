@@ -1,0 +1,102 @@
+# Optional Cloud Desktop Runner Template for Radium Download Manager
+# This workflow is designed to execute on an external cloud VM (e.g. Azure Windows 11 Desktop VM)
+# registered as a GitHub Actions self-hosted runner with labels: [self-hosted, windows-desktop-11]
+#
+# To enable this workflow:
+# 1. Rename this file to: .github/workflows/desktop-cloud-runner.yml
+# 2. Provision an Azure or AWS Windows 11/10 desktop VM (refer to docs/WINDOWS_COMPATIBILITY_AND_CLOUD_TESTING.md).
+# 3. Configure the self-hosted runner to run in an active interactive user desktop session (Session 1).
+# 4. Trigger manually or on release tags.
+
+name: Windows Desktop (Win 11 / Win 10) Cloud VM Compatibility Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      os_target:
+        description: "Target Desktop OS"
+        required: true
+        default: "windows-11"
+        type: choice
+        options:
+          - "windows-11"
+          - "windows-10"
+
+jobs:
+  desktop-verification:
+    name: Interactive Desktop Testing (${{ inputs.os_target || 'windows-11' }})
+    runs-on: [self-hosted, windows-desktop-11]
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Verify Interactive Desktop Session
+        shell: powershell
+        run: |
+          Write-Host "=== Inspecting Host OS & Desktop Session ==="
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "OS Caption : $($os.Caption)"
+          Write-Host "Version    : $($os.Version)"
+          Write-Host "Build      : $($os.BuildNumber)"
+
+          # Check if running in Session 1 (Interactive Desktop) vs Session 0 (Service)
+          $proc = Get-Process -Id $PID
+          Write-Host "Process Session ID: $($proc.SessionId)"
+          if ($proc.SessionId -eq 0) {
+            Write-Warning "Runner is running in Session 0! DWM Mica and Taskbar APIs require Session 1 interactive desktop."
+          } else {
+            Write-Host "Runner is running in Session $($proc.SessionId) (Interactive Desktop Verified)."
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download Staged Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: radium-dist-windows-x64
+          path: dist
+
+      - name: Execute Clean Installation Smoke Suite on Desktop
+        shell: powershell
+        run: |
+          python tests/test_installer_smoke.py --dist-dir dist
+
+      - name: Execute Core Operations & Concurrency Suite on Desktop
+        shell: powershell
+        run: |
+          python tests/test_core_operations.py --output-json test-results/core_ops_desktop.json
+
+      - name: Execute Browser Extension Runtime Tests
+        shell: powershell
+        run: |
+          npm install
+          npx playwright install chromium
+          node tests/browser/test_extension_runtime.js
+
+      - name: Generate Desktop Verification Report
+        shell: powershell
+        run: |
+          python scripts/generate-compatibility-report.py `
+            --results-dir test-results `
+            --output-md DESKTOP_COMPATIBILITY_REPORT.md `
+            --output-json test-results/desktop_report.json `
+            --os-label "$($os.Caption) Build $($os.BuildNumber)"
+
+      - name: Upload Desktop Verification Evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-compatibility-evidence
+          path: |
+            DESKTOP_COMPATIBILITY_REPORT.md
+            test-results/

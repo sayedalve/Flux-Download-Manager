@@ -1,4 +1,4 @@
-# Flux Download Manager -- Requirement-to-Implementation Feature Matrix
+# Radium Download Manager -- Requirement-to-Implementation Feature Matrix
 
 **Document Status:** Verified Implementation Traceability Matrix (`v0.3.0` — Production Readiness Verified)  
 **Last Reviewed:** 2026-10-20  
@@ -9,7 +9,7 @@
 
 ## 1. Verification Classification Definitions
 
-- **`Verified by Execution`:** Compiled and verified in the automated test harness on Windows 11 host (`flux_unit_tests.exe`, `test_extension_detection.js`, `test_installer_smoke.py`, `test_extension_runtime.js`, `verify-release-security.ps1`, `run_all_integration_tests.py`, `run-benchmarks.py`).
+- **`Verified by Execution`:** Compiled and verified in the automated test harness on Windows 11 host (`radium_unit_tests.exe`, `test_extension_detection.js`, `test_installer_smoke.py`, `test_extension_runtime.js`, `verify-release-security.ps1`, `run_all_integration_tests.py`, `run-benchmarks.py`).
 - **`Verified by Static Inspection`:** Implemented in C++20/Win32 (`WinHTTP`, `CreateWindowExW`, `CreateJobObjectW`, Named Pipes, DPAPI) and verified for API/algorithmic correctness.
 - **`Unverified (OSS Signing Key Limitation)`:** Authenticode code signing credentials in open-source builds without private signing keys (verified as clean non-elevated unsigned release).
 
@@ -57,6 +57,7 @@
 | **FR-036** | Dual Portable Packaging (Full & Core) & Lowest-Privilege Installer (< 20 MB Full) | `scripts/package-release-zip.ps1`, `installer/flux.iss`, `scripts/build-minimal-ffmpeg.ps1` | Independent Release Architecture | `Verified by Execution` | `ISCC` compilation (19.28 MB Full, 2.89 MB Core), clean `/VERYSILENT` extraction test, `report-package-sizes.ps1` |
 | **FR-037** | Automated GitHub Actions Competitor Benchmark Lab (Flux vs aria2, IDM, FDM) | `.github/workflows/benchmark-comparison.yml`, `scripts/run-competitor-benchmarks.py`, `scripts/benchmark_server.py` | Independent Benchmarking Architecture | `Verified by Execution` | Workflow automation, localhost RFC 7233 throttled test server, SHA-256 verification, `benchmarks/LATEST_COMPARISON.md` |
 | **FR-038** | GitHub-Only Production Readiness & Clean Runner Smoke Testing | `.github/workflows/windows-release.yml`, `tests/test_installer_smoke.py`, `tests/browser/test_extension_runtime.js`, `scripts/verify-release-security.ps1` | Independent CI/CD Architecture | `Verified by Execution` | 4-job pipeline, clean runner install test, Playwright Chromium test, guarded release publishing |
+| **FR-039** | YouTube Selected Quality Integrity, ffprobe Media Verification & Progress State Tracking | `src/engine_stream/nm3u8dl_re_adapter.cpp`, `src/core/download_controller.cpp`, `src/ui/win32_main_window.cpp` | Independent Quality & Verification Architecture | `Verified by Execution` | Strict resolution matching without 360p fallback, ffprobe media validation, multi-phase states (`kVerifying`, `kFinalizing`), 100% progress integrity guard (`TestYouTubeQualitySelectionIntegrityAndVerification`) |
 
 ---
 

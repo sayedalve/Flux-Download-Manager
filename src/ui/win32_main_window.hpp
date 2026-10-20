@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Flux Download Manager — Windows 11 Cosmic Dark Desktop Interface, Hit-Testing,
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// Radium Download Manager — Windows 11 Cosmic Dark Desktop Interface, Hit-Testing,
 // Interaction Controller, Cosmic Starfield & Professional Settings Center
 #pragma once
 
@@ -50,7 +50,9 @@ enum class ToolbarActionId {
     kRemove,
     kClearHistory,
     kOpenFolder,
-    kSettings
+    kSettings,
+    kStartAll,
+    kPauseAll
 };
 
 enum class SettingsCategory {
@@ -170,6 +172,8 @@ struct ToolbarState {
     bool can_open_folder{false};
     bool can_clear_history{false};
     bool can_open_settings{true};
+    bool can_start_all{true};
+    bool can_pause_all{true};
 };
 
 struct CategoryCounts {
@@ -206,6 +210,21 @@ struct FormattedTaskRow {
     ColorRgba progress_fill_color;
     bool selected{false};
     bool checked{false};
+};
+
+enum class TaskbarProgressState {
+    kNoProgress = 0,
+    kIndeterminate,
+    kNormal,
+    kError,
+    kPaused
+};
+
+struct TaskbarProgressInfo {
+    TaskbarProgressState state{TaskbarProgressState::kNoProgress};
+    uint64_t completed_bytes{0};
+    uint64_t total_bytes{0};
+    double progress_fraction{0.0};
 };
 
 struct TaskDetailsViewModel {
@@ -275,7 +294,7 @@ struct BrowserIntegrationStatusView {
 };
 
 struct AboutDialogView {
-    std::string app_name{"Flux Download Manager"};
+    std::string app_name{"Radium Download Manager"};
     std::string version{FLUX_VERSION_STRING};
     std::string license{"GPL-3.0-or-later"};
     std::string target_platform{"Windows 11 x64 (Native Win32 + Direct2D/GDI)"};
@@ -349,11 +368,14 @@ public:
     bool IsCompactColumnsMode() const { return m_window_width < m_metrics.compact_width_threshold; }
     std::vector<std::string> GetVisibleColumns() const;
 
-    // Cosmic Background Starfield Controls
-    const CosmicStarfield& GetCosmicStarfield() const { return m_starfield; }
+    // Lightweight Native UI Animation System
+    UiAnimationState& GetAnimationState() { return m_anim; }
+    const UiAnimationState& GetAnimationState() const { return m_anim; }
     void SetWindowVisibility(bool visible, bool minimized = false);
-    void AdvanceCosmicBackground(uint64_t delta_ms);
-    std::vector<StarRenderInstance> BuildCosmicBackgroundStars() const;
+    void TriggerActionPulse(const std::string& task_id, const std::string& action);
+
+    // Windows Taskbar Download Progress Computation
+    TaskbarProgressInfo ComputeTaskbarProgress() const;
 
     WindowLayoutGeometry ComputeLayoutGeometry(size_t scroll_offset = 0) const;
     HitTestResult HitTestPoint(int x, int y, size_t scroll_offset = 0) const;
@@ -477,6 +499,8 @@ public:
     Result<void> TriggerToolbarAction(ToolbarActionId action_id);
     Result<void> TriggerRowPrimaryAction(const std::string& task_id);
 
+    Result<void> ActionStartAll();
+    Result<void> ActionPauseAll();
     Result<void> ActionStartSelected();
     Result<void> ActionPauseSelected();
     Result<void> ActionResumeSelected();
@@ -532,7 +556,7 @@ private:
     LayoutMetrics m_metrics;
     std::string m_theme_name{"coral_dark"};
     ThemePalette m_palette;
-    CosmicStarfield m_starfield;
+    UiAnimationState m_anim;
 
     SidebarCategory m_selected_category{SidebarCategory::kAllDownloads};
     SortColumn m_sort_column{SortColumn::kCreatedAt};

@@ -28,6 +28,7 @@ enum class TaskState {
     kDownloading,
     kMuxing,
     kVerifying,
+    kFinalizing,
     kPaused,
     kCompleted,
     kFailed,

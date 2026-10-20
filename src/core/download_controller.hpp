@@ -103,6 +103,7 @@ public:
 
     void PauseAllTasks();
     void ResumeAllTasks();
+    void StartAllTasks();
 
     // Refresh expired signed download URL while preserving existing partial bytes (FR-006)
     Result<void> RefreshTaskUrl(

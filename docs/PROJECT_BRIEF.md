@@ -1,7 +1,7 @@
-# Project Brief: OpenIDM
+# Project Brief: Radium Download Manager
 
 **Document Status:** Proposed Specification  
-**Last Reviewed:** 2026-10-16  
+**Last Reviewed:** 2026-10-20  
 **Related Documents:** [../README.md](../README.md), [PRODUCT_REQUIREMENTS.md](PRODUCT_REQUIREMENTS.md), [UPSTREAM_PROJECT_ANALYSIS.md](UPSTREAM_PROJECT_ANALYSIS.md), [ROADMAP.md](ROADMAP.md)
 
 ---
@@ -21,10 +21,10 @@ Existing open-source alternatives each solve only a fraction of this problem:
 
 ## 2. Project Vision
 
-Build **OpenIDM**: a cohesive, genuinely open-source (`GPL-3.0-or-later`), native Windows 11 download manager that unifies:
-- A fast, low-memory **Native C++20 / Win32 Desktop Application** (`openidm.exe`) with an in-process `WinHTTP` segmented download engine implementing Brisk's dynamic connection spawning and work-stealing byte-range algorithms.
+Build **Radium Download Manager** (short: **Radium**, abbr: **RDM**): a cohesive, genuinely open-source (`GPL-3.0-or-later`), native Windows 11 download manager that unifies:
+- A fast, low-memory **Native C++20 / Win32 Desktop Application** (`radium.exe`) with an in-process `WinHTTP` segmented download engine implementing Brisk's dynamic connection spawning and work-stealing byte-range algorithms.
 - A **Manifest V3 Browser Extension** combining Brisk's download interception and non-intrusive in-page video button with Cat Catch's multi-layered media and manifest discovery.
-- A secure **Native Messaging + ACL Named Pipe IPC** bridge (`openidm-nmh.exe`) that passes URLs, transient `Referer`/`Cookie` headers, and stream metadata from the browser to the desktop application without opening any network port or exposing command-line injection surfaces.
+- A secure **Native Messaging + ACL Named Pipe IPC** bridge (`radium-nmh.exe`) that passes URLs, transient `Referer`/`Cookie` headers, and stream metadata from the browser to the desktop application without opening any network port or exposing command-line injection surfaces.
 - First-class **Stream Download Pipeline** orchestration that delegates HLS, DASH, and MSS manifests to a sandboxed `N_m3u8DL-RE.exe` + `ffmpeg.exe` worker pipeline with full GUI track selection, live progress parsing, and clean cancellation via Windows Job Objects.
 
 ---

@@ -1,8 +1,8 @@
 # Developer Environment Setup Guide
 
-**Document Status:** Active Setup Guide (`v0.3.0`)  
-**Last Reviewed:** 2026-10-18  
-**Scope:** Preparing a clean Windows 11 `x64` workstation to build, debug, and test Flux Download Manager.  
+**Document Status:** Active Setup Guide (`v0.3.1`)  
+**Last Reviewed:** 2026-10-20  
+**Scope:** Preparing a clean Windows 11 `x64` workstation to build, debug, and test Radium Download Manager.  
 **Related Documents:** [WINDOWS_BUILD_AND_PACKAGING.md](WINDOWS_BUILD_AND_PACKAGING.md), [TECHNOLOGY_STACK.md](TECHNOLOGY_STACK.md), [TEST_STRATEGY.md](TEST_STRATEGY.md), [FEATURE_MATRIX.md](FEATURE_MATRIX.md)
 
 ---
@@ -20,7 +20,7 @@
 4. **Python** (`3.11+` with `cryptography`) -- required for running the end-to-end integration and benchmark test harnesses.
 
 ### 1.2 Optional Tools
-- **Inno Setup 6 (`6.3+`):** Required only when compiling the `.exe` installer (`installer/flux.iss`).
+- **Inno Setup 6 (`6.3+`):** Required only when compiling the `.exe` installer (`installer/radium.iss` / `installer/flux.iss`).
 - **Windows Sandbox:** Built-in Windows 11 Pro/Enterprise feature used for clean-machine installer and uninstaller testing.
 - **Sysinternals Process Explorer:** Recommended for verifying Job Object process isolation, Named Pipe DACLs, and memory usage.
 
@@ -43,7 +43,7 @@ Run `scripts/fetch-workers.ps1` to download and cryptographically verify the pin
 powershell -ExecutionPolicy Bypass -File scripts\fetch-workers.ps1
 ```
 
-### 2.2 Building `flux.exe`, `flux-nmh.exe`, and C++ Unit Tests
+### 2.2 Building `radium.exe`, `radium-nmh.exe`, and C++ Unit Tests
 From a **x64 Native Tools Command Prompt for VS 2022** (or PowerShell):
 
 ```powershell

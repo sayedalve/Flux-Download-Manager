@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Flux Download Manager -- Positive Native Messaging Integration Test
+// Radium Download Manager -- Positive Native Messaging Integration Test
 // Runs on a clean Windows machine after Inno Setup silent installation.
-// Loads the real unpacked Flux extension in Chromium, sends native messaging
-// RPC calls through Chrome to flux-nmh.exe, and verifies end-to-end IPC communication with flux.exe.
+// Loads the real unpacked Radium extension in Chromium, sends native messaging
+// RPC calls through Chrome to radium-nmh.exe, and verifies end-to-end IPC communication with radium.exe.
 
 const { chromium } = require("playwright");
 const fs = require("fs");
@@ -30,7 +30,7 @@ function parseArgs() {
 
 async function runPositiveNativeMessagingTest() {
   console.log("=================================================================");
-  console.log("  Flux Extension -- Native Messaging Positive Integration Test   ");
+  console.log("  Radium Extension -- Native Messaging Positive Integration Test ");
   console.log("=================================================================");
 
   const { installDir, port } = parseArgs();
@@ -50,7 +50,8 @@ async function runPositiveNativeMessagingTest() {
   if (manifestData.name !== "com.flux.downloadmanager") {
     throw new Error(`Manifest name mismatch: "${manifestData.name}"`);
   }
-  const expectedNmh = path.join(installDir, "flux-nmh.exe");
+  let expectedNmh = path.join(installDir, "radium-nmh.exe");
+  if (!fs.existsSync(expectedNmh)) { expectedNmh = path.join(installDir, "flux-nmh.exe"); }
   if (path.resolve(manifestData.path) !== path.resolve(expectedNmh)) {
     throw new Error(`Manifest path "${manifestData.path}" != expected "${expectedNmh}"`);
   }
@@ -62,15 +63,17 @@ async function runPositiveNativeMessagingTest() {
   console.log(`  [OK] Manifest allowed_origins verified: ${expectedOrigin}`);
 
   // 2. Start Flux Desktop in Daemon Mode
-  const fluxExe = path.join(installDir, "flux.exe");
+  let fluxExe = path.join(installDir, "radium.exe");
+  if (!fs.existsSync(fluxExe)) { fluxExe = path.join(installDir, "flux.exe"); }
   const testDb = path.join(installDir, "nm_test_state.db");
   const testDlDir = path.join(installDir, "nm_downloads");
   if (!fs.existsSync(testDlDir)) {
     fs.mkdirSync(testDlDir, { recursive: true });
   }
 
-  console.log(`  Starting Flux daemon: ${fluxExe}...`);
+  console.log(`  Starting Radium daemon: ${fluxExe}...`);
   const daemonEnv = Object.assign({}, process.env, {
+    RADIUM_ALLOW_LOOPBACK: "1",
     FLUX_ALLOW_LOOPBACK: "1",
     OPENIDM_ALLOW_LOOPBACK: "1"
   });
@@ -95,7 +98,7 @@ async function runPositiveNativeMessagingTest() {
   let context = null;
 
   try {
-    console.log("  Launching Chromium with unpacked Flux extension...");
+    console.log("  Launching Chromium with unpacked Radium extension...");
     context = await chromium.launchPersistentContext(tempProfile, {
       headless: false,
       args: [
@@ -183,20 +186,20 @@ async function runPositiveNativeMessagingTest() {
       throw new Error(`Download offer RPC returned error: ${JSON.stringify(offerResult)}`);
     }
     if (offerResult.result.accepted !== true) {
-      throw new Error(`Download offer was rejected by Flux: ${JSON.stringify(offerResult.result)}`);
+      throw new Error(`Download offer was rejected by Radium: ${JSON.stringify(offerResult.result)}`);
     }
     const createdTaskId = offerResult.result.taskId;
     console.log(`  -> PASS: download.offer accepted! Created Task ID: ${createdTaskId}`);
 
-    // 6. Verify Task Recorded in Flux Database
-    console.log("  [Step 3/3] Verifying task registration in Flux task queue...");
+    // 6. Verify Task Recorded in Radium Database
+    console.log("  [Step 3/3] Verifying task registration in Radium task queue...");
     const listRes = execSync(`"${fluxExe}" --db "${testDb}" --list`, { encoding: "utf-8" });
-    console.log(`  Flux Queue Output:\n${listRes.trim()}`);
+    console.log(`  Radium Queue Output:\n${listRes.trim()}`);
 
     if (!listRes.includes("nm_smoke_4mb.bin") && !listRes.includes(createdTaskId)) {
-      throw new Error(`Task ${createdTaskId} / nm_smoke_4mb.bin not found in Flux task list!`);
+      throw new Error(`Task ${createdTaskId} / nm_smoke_4mb.bin not found in Radium task list!`);
     }
-    console.log("  -> PASS: Task registration verified in Flux persistent SQLite queue");
+    console.log("  -> PASS: Task registration verified in Radium persistent SQLite queue");
 
     console.log("\n=================================================================");
     console.log("   POSITIVE BROWSER NATIVE MESSAGING INTEGRATION TEST PASSED!    ");
@@ -216,6 +219,9 @@ async function runPositiveNativeMessagingTest() {
         execSync(`taskkill /F /T /PID ${daemonProcess.pid}`, { stdio: "ignore" });
       } catch (_) {}
     }
+    try {
+      execSync(`taskkill /F /IM radium.exe`, { stdio: "ignore" });
+    } catch (_) {}
     try {
       execSync(`taskkill /F /IM flux.exe`, { stdio: "ignore" });
     } catch (_) {}

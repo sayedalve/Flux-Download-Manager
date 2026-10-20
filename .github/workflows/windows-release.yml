@@ -67,7 +67,7 @@ jobs:
             $ver = "0.3.1"
             if (Test-Path $cmakePath) {
               $cmakeContent = Get-Content $cmakePath -Raw
-              if ($cmakeContent -match 'project\s*\(\s*Flux\s+VERSION\s+(\d+\.\d+\.\d+)') {
+              if ($cmakeContent -match 'project\s*\(\s*(Radium|Flux)\s+VERSION\s+(\d+\.\d+\.\d+)') {
                 $ver = $Matches[1]
               }
             }
@@ -79,6 +79,7 @@ jobs:
           }
 
           Write-Host "Canonical release version: $ver"
+          "RADIUM_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "FLUX_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
@@ -128,7 +129,7 @@ jobs:
 
       - name: Build Windows Targets
         run: |
-          cmake --build build --config Release --target flux flux-nmh flux_unit_tests openidm openidm-nmh openidm_unit_tests N_m3u8DL-RE
+          cmake --build build --config Release --target radium radium-nmh radium_unit_tests openidm openidm-nmh openidm_unit_tests N_m3u8DL-RE
 
       - name: Provision Upstream Stream Workers (N_m3u8DL-RE & FFmpeg)
         shell: powershell
@@ -160,9 +161,9 @@ jobs:
         shell: powershell
         run: |
           $bins = @(
-            @{ Path = "build/Release/flux.exe"; ExpectedSubsystem = 2 },
-            @{ Path = "build/Release/flux-nmh.exe"; ExpectedSubsystem = 3 },
-            @{ Path = "build/Release/flux_unit_tests.exe"; ExpectedSubsystem = 3 }
+            @{ Path = "build/Release/radium.exe"; ExpectedSubsystem = 2 },
+            @{ Path = "build/Release/radium-nmh.exe"; ExpectedSubsystem = 3 },
+            @{ Path = "build/Release/radium_unit_tests.exe"; ExpectedSubsystem = 3 }
           )
           foreach ($b in $bins) {
             if (-not (Test-Path $b.Path)) {
@@ -192,7 +193,7 @@ jobs:
       - name: Run C++ Unit & Regression Tests
         shell: powershell
         run: |
-          .\build\Release\flux_unit_tests.exe
+          .\build\Release\radium_unit_tests.exe
 
       - name: Run Browser Extension Detection Tests
         shell: powershell
@@ -212,9 +213,9 @@ jobs:
       - name: Compile Inno Setup Installers (Full & Core)
         shell: powershell
         run: |
-          $issPath = "installer/flux.iss"
+          $issPath = "installer/radium.iss"
           if (-not (Test-Path $issPath)) {
-            $issPath = "installer/openidm.iss"
+            $issPath = "installer/flux.iss"
           }
           $isccExe = $null
           $isccCandidates = @(
@@ -257,13 +258,13 @@ jobs:
       - name: Upload Release Distribution Packages
         uses: actions/upload-artifact@v4
         with:
-          name: flux-dist-windows-x64
+          name: radium-dist-windows-x64
           path: dist/
 
       - name: Upload Build Evidence & Benchmark Reports
         uses: actions/upload-artifact@v4
         with:
-          name: flux-evidence-windows-x64
+          name: radium-evidence-windows-x64
           path: |
             benchmarks/latest_metrics.json
             docs/BENCHMARK_REPORT.md
@@ -304,7 +305,7 @@ jobs:
       - name: Download Staged Release Packages
         uses: actions/download-artifact@v4
         with:
-          name: flux-dist-windows-x64
+          name: radium-dist-windows-x64
           path: dist
 
       - name: Verify Downloaded Installer Assets
@@ -312,9 +313,9 @@ jobs:
         run: |
           Write-Host "=== Staged Release Packages for Clean Install Test ==="
           Get-ChildItem -Recurse -Path dist
-          $installer = Get-ChildItem -Recurse -Path dist -Filter "Flux-Setup-x64-*.exe" | Select-Object -First 1
+          $installer = Get-ChildItem -Recurse -Path dist -Filter "Radium-Setup-x64-*.exe" | Select-Object -First 1
           if (-not $installer) {
-            throw "Downloaded release artifacts do not contain a valid Flux setup installer!"
+            throw "Downloaded release artifacts do not contain a valid Radium setup installer!"
           }
           Write-Host "Found installer: $($installer.FullName)"
 
@@ -329,8 +330,8 @@ jobs:
         with:
           name: installation-smoke-logs
           path: |
-            ${{ runner.temp }}/flux_install_*.log
-            ${{ runner.temp }}/flux_smoke_*/**
+            ${{ runner.temp }}/radium_install_*.log
+            ${{ runner.temp }}/radium_smoke_*/**
           if-no-files-found: ignore
 
   # =========================================================================
@@ -397,19 +398,19 @@ jobs:
       - name: Download Staged Release Packages
         uses: actions/download-artifact@v4
         with:
-          name: flux-dist-windows-x64
+          name: radium-dist-windows-x64
           path: dist
 
       - name: Verify Release Assets Before Publishing
         shell: powershell
         run: |
           $ver = "${{ needs.build-and-package.outputs.version }}"
-          Write-Host "Publishing Verified GitHub Release for Flux v$ver..."
+          Write-Host "Publishing Verified GitHub Release for Radium v$ver..."
           Get-ChildItem -Recurse -Path dist
           $expectedPatterns = @(
-            "Flux-Setup-x64-*.exe",
-            "Flux-v*-Windows-x64-Full.zip",
-            "Flux-v*-Windows-x64-Core.zip",
+            "Radium-Setup-x64-*.exe",
+            "Radium-v*-Windows-x64-Full.zip",
+            "Radium-v*-Windows-x64-Core.zip",
             "SHA256SUMS.txt"
           )
           foreach ($p in $expectedPatterns) {
@@ -424,16 +425,16 @@ jobs:
       - name: Publish Official GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Flux Download Manager ${{ github.ref_name }}"
+          name: "Radium Download Manager ${{ github.ref_name }}"
           draft: false
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/**/Flux-Setup-x64-*.exe
-            dist/**/Flux-v*-Windows-x64-Full.zip
-            dist/**/Flux-v*-Windows-x64-Core.zip
-            dist/**/Flux-v*-Windows-x64.zip
+            dist/**/Radium-Setup-x64-*.exe
+            dist/**/Radium-v*-Windows-x64-Full.zip
+            dist/**/Radium-v*-Windows-x64-Core.zip
+            dist/**/Radium-v*-Windows-x64.zip
             dist/**/SHA256SUMS.txt
             LICENSE
             THIRD_PARTY_NOTICES.md

@@ -1,10 +1,10 @@
 <p align="center">
   <picture>
-    <img alt="Flux Download Manager" src="https://img.shields.io/badge/FLUX-DOWNLOAD%20MANAGER-e03131?style=for-the-badge&logo=fastapi&logoColor=white" height="42">
+    <img alt="Radium Download Manager" src="https://img.shields.io/badge/RADIUM-DOWNLOAD%20MANAGER-e03131?style=for-the-badge&logo=fastapi&logoColor=white" height="42">
   </picture>
 </p>
 
-<h1 align="center">Flux Download Manager</h1>
+<h1 align="center">Radium Download Manager</h1>
 
 <p align="center">
   <b>High-performance, open-source download manager and adaptive stream pipeline for Windows 11.</b><br>
@@ -38,15 +38,15 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/readme/flux-main-window.png" alt="Flux Download Manager running on Windows 11: Dark cosmic matte canvas, multi-column sorting, progress bars, status indicators, and search capsule" width="100%">
+  <img src="docs/images/readme/flux-main-window.png" alt="Radium Download Manager running on Windows 11: Dark matte canvas, multi-column sorting, progress bars, status indicators, and search capsule" width="100%">
   <br>
-  <sub>The Flux main application window: Deep Charcoal dark theme, live progress bars, speed and size indicators, and filter controls.<br>
+  <sub>The Radium main application window: Deep Charcoal dark theme, live progress bars, speed and size indicators, and filter controls.<br>
   Rendered natively on Windows 11 with Direct2D hardware acceleration.</sub>
 </p>
 
 > [!NOTE]
-> **Flux Download Manager is built for speed, transparency, and user privacy.**
-> Rather than relying on heavy Electron runtimes or commercial subscription wrappers, Flux is engineered from the ground up in native ISO C++20. It combines the multi-connection segment scheduler of [Brisk](https://github.com/BrisklyDev/brisk), the media sniffing intelligence of [Cat Catch](https://github.com/xifangczy/cat-catch), and sandboxed out-of-process stream muxing with [N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) and [FFmpeg](https://ffmpeg.org/).
+> **Radium Download Manager is built for speed, transparency, and user privacy.**
+> Rather than relying on heavy Electron runtimes or commercial subscription wrappers, Radium is engineered from the ground up in native ISO C++20. It combines the multi-connection segment scheduler of [Brisk](https://github.com/BrisklyDev/brisk), the media sniffing intelligence of [Cat Catch](https://github.com/xifangczy/cat-catch), and sandboxed out-of-process stream muxing with [N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) and [FFmpeg](https://ffmpeg.org/).
 
 <br>
 
@@ -75,12 +75,12 @@
 
 ## Features
 
-Every screenshot below is captured directly from the actual running Flux desktop application on Windows 11.
+Every screenshot below is captured directly from the actual running Radium desktop application on Windows 11.
 
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/images/readme/flux-main-window.png" alt="Flux Download Manager table view with file icons, download progress bars, and column sorting" width="100%">
+      <img src="docs/images/readme/flux-main-window.png" alt="Radium Download Manager table view with file icons, download progress bars, and column sorting" width="100%">
       <br>
       <sub>Multi-column download queue with file-type vector icons, real-time progress bars, and speed statistics.</sub>
       <h3>Dynamic Segment Scheduling & Queue Control</h3>
@@ -98,11 +98,11 @@ Every screenshot below is captured directly from the actual running Flux desktop
       </ul>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/images/readme/flux-new-download-dialog.png" alt="Flux New Download prompt dialog with URL, filename, destination folder, and immediate or scheduled download options" width="100%">
+      <img src="docs/images/readme/flux-new-download-dialog.png" alt="Radium New Download prompt dialog with URL, filename, destination folder, and immediate or scheduled download options" width="100%">
       <br>
       <sub>Native Add / Intercept Download dialog with auto-detected filenames, save paths, stream quality, and scheduling.</sub>
       <h3>Smart Interception & Pre-Flight Validation</h3>
-      Whether triggered from a browser link click, media detection banner, or clipboard URL detection, Flux presents an instant, responsive Win32 dialog before starting.
+      Whether triggered from a browser link click, media detection banner, or clipboard URL detection, Radium presents an instant, responsive Win32 dialog before starting.
       <br><br>
       The dialog verifies available free disk space on the target volume, extracts suggested filenames from RFC 5987 / RFC 6266 headers, and offers quality stream presets for adaptive media.
       <br><br>
@@ -118,11 +118,11 @@ Every screenshot below is captured directly from the actual running Flux desktop
   </tr>
   <tr>
     <td colspan="2" valign="top">
-      <img src="docs/images/readme/flux-settings-center.png" alt="Flux Settings & Configuration Center modal showing dark UI categories and runtime toggles" width="100%">
+      <img src="docs/images/readme/flux-settings-center.png" alt="Radium Settings & Configuration Center modal showing dark UI categories and runtime toggles" width="100%">
       <br>
       <sub>In-app Settings & Configuration Center: Modular categories, connection limits, and instant SQLite persistence.</sub>
       <h3>Deep Configuration & Native System Integration</h3>
-      Full control over network behavior, buffer allocations, storage rules, and application presentation. Configure maximum simultaneous tasks, default segment counts, custom user-agent headers, and tray minimization.
+      Full control over network behavior, buffer allocations, storage rules, and application presentation. Features 1-click dropdowns for concurrent task limits (presets including 6 tasks), connection scaling, retry intervals, segment stall timeouts, custom headers, and tray minimization.
       <br><br>
       Settings are validated in real time and committed directly to an embedded SQLite database. No bloated registry keys, no telemetry toggles, and zero external network calls.
     </td>
@@ -151,7 +151,7 @@ Every screenshot below is captured directly from the actual running Flux desktop
     </td>
     <td width="33%" valign="top">
       <h4>🖥️ Windows 11 Native UX</h4>
-      Native Win32 desktop application with Direct2D hardware acceleration. Deep Charcoal palette, custom smooth progress bars, and subtle starfield ambient motion.<br><br>
+      Native Win32 desktop application with Direct2D hardware acceleration. Deep Charcoal palette, lightweight native Windows 11 animations (smooth hover/press transitions, interpolated progress bars, dialog fades, action pulses), and live Windows Taskbar progress (<code>ITaskbarList3</code>).<br><br>
       Hierarchical category routing (Priority: User Explicit &gt; Domain Site Rules &gt; Custom Extension Mappings &gt; Configured Category Folders &gt; Subfolders &gt; Default Dir).<br><br>
       Task stop times, queue start/stop scheduling loop, and safe post-queue completion power actions (System Sleep / Shutdown via native Windows APIs).<br><br>
       Per-Monitor DPI v2 scaling, virtualized task table, middle-ellipsis filename truncation, and search-as-you-type.
@@ -161,8 +161,8 @@ Every screenshot below is captured directly from the actual running Flux desktop
     <td width="33%" valign="top">
       <h4>🧩 Browser Integration</h4>
       Manifest V3 browser extension for Chromium (Google Chrome, Brave, Microsoft Edge) and Mozilla Firefox.<br><br>
-      Stateless Native Messaging Host (<code>flux-nmh.exe</code>) bridges standard input/output to the desktop app over a per-user ACL-restricted Named Pipe (<code>\\.\pipe\Flux_IPC_&lt;SID&gt;</code>).<br><br>
-      In-page "Download with Flux" video overlay button rendered inside a closed Shadow DOM (<code>mode: "closed"</code>) to prevent CSS leaks.
+      Stateless Native Messaging Host (<code>radium-nmh.exe</code>) bridges standard input/output to the desktop app over a per-user ACL-restricted Named Pipe (<code>\\.\pipe\Flux_IPC_&lt;SID&gt;</code>).<br><br>
+      In-page "Download with Radium" video overlay button rendered inside a closed Shadow DOM (<code>mode: "closed"</code>) to prevent CSS leaks.
     </td>
     <td width="33%" valign="top">
       <h4>🤖 Automation &amp; Tools</h4>
@@ -183,7 +183,7 @@ Every screenshot below is captured directly from the actual running Flux desktop
 
 ## High-Performance Download Engine
 
-Flux implements an in-process, IOCP-driven segmented download engine inspired by [Brisk](https://github.com/BrisklyDev/brisk).
+Radium implements an in-process, IOCP-driven segmented download engine inspired by [Brisk](https://github.com/BrisklyDev/brisk).
 
 ```
                       ┌────────────────────────────────────────┐
@@ -202,7 +202,7 @@ Flux implements an in-process, IOCP-driven segmented download engine inspired by
 2. **Initial Spawning:** Spawns an initial connection. If the server supports byte ranges, additional segment workers are spawned up to the configured connection limit (default 8, maximum 32).
 3. **Range Work-Stealing:** Fast workers do not sit idle. When a worker completes its assigned range, it inspects active peers, locates the largest remaining unread byte block, splits it in half, and claims the upper half.
 4. **Rejection Rollback:** If a remote server rejects a sub-range request (e.g., returning HTTP 200 instead of 206, or HTTP 416), the stolen range is rolled back to the original worker without data corruption.
-5. **Atomic Commit:** Download segments write into an isolated `*.flux.part` file using pre-allocated disk storage (`SetFileValidData` / sparse files). When all segments reach 100%, the file is atomically renamed to its final target path.
+5. **Atomic Commit:** Download segments write into an isolated `*.radium.part` file using pre-allocated disk storage (`SetFileValidData` / sparse files). When all segments reach 100%, the file is atomically renamed to its final target path.
 
 See [`docs/DOWNLOAD_ENGINE_DESIGN.md`](docs/DOWNLOAD_ENGINE_DESIGN.md) for full algorithmic details.
 
@@ -210,11 +210,11 @@ See [`docs/DOWNLOAD_ENGINE_DESIGN.md`](docs/DOWNLOAD_ENGINE_DESIGN.md) for full 
 
 ## Adaptive Stream Pipeline
 
-For media hosted via HLS or DASH manifests, Flux integrates out-of-process worker execution with [N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) and [FFmpeg](https://ffmpeg.org/):
+For media hosted via HLS or DASH manifests, Radium integrates out-of-process worker execution with [N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) and [FFmpeg](https://ffmpeg.org/):
 
-- **Job Object Sandboxing:** Workers run inside an isolated Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), ensuring that child processes terminate immediately if Flux closes.
-- **Zero Command-Line Credential Leaks:** Authentication cookies, custom request headers, and user tokens are never passed on the process command line. Instead, Flux writes headers to a temporary response file (`@job.rsp`) in a per-user ACL-restricted temporary directory (`%LOCALAPPDATA%\Flux\tmp\<task_id>\`) and deletes it upon completion.
-- **Track Probing & Remuxing:** Flux probes stream manifests to identify video, audio, and subtitle streams. Once segment downloads complete, FFmpeg remuxes the media into standard MP4 or MKV containers with magic-byte verification.
+- **Job Object Sandboxing:** Workers run inside an isolated Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), ensuring that child processes terminate immediately if Radium closes.
+- **Zero Command-Line Credential Leaks:** Authentication cookies, custom request headers, and user tokens are never passed on the process command line. Instead, Radium writes headers to a temporary response file (`@job.rsp`) in a per-user ACL-restricted temporary directory (`%LOCALAPPDATA%\Radium\tmp\<task_id>\`) and deletes it upon completion.
+- **Track Probing & Remuxing:** Radium probes stream manifests to identify video, audio, and subtitle streams. Once segment downloads complete, FFmpeg remuxes the media into standard MP4 or MKV containers with magic-byte verification.
 
 See [`docs/STREAM_DOWNLOAD_PIPELINE.md`](docs/STREAM_DOWNLOAD_PIPELINE.md) for the complete pipeline specification.
 
@@ -222,7 +222,7 @@ See [`docs/STREAM_DOWNLOAD_PIPELINE.md`](docs/STREAM_DOWNLOAD_PIPELINE.md) for t
 
 ## Browser Integration
 
-Flux includes a clean, lightweight Manifest V3 extension compatible with Google Chrome, Brave, Microsoft Edge, and Mozilla Firefox.
+Radium includes a clean, lightweight Manifest V3 extension compatible with Google Chrome, Brave, Microsoft Edge, and Mozilla Firefox.
 
 ```
 ┌─────────────────────────────────┐
@@ -232,11 +232,11 @@ Flux includes a clean, lightweight Manifest V3 extension compatible with Google 
 └───────────────┬─────────────────┘
                 │ Native Messaging stdio (32-bit length-prefixed JSON)
 ┌───────────────▼─────────────────┐
-│ flux-nmh.exe (Native Host)      │
+│ radium-nmh.exe (Native Host)      │
 └───────────────┬─────────────────┘
                 │ Named Pipe: \\.\pipe\Flux_IPC_<UserSID>
 ┌───────────────▼─────────────────┐
-│ Flux.exe (Desktop Engine)       │
+│ Radium.exe (Desktop Engine)       │
 │  ├── Win32 Direct2D Desktop UI  │
 │  ├── In-Process Segment Engine  │
 │  └── SQLite 3 State Store (WAL) │
@@ -244,9 +244,9 @@ Flux includes a clean, lightweight Manifest V3 extension compatible with Google 
 ```
 
 - **Dual-Origin Security:** The Chromium native host manifest authorizes both store IDs and development keys, preventing native messaging connection failures when running unpacked.
-- **Zero Localhost Exposure:** Unlike legacy download managers that open an unauthenticated HTTP port on `localhost` (exposing users to drive-by website requests), Flux communicates exclusively via Native Messaging bridged to a local, user-ACL-restricted Windows Named Pipe.
+- **Zero Localhost Exposure:** Unlike legacy download managers that open an unauthenticated HTTP port on `localhost` (exposing users to drive-by website requests), Radium communicates exclusively via Native Messaging bridged to a local, user-ACL-restricted Windows Named Pipe.
 - **Media Detection:** Sniffs `.mp4`, `.webm`, `.m3u8`, and `.mpd` URLs from network requests, deduplicates master and variant playlists, and ignores individual `.ts` and `.m4s` segment requests to prevent UI flooding.
-- **Reliable Fallback & Gesture Safety:** Link clicks retain user gesture context without destructive cancellation. In Chromium browsers, `onDeterminingFilename` holds the save prompt while querying the desktop; if Flux is offline or rejects, the browser download automatically resumes with zero data loss. Client-side generated files (`blob:`, `data:` URLs, ChatGPT exports) are safely preserved for native browser handling without DOM monkey-patching.
+- **Reliable Fallback & Gesture Safety:** Link clicks retain user gesture context without destructive cancellation. In Chromium browsers, `onDeterminingFilename` holds the save prompt while querying the desktop; if Radium is offline or rejects, the browser download automatically resumes with zero data loss. Client-side generated files (`blob:`, `data:` URLs, ChatGPT exports) are safely preserved for native browser handling without DOM monkey-patching.
 
 See [`docs/BROWSER_EXTENSION.md`](docs/BROWSER_EXTENSION.md) and [`docs/NATIVE_MESSAGING_AND_IPC.md`](docs/NATIVE_MESSAGING_AND_IPC.md).
 
@@ -254,23 +254,23 @@ See [`docs/BROWSER_EXTENSION.md`](docs/BROWSER_EXTENSION.md) and [`docs/NATIVE_M
 
 ## Built for Automation
 
-Flux is designed for both interactive desktop use and scriptable automation. Every major capability is accessible from the command line and over the JSON-RPC named-pipe channel.
+Radium is designed for both interactive desktop use and scriptable automation. Every major capability is accessible from the command line and over the JSON-RPC named-pipe channel.
 
 ```sh
-# Start Flux in the background as a headless daemon
-Flux.exe --daemon
+# Start Radium in the background as a headless daemon
+Radium.exe --daemon
 
 # Probe an adaptive media stream and output JSON stream metadata
-Flux.exe --probe "https://example.com/live/playlist.m3u8"
+Radium.exe --probe "https://example.com/live/playlist.m3u8"
 
 # Print the current download queue to stdout
-Flux.exe --list
+Radium.exe --list
 
 # Export current desktop UI state and layout geometry as text
-Flux.exe --gui-snapshot
+Radium.exe --gui-snapshot
 
 # Override default database or worker paths
-Flux.exe --db "%APPDATA%\Flux\custom_state.db" --worker-binary "tools\N_m3u8DL-RE.exe"
+Radium.exe --db "%APPDATA%\Radium\custom_state.db" --worker-binary "tools\N_m3u8DL-RE.exe"
 ```
 
 Over the local IPC pipe (`\\.\pipe\Flux_IPC_<SID>`), scripts and agents can send standard JSON-RPC 2.0 messages:
@@ -293,14 +293,14 @@ Over the local IPC pipe (`\\.\pipe\Flux_IPC_<SID>`), scripts and agents can send
 
 ## Under the Hood
 
-Flux is architected as an engine-first application with clean layer boundaries:
+Radium is architected as an engine-first application with clean layer boundaries:
 
 ```mermaid
 flowchart TD
-    Ext["Browser Extension<br><i>(Manifest V3)</i>"] -->|stdio| NMH["Native Messaging Host<br><code>flux-nmh.exe</code>"]
+    Ext["Browser Extension<br><i>(Manifest V3)</i>"] -->|stdio| NMH["Native Messaging Host<br><code>radium-nmh.exe</code>"]
     NMH -->|Named Pipe<br><code>Flux_IPC_&lt;SID&gt;</code>| IPC["IPC Server<br><i>(JSON-RPC 2.0)</i>"]
     
-    CLI["Command-Line Interface<br><code>Flux.exe --cli</code>"] --> Ctrl
+    CLI["Command-Line Interface<br><code>Radium.exe --cli</code>"] --> Ctrl
     IPC --> Ctrl["Download Controller<br><i>(Core Orchestrator)</i>"]
     
     Ctrl <--> DB[("SQLite 3 Store<br><i>WAL Mode</i>")]
@@ -319,8 +319,8 @@ flowchart TD
 ### Core Design Principles
 - **Native Efficiency:** Compiled with MSVC 19.38+ (`/std:c++20`, `/permissive-`, `/W4`, `/WX`). Unicode everywhere via `std::wstring` at Win32 boundaries and UTF-8 internally.
 - **Process Isolation:** Network streaming and FFmpeg muxing are isolated out-of-process inside Windows Job Objects. A crashed stream decoder will never crash the desktop application or corrupt existing downloads.
-- **Zero Hallucination State:** Download progress, byte offsets, and active segment partitions are tracked in real-time in SQLite. If power is lost, Flux recovers segment maps upon restart.
-- **Single-Instance Win32 IPC:** Launching `Flux.exe` while an existing instance is active automatically restores and brings the existing window to the foreground.
+- **Zero Hallucination State:** Download progress, byte offsets, and active segment partitions are tracked in real-time in SQLite. If power is lost, Radium recovers segment maps upon restart.
+- **Single-Instance Win32 IPC:** Launching `Radium.exe` while an existing instance is active automatically restores and brings the existing window to the foreground.
 
 See [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md) and [`docs/DATA_MODEL_AND_STORAGE.md`](docs/DATA_MODEL_AND_STORAGE.md).
 
@@ -335,21 +335,21 @@ See [`docs/SYSTEM_ARCHITECTURE.md`](docs/SYSTEM_ARCHITECTURE.md) and [`docs/DATA
 
 ### Downloads
 
-The latest release packages are available on the [GitHub Releases page](https://github.com/sayedalve/Flux-Download-Manager/releases):
+The latest release packages are available on the [GitHub Releases page](https://github.com/sayedalve/Radium-Download-Manager/releases):
 
 | Package | Format | Description |
 |---|---|---|
-| **Flux Installer (x64)** | `Flux-Setup-x64-0.3.0.exe` | Recommended Inno Setup installer; per-user non-elevated install, desktop shortcuts, and automatic browser registration |
-| **Flux Portable Full (x64)** | `Flux-v0.3.0-Windows-x64-Full.zip` | Complete portable offline release; includes N_m3u8DL-RE and FFmpeg stream extraction workers |
-| **Flux Portable Core (x64)** | `Flux-v0.3.0-Windows-x64-Core.zip` | Lightweight portable release; high-speed segmented HTTP/HTTPS engine (< 2 MB) |
-| **Browser Extension** | `extension/` or `flux-extension-v0.3.0.zip` | Manifest V3 extension for Google Chrome, Brave, Microsoft Edge & Mozilla Firefox |
+| **Radium Installer (x64)** | `Radium-Setup-x64-0.3.0.exe` | Recommended Inno Setup installer; per-user non-elevated install, desktop shortcuts, and automatic browser registration |
+| **Radium Portable Full (x64)** | `Radium-v0.3.0-Windows-x64-Full.zip` | Complete portable offline release; includes N_m3u8DL-RE and FFmpeg stream extraction workers |
+| **Radium Portable Core (x64)** | `Radium-v0.3.0-Windows-x64-Core.zip` | Lightweight portable release; high-speed segmented HTTP/HTTPS engine (< 2 MB) |
+| **Browser Extension** | `extension/` or `radium-extension-v0.3.0.zip` | Manifest V3 extension for Google Chrome, Brave, Microsoft Edge & Mozilla Firefox |
 
 ### Browser Extension Setup
 
 1. **Chromium (Google Chrome, Brave, Microsoft Edge):**
    - Open your browser's extensions page (`chrome://extensions` or `brave://extensions`).
    - Enable **Developer mode** in the top-right corner.
-   - Click **Load unpacked** and select the `extension/` directory (or extract `flux-extension-v0.3.0.zip`).
+   - Click **Load unpacked** and select the `extension/` directory (or extract `radium-extension-v0.3.0.zip`).
    - Run the included PowerShell script to register the Native Messaging Host in the Windows Registry:
      ```powershell
      powershell -ExecutionPolicy Bypass -File scripts\register-native-messaging.ps1
@@ -361,18 +361,18 @@ The latest release packages are available on the [GitHub Releases page](https://
 
 ### Building from Source
 
-To compile Flux from source, you need **Visual Studio 2022** (Desktop development with C++) and **CMake 3.25+**:
+To compile Radium from source, you need **Visual Studio 2022** (Desktop development with C++) and **CMake 3.25+**:
 
 ```cmd
-git clone https://github.com/sayedalve/Flux-Download-Manager.git
-cd Flux-Download-Manager
+git clone https://github.com/sayedalve/Radium-Download-Manager.git
+cd Radium-Download-Manager
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
 The resulting binaries will be placed in `build\Release\` (or `build\win-x64\Release\`):
-- `flux.exe`: Main desktop application and core engine.
-- `flux-nmh.exe`: Stateless Native Messaging Host.
+- `radium.exe`: Main desktop application and core engine.
+- `radium-nmh.exe`: Stateless Native Messaging Host.
 
 See [`docs/DEVELOPMENT_SETUP.md`](docs/DEVELOPMENT_SETUP.md) and [`docs/WINDOWS_BUILD_AND_PACKAGING.md`](docs/WINDOWS_BUILD_AND_PACKAGING.md).
 
@@ -397,9 +397,9 @@ See [`docs/DEVELOPMENT_SETUP.md`](docs/DEVELOPMENT_SETUP.md) and [`docs/WINDOWS_
 ## Known Limitations
 
 > [!IMPORTANT]
-> **Honest Engineering Boundaries:** Flux aims to be transparent about its scope and supported mechanisms.
+> **Honest Engineering Boundaries:** Radium aims to be transparent about its scope and supported mechanisms.
 >
-> 1. **Strict DRM Non-Circumvention:** Flux does **not** and will **never** decrypt Widevine, PlayReady, or FairPlay DRM-protected media. If a manifest signals `#EXT-X-KEY:METHOD=SAMPLE-AES-CTR` or DASH `cenc:pssh` encryption, Flux immediately aborts with error code `ERR_STREAM_DRM_PROTECTED`.
+> 1. **Strict DRM Non-Circumvention:** Radium does **not** and will **never** decrypt Widevine, PlayReady, or FairPlay DRM-protected media. If a manifest signals `#EXT-X-KEY:METHOD=SAMPLE-AES-CTR` or DASH `cenc:pssh` encryption, Radium immediately aborts with error code `ERR_STREAM_DRM_PROTECTED`.
 > 2. **In-Memory Browser Blobs:** Ephemeral `blob:` and `data:` URLs generated strictly inside browser JavaScript memory cannot be accessed by external OS processes. The browser extension routes these downloads through the browser's native API rather than passing unreachable URLs to the native downloader.
 > 3. **Platform Scope:** The desktop UI is designed natively for Windows 11 and Windows 10 (Win32 + Direct2D). A POSIX build configuration exists for compiling the core headless engine and CLI tests under Linux, but the graphical interface is Windows-native.
 
@@ -409,12 +409,12 @@ See [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md) and [`docs/SECURITY
 
 ## License and Credits
 
-Flux Download Manager is open-source software licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
+Radium Download Manager is open-source software licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](LICENSE)).
 
 ### Upstream Attributions & Third-Party Components
-Flux builds upon proven algorithms and utilities from the open-source community:
+Radium builds upon proven algorithms and utilities from the open-source community:
 
-| Component | Upstream Project | License | Purpose in Flux |
+| Component | Upstream Project | License | Purpose in Radium |
 |---|---|---|---|
 | **Segment Scheduler** | [Brisk](https://github.com/BrisklyDev/brisk) | GPL-3.0 | Dynamic connection scaling, work-stealing range reuse, and rollback logic |
 | **Media Detection** | [Cat Catch](https://github.com/xifangczy/cat-catch) | GPL-3.0 | Stream sniffing, HLS/DASH manifest detection, and video button overlay |
@@ -429,6 +429,6 @@ See [`LICENSE_REVIEW.md`](LICENSE_REVIEW.md) and [`THIRD_PARTY_NOTICES.md`](THIR
 <br>
 
 <p align="center">
-  <sub>Flux Download Manager · High-performance, native open-source download management for Windows.</sub><br>
+  <sub>Radium Download Manager · High-performance, native open-source download management for Windows.</sub><br>
   <sub>Built with C++20, Win32, and Direct2D. Free and open source forever.</sub>
 </p>

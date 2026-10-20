@@ -2,17 +2,17 @@
 
 **Document Status:** Proposed Architecture  
 **Last Reviewed:** 2026-10-16  
-**Scope:** End-to-end logical and physical architecture, process boundaries, component responsibilities, and module interfaces for OpenIDM.  
+**Scope:** End-to-end logical and physical architecture, process boundaries, component responsibilities, and module interfaces for Radium Download Manager.  
 **Related Documents:** [TECHNOLOGY_STACK.md](TECHNOLOGY_STACK.md), [DOWNLOAD_ENGINE_DESIGN.md](DOWNLOAD_ENGINE_DESIGN.md), [STREAM_DOWNLOAD_PIPELINE.md](STREAM_DOWNLOAD_PIPELINE.md), [BROWSER_EXTENSION.md](BROWSER_EXTENSION.md), [NATIVE_MESSAGING_AND_IPC.md](NATIVE_MESSAGING_AND_IPC.md), [adr/0001-desktop-framework.md](adr/0001-desktop-framework.md), [adr/0002-process-and-module-boundaries.md](adr/0002-process-and-module-boundaries.md)
 
 ---
 
 ## 1. High-Level System Overview
 
-OpenIDM is structured as a multi-process Windows system divided across four trust and execution zones:
+Radium Download Manager is structured as a multi-process Windows system divided across four trust and execution zones:
 1. **Browser Zone (Untrusted Web Content & Semi-Trusted Extension Context):** Content scripts (`ISOLATED` world Shadow DOM overlay) and the extension background Service Worker (`webRequest` passive observer and download interceptor).
-2. **IPC Bridge Zone (`openidm-nmh.exe`):** A tiny, stateless Native Messaging Host executable spawned by the browser that translates length-prefixed `stdio` JSON messages into Named Pipe RPC calls to the desktop process.
-3. **Core Desktop Process (`openidm.exe`):** The native C++20 Win32 application hosting the UI, the central `DownloadController`, the in-process `HttpDownloadEngine` (`WinHTTP` + IOCP), the `StreamEngineAdapter`, and the embedded SQLite (`WAL`) + DPAPI persistence layer.
+2. **IPC Bridge Zone (`radium-nmh.exe`):** A tiny, stateless Native Messaging Host executable spawned by the browser that translates length-prefixed `stdio` JSON messages into Named Pipe RPC calls to the desktop process.
+3. **Core Desktop Process (`radium.exe`):** The native C++20 Win32 application hosting the UI, the central `DownloadController`, the in-process `HttpDownloadEngine` (`WinHTTP` + IOCP), the `StreamEngineAdapter`, and the embedded SQLite (`WAL`) + DPAPI persistence layer.
 4. **Sandboxed Media Worker Zone (`N_m3u8DL-RE.exe` & `ffmpeg.exe`):** Out-of-process command-line workers spawned inside a Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) to probe, download, decrypt (standard HLS AES-128 only), and mux adaptive streaming media.
 
 ---

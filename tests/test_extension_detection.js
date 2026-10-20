@@ -192,7 +192,7 @@ async function runTests() {
   fullscreenHandler();
   assert(obsResult.activeOverlays[0].hostEl.style.cssText.includes("left:1752px"), "Overlay repositioned on fullscreenchange");
 
-  assert.strictEqual(obsResult.activeOverlays[0].btn.textContent, "Download with Flux", "Overlay button text rebranded to Flux");
+  assert.strictEqual(obsResult.activeOverlays[0].btn.textContent, "Download with Radium", "Overlay button text rebranded to Radium");
   obsResult.activeOverlays[0].btn._clickHandler({ stopPropagation: () => {}, preventDefault: () => {} });
   assert.ok(clickedVideoPayload, "Overlay button click triggers real download handoff");
   assert.strictEqual(clickedVideoPayload.isMseBlob, true);
@@ -252,9 +252,9 @@ async function runTests() {
   const offlineHtml = renderDetectedMediaList(combinedList, { desktopConnected: false });
   assert(offlineHtml.includes('data-state="disconnected"') && offlineHtml.includes("Browser Download"));
   const onlineHtml = renderDetectedMediaList(combinedList, { desktopConnected: true });
-  assert(onlineHtml.includes("Download in Flux"), "Popup renders 'Download in Flux' action label");
+  assert(onlineHtml.includes("Download in Radium"), "Popup renders 'Download in Radium' action label");
 
-  // Direct MP4 handoff falls back to browser download when Flux is offline
+  // Direct MP4 handoff falls back to browser download when Radium is offline
   let browserFallbackTriggeredUrl = null;
   const mp4Candidate = G.cacheData.get(10)[0];
   const fbDirect = await submitMediaCandidateToOpenIDM(
@@ -803,7 +803,52 @@ async function runTests() {
   assert.strictEqual(eligArtifact.eligible, true, "Scenario 23: ChatGPT artifact blob is eligible for interception");
   assert.strictEqual(eligArtifact.isBlob, true, "Scenario 23: Identified as web blob artifact");
   assert.strictEqual(eligArtifact.ext, "py", "Scenario 23: Correctly identified py extension");
-  console.log("  [Scenario 23/23] ChatGPT web blob artifact click correlation & eligibility -> PASS");
+  console.log("  [Scenario 23/24] ChatGPT web blob artifact click correlation & eligibility -> PASS");
+
+  // Scenario 24: ChatGPT Web Blob with detached dynamic anchor click hook & full correlation flow
+  let interceptedSyntheticClick = null;
+  const mockAnchorWin = {
+    location: { href: "https://chatgpt.com/c/chat-1234", hostname: "chatgpt.com" },
+    document: { title: "ChatGPT" }
+  };
+  function FakeAnchor() {
+    this.href = "";
+    this.download = "";
+  }
+  FakeAnchor.prototype.click = function () { this.clicked = true; };
+  mockAnchorWin.HTMLAnchorElement = FakeAnchor;
+  installDeepSearchHooks(mockAnchorWin, "nonce-anchor", (msg) => {
+    if (msg.action === "fluxAnchorClicked") interceptedSyntheticClick = msg;
+  });
+  const detachedAnchor = new FakeAnchor();
+  detachedAnchor.href = "blob:https://chatgpt.com/artifact-99aa88bb";
+  detachedAnchor.download = "analysis_results.csv";
+  detachedAnchor.click();
+  assert.strictEqual(detachedAnchor.clicked, true, "Underlying click() called");
+  assert.strictEqual(Boolean(interceptedSyntheticClick), true, "fluxAnchorClicked message emitted by HTMLAnchorElement.prototype.click hook");
+  assert.strictEqual(interceptedSyntheticClick.url, "blob:https://chatgpt.com/artifact-99aa88bb");
+  assert.strictEqual(interceptedSyntheticClick.download, "analysis_results.csv");
+
+  // Verify that when fluxAnchorClicked is relayed to background as linkClicked, correlation & eligibility succeed
+  handleRuntimeMessage({
+    action: "linkClicked",
+    url: interceptedSyntheticClick.url,
+    filename: interceptedSyntheticClick.download,
+    hasDownloadAttr: Boolean(interceptedSyntheticClick.download),
+    mechanism: "JS_TRIGGERED_DYNAMIC_ANCHOR"
+  }, { tab: { id: 105 } }, () => {});
+
+  const eligSynthetic = isDownloadEligible({
+    url: interceptedSyntheticClick.url,
+    filename: interceptedSyntheticClick.download,
+    wasExplicitLinkClick: true,
+    hasDownloadAttr: true,
+    phase: "determine"
+  });
+  assert.strictEqual(eligSynthetic.eligible, true, "Scenario 24: ChatGPT blob correlated via dynamic anchor click is eligible");
+  assert.strictEqual(eligSynthetic.isBlob, true, "Scenario 24: Correctly classified as isBlob");
+  assert.strictEqual(eligSynthetic.ext, "csv", "Scenario 24: Correctly identified csv extension");
+  console.log("  [Scenario 24/24] ChatGPT synthetic detached anchor click hook & eligibility -> PASS");
 
 
   console.log("\n[15/15] Testing YouTube Cipher Quality Extraction with Sizes & Floating Overlay Attachment...");
@@ -934,7 +979,7 @@ async function runTests() {
   console.log("  -> PASS");
 
   console.log("\n=======================================================");
-  console.log("Browser Extension Suite: 15/15 suites (24/24 edge scenarios) PASSED.");
+  console.log("Browser Extension Suite: 15/15 suites (25/25 edge scenarios) PASSED.");
   console.log("=======================================================");
   process.exit(0);
 }

@@ -1,6 +1,6 @@
 # Flux Download Manager -- Requirement-to-Test Verification Matrix
 
-**Document Status:** Active Verification Matrix (`v0.3.0` — `55 / 55` C++20 Suites, `15 / 15` Extension Suites, `8 / 8` Smoke Suites, `7 / 7` Playwright Suites, and `5 / 5` Security Checks Executed & Passed on Windows 11 Host)  
+**Document Status:** Active Verification Matrix (`v0.3.0` — `62 / 62` C++20 Suites, `15 / 15` Extension Suites, `8 / 8` Smoke Suites, `7 / 7` Playwright Suites, and `5 / 5` Security Checks Executed & Passed on Windows 11 Host)  
 **Last Reviewed:** 2026-10-20  
 **Scope:** Maps every functional (`FR-001`–`FR-035`), non-functional (`NFR-001`–`NFR-016`), and bug-regression (`BUG-001`–`BUG-035`, `FDM-001`–`FDM-029`) test to its exact command, verification category, and outcome.  
 **Related Documents:** [RELEASE_READINESS_REPORT.md](RELEASE_READINESS_REPORT.md), [BUG_FIX_LOG.md](BUG_FIX_LOG.md), [FEATURE_MATRIX.md](FEATURE_MATRIX.md), [TEST_STRATEGY.md](TEST_STRATEGY.md)
@@ -9,7 +9,7 @@
 
 ## 1. Automated Verification Summary (`Windows 11 x64 Host`)
 
-### 1.1 C++20 Unit & Regression Test Suites (`tests/cpp/unit_tests.cpp` — `55 / 55` Suites: Verified by Execution)
+### 1.1 C++20 Unit & Regression Test Suites (`tests/cpp/unit_tests.cpp` — `62 / 62` Suites: Verified by Execution)
 
 | Suite # | Suite Function (`tests/cpp/unit_tests.cpp`) | Mapped Requirements & Bug IDs | Verification Category | Result |
 | :--- | :--- | :--- | :--- | :--- |
@@ -21,7 +21,7 @@
 | **`[6/53]`** | `TestStreamMetaJsonAndDrmRejection` | `FR-019`, `NFR-015`, `SEC-DRM-01`, `THREAT-004`, `BUG-024` | `Verified by Execution` | **PASSED** |
 | **`[7/53]`** | `TestControllerLifecycleAndDeletedTaskRace` | `FR-023`, `BUG-007`, `BUG-010`, `BUG-034` (Webpage Guard) | `Verified by Execution` | **PASSED** |
 | **`[8/53]`** | `TestDesktopUiDesignSystemAndHighDpiLayout` | `FR-011`, `NFR-011`, `BUG-001` | `Verified by Execution` | **PASSED** |
-| **`[9/53]`** | `TestCosmicStarfieldPerformanceAndFallback` | `FR-011`, `NFR-011` | `Verified by Execution` | **PASSED** |
+| **`[9/53]`** | `TestNativeAnimationsAndTaskbarProgress` | `FR-011`, `NFR-011` | `Verified by Execution` | **PASSED** |
 | **`[10/53]`** | `TestProfessionalSettingsCenterValidationAndPersistence` | `FR-011`, `FR-025` | `Verified by Execution` | **PASSED** |
 | **`[11/53]`** | `TestDesktopUiInteractionsFilteringSortingAndRedaction` | `FR-011`, `FR-023`–`FR-025`, `NFR-009`, `BUG-001`, `BUG-010`, `BUG-011` | `Verified by Execution` | **PASSED** |
 | **`[12/53]`** | `TestKeyboardNavigationAndShortcuts` | `FR-011`, `NFR-011`, `BUG-001` | `Verified by Execution` | **PASSED** |
@@ -72,12 +72,13 @@
 | **`[57/61]`** | `TestPimpbunnyStreamRoutingAndYouTubeNetscapeCookieFile` | `FR-019`, `FR-022` (Pimpbunny Stream URL Extraction & Netscape Cookie File Construction) | `Verified by Execution` | **PASSED** |
 | **`[58/61]`** | `TestRemediationPhaseRegressionSuites` | `FR-001`–`FR-026` (Remediation Phase Regression Suites & Memory Integrity) | `Verified by Execution` | **PASSED** |
 | **`[59/61]`** | `TestAuditBehaviorImprovements` | `FR-001`, `FR-004`, `FR-020` (Audit-derived Behavior Improvements: Range Satisfaction, Stream Part Files, Crash Recovery) | `Verified by Execution` | **PASSED** |
-| **`[60/61]`** | `TestQualitySelectionSizeAndColumnDocking` | `FR-011`, `FR-019` (Video Quality Selection, Size Reporting & Table Column Right-Docking Anchors) | `Verified by Execution` | **PASSED** |
-| **`[61/61]`** | `TestNewDownloadDialogSubmissionAndTaskCreation` | `FR-011`, `FR-019`, `FR-025` (New Download Dialog Submission, Quality Options Propagation & State Reset) | `Verified by Execution` | **PASSED** |
+| **`[60/62]`** | `TestQualitySelectionSizeAndColumnDocking` | `FR-011`, `FR-019` (Video Quality Selection, Size Reporting & Table Column Right-Docking Anchors) | `Verified by Execution` | **PASSED** |
+| **`[61/62]`** | `TestNewDownloadDialogSubmissionAndTaskCreation` | `FR-011`, `FR-019`, `FR-025` (New Download Dialog Submission, Quality Options Propagation & State Reset) | `Verified by Execution` | **PASSED** |
+| **`[62/62]`** | `TestYouTubeQualitySelectionIntegrityAndVerification` | `FR-019`, `FR-020`, `FR-021` (YouTube 1080p Format Selection Integrity, ffprobe Media Verification, Progress Capping & Indeterminate Status) | `Verified by Execution` | **PASSED** |
 
 ---
 
-### 1.2 Browser Extension & Media Detection Test Suites (`node tests/test_extension_detection.js` — `15 / 15 PASSED (23 / 23 Edge Scenarios)`)
+### 1.2 Browser Extension & Media Detection Test Suites (`node tests/test_extension_detection.js` — `15 / 15 PASSED (24 / 24 Edge Scenarios)`)
 
 | Suite # | Suite Description (`tests/test_extension_detection.js`) | Mapped Requirements & Bug IDs | Verification Category | Result |
 | :--- | :--- | :--- | :--- | :--- |

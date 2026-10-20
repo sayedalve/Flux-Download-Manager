@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Adapted from xifangczy/cat-catch (js/content-script.js) & Brisk Browser Extension.
 // Observes <video> elements (including dynamic insertion & resize), positions the closed Shadow DOM
-// "Download with Flux" cosmic pill badge, provides real-time status/error feedback on click, intercepts link clicks
+// "Download with Radium" cosmic pill badge, provides real-time status/error feedback on click, intercepts link clicks
 // (with Alt-key bypass), captures media events, and relays page MAIN world messages.
 
 function positionOverlayHost(video, hostEl) {
@@ -172,7 +172,7 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
     const src = extractVideoElementSrc(video);
     // On video sites like YouTube, video elements initially stream via MSE blob: or delayed src.
     // Never skip attaching the overlay button to an active video player just because src is pending.
-    if (!src && !isYouTube && (rect.width < 320 || rect.height < 180)) {
+    if (!src && !isYouTube && (!video.readyState || video.readyState === 0 || rect.width < 320 || rect.height < 180)) {
       continue;
     }
     const isBlob = Boolean(src && src.startsWith("blob:"));
@@ -203,10 +203,12 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
       }
     }
 
+    video.dataset.radiumOverlayAttached = "true";
     video.dataset.fluxOverlayAttached = "true";
     video.dataset.openidmOverlayAttached = "true";
 
     const hostEl = doc.createElement("div");
+    hostEl.setAttribute("data-radium-shadow-host", "true");
     hostEl.setAttribute("data-flux-shadow-host", "true");
     hostEl.setAttribute("data-openidm-shadow-host", "true");
     if (isDrm) hostEl.setAttribute("data-flux-drm", "true");
@@ -279,7 +281,7 @@ function scanAndAttachVideoOverlays(doc, onDownloadClick, minWidth = 240, minHei
 
     const btn = doc.createElement("button");
     btn.type = "button";
-    btn.textContent = isDrm ? "DRM Protected (Unsupported)" : `Download with Flux${qSuffix}`;
+    btn.textContent = isDrm ? "DRM Protected (Unsupported)" : `Download with Radium${qSuffix}`;
     btn.disabled = isDrm;
     const baseBtnStyle =
       "background:#2D2E32;color:#F2F2F3;border:1px solid #414248;border-radius:7px;" +
@@ -496,7 +498,7 @@ function handleLinkClick(ev) {
       mechanism = "JS_TRIGGERED_DYNAMIC_ANCHOR";
     }
 
-    console.log(`[Flux Trace] [CLICK_SEEN] [${correlationId}]`, {
+    console.log(`[Radium Trace] [CLICK_SEEN] [${correlationId}]`, {
       url: isBlobOrData ? (href.slice(0, 48) + "...") : href,
       target: anchor.tagName,
       button: ev.button,
@@ -507,7 +509,7 @@ function handleLinkClick(ev) {
 
     if (ev.altKey) {
       // IDM Alt-key bypass behavior: user explicitly requested browser-native download
-      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: isBlobOrData ? (href.slice(0, 48) + "...") : href, reason: "ALT_KEY_BYPASS", mechanism });
+      console.log(`[Radium Trace] [CLICK_IGNORED] [${correlationId}]`, { url: isBlobOrData ? (href.slice(0, 48) + "...") : href, reason: "ALT_KEY_BYPASS", mechanism });
       safeSendRuntimeMessage({ action: "bypassNextDownload", url: href, correlationId });
       return;
     }
@@ -516,7 +518,7 @@ function handleLinkClick(ev) {
     // Native browser download pipeline handles client-side files reliably without disruption.
     const isWebBlob = href.startsWith("blob:http://") || href.startsWith("blob:https://");
     if (isBlobOrData && !isWebBlob) {
-      console.log(`[Flux Trace] [BROWSER_BLOB_OR_DATA] [${correlationId}]`, {
+      console.log(`[Radium Trace] [BROWSER_BLOB_OR_DATA] [${correlationId}]`, {
         url: href.slice(0, 48) + "...",
         filename: anchor.download || "",
         mechanism
@@ -525,12 +527,12 @@ function handleLinkClick(ev) {
     }
 
     if (ev.button !== undefined && ev.button !== 0) {
-      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "UNSUPPORTED_BUTTON", mechanism });
+      console.log(`[Radium Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "UNSUPPORTED_BUTTON", mechanism });
       return;
     }
 
     if (href.startsWith("javascript:") || href.startsWith("#") || href.startsWith("mailto:")) {
-      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "NON_HTTP_PROTOCOL", mechanism });
+      console.log(`[Radium Trace] [CLICK_IGNORED] [${correlationId}]`, { url: href, reason: "NON_HTTP_PROTOCOL", mechanism });
       return;
     }
 
@@ -549,7 +551,9 @@ function handleLinkClick(ev) {
       "py", "json", "txt", "md", "sql", "yaml", "xml", "html", "js", "ts", "cpp", "c", "rs", "go", "java"
     ]);
 
-    let isEligible = isWebBlob || hasDownloadAttr || interceptExts.has(ext) ||
+    const isAiFileUrl = href.includes("oaiusercontent.com") || href.includes("rscd=") ||
+                        href.includes("response-content-disposition=") || href.includes("/backend-api/files/");
+    let isEligible = isWebBlob || hasDownloadAttr || isAiFileUrl || interceptExts.has(ext) ||
       pathname.includes("/redirect") || pathname.includes("/download") || pathname.includes("/dl/");
 
     if (!isEligible && typeof URL !== "undefined") {
@@ -575,7 +579,7 @@ function handleLinkClick(ev) {
     }
 
     if (!isEligible) {
-      console.log(`[Flux Trace] [CLICK_IGNORED] [${correlationId}]`, {
+      console.log(`[Radium Trace] [CLICK_IGNORED] [${correlationId}]`, {
         url: href,
         reason: "NOT_DOWNLOAD_ELIGIBLE",
         mechanism: "UNKNOWN_FILENAME_DYNAMIC",
@@ -594,11 +598,13 @@ function handleLinkClick(ev) {
     // Record link click metadata for correlation in chrome.downloads.onDeterminingFilename.
     // User gesture is strictly preserved: we NEVER call ev.preventDefault() or ev.stopPropagation()
     // on natural anchor clicks, ensuring browser cookies, session state, and redirects proceed uninterrupted.
+    const targetFilename = anchor.download ||
+      (typeof extractFilenameFromUrlQuery === "function" ? extractFilenameFromUrlQuery(href) : "") || "";
     safeSendRuntimeMessage({
       action: "linkClicked",
       url: href,
-      filename: anchor.download || "",
-      hasDownloadAttr,
+      filename: targetFilename,
+      hasDownloadAttr: Boolean(anchor.download || isAiFileUrl || hasDownloadAttr),
       referrer,
       pageTitle,
       bypass: false,
@@ -607,14 +613,14 @@ function handleLinkClick(ev) {
       correlationId
     });
 
-    console.log(`[Flux Trace] [CLICK_OBSERVED] [${correlationId}]`, {
+    console.log(`[Radium Trace] [CLICK_OBSERVED] [${correlationId}]`, {
       url: href,
       filename: anchor.download || "",
       hasDownloadAttr,
       mechanism,
       note: "Click observed and correlated with chrome.downloads.onDeterminingFilename; user gesture preserved"
     });
-    console.log(`[Flux Trace] [CLICK_RECORDED] [${correlationId}]`, {
+    console.log(`[Radium Trace] [CLICK_RECORDED] [${correlationId}]`, {
       url: href,
       filename: anchor.download || "",
       hasDownloadAttr,
@@ -622,7 +628,7 @@ function handleLinkClick(ev) {
       note: "Click intent correlated with chrome.downloads.onDeterminingFilename; user gesture preserved"
     });
   } catch (err) {
-    console.error("[Flux] Error in handleLinkClick:", err);
+    console.error("[Radium] Error in handleLinkClick:", err);
   }
 }
 
@@ -732,12 +738,14 @@ function initContentScript() {
               ? (ev.data.qualities.find(q => !q.isAudioOnly) || ev.data.qualities[0])
               : null;
             if (topQ) {
+              ev.data.qualityId = topQ.id || topQ.resolution || "1080p";
+              ev.data.resolution = topQ.resolution || "1080p";
               const qText = topQ.resolution || topQ.label || "";
               const szStr = topQ.size > 0 ? ` (~${(topQ.size / 1048576).toFixed(0)} MB)` : "";
               hosts.forEach(h => {
                 if (h.__fluxBtn && !h.getAttribute("data-flux-status") && !h.getAttribute("data-flux-drm")) {
                   h.__fluxBtn.textContent = `Download [${qText}${szStr}]`;
-                  h.__fluxBtn.title = `Download ${qText} with Flux Download Manager`;
+                  h.__fluxBtn.title = `Download ${qText} with Radium Download Manager`;
                 }
               });
             }
@@ -767,6 +775,10 @@ function initContentScript() {
           cachedManifestBody: ev.data.cachedManifestBody || "",
           tabUrl: location.href,
           pageTitle: ev.data.pageTitle || document.title || "video"
+        }, (resp) => {
+          if (resp && resp.candidate && resp.candidate.candidateId && typeof window !== "undefined" && window.__fluxLastCandidate) {
+            window.__fluxLastCandidate.candidateId = resp.candidate.candidateId;
+          }
         });
       } else if (ev.data.action === "catCatchAddKey") {
         safeSendRuntimeMessage({
@@ -779,6 +791,39 @@ function initContentScript() {
           action: "playerError",
           reason: ev.data.reason,
           url: ev.data.url || location.href
+        });
+      } else if (ev.data.action === "radiumDirectBlobDownload") {
+        safeSendRuntimeMessage({
+          action: "interceptBlobDownload",
+          url: ev.data.url,
+          filename: ev.data.filename,
+          mimeType: ev.data.mimeType,
+          size: ev.data.size,
+          dataBase64: ev.data.dataBase64,
+          correlationId: ev.data.correlationId,
+          pageTitle: ev.data.pageTitle || (typeof document !== "undefined" ? document.title : ""),
+          pageUrl: ev.data.pageUrl || (typeof location !== "undefined" ? location.href : "")
+        }, (resp) => {
+          if (!resp || !resp.success) {
+            window.postMessage({
+              action: "radiumBlobFallback",
+              url: ev.data.url,
+              filename: ev.data.filename
+            }, "*");
+          }
+        });
+      } else if (ev.data.action === "fluxAnchorClicked" || ev.data.action === "radiumAnchorClicked") {
+        safeSendRuntimeMessage({
+          action: "linkClicked",
+          url: ev.data.url,
+          filename: ev.data.download || "",
+          hasDownloadAttr: Boolean(ev.data.download),
+          referrer: ev.data.pageUrl || location.href,
+          pageTitle: ev.data.pageTitle || document.title,
+          bypass: false,
+          mechanism: "JS_TRIGGERED_DYNAMIC_ANCHOR",
+          isFrame: (window !== window.top),
+          correlationId: "anchor-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8)
         });
       }
     } catch (_) {}
@@ -870,7 +915,7 @@ function initContentScript() {
     const baseStyle = mediaMeta.baseBtnStyle || "";
 
     if (btn) {
-      btn.textContent = "Starting in Flux...";
+      btn.textContent = "Starting in Radium...";
       btn.disabled = true;
     }
     if (hostEl && hostEl.setAttribute) {
@@ -878,14 +923,23 @@ function initContentScript() {
     }
 
     const lastCand = (typeof window !== "undefined" && window.__fluxLastCandidate) ? window.__fluxLastCandidate : null;
+    let topQ = null;
+    if (lastCand && Array.isArray(lastCand.qualities)) {
+      topQ = lastCand.qualities.find(q => !q.isAudioOnly) || lastCand.qualities[0];
+    }
     const candidateId = mediaMeta.candidateId || (lastCand && lastCand.candidateId) || "";
-    const qualityId = mediaMeta.qualityId || (lastCand && lastCand.qualityId) || "";
-    const videoSrc = mediaMeta.videoSrc || (lastCand ? (lastCand.videoUrl || lastCand.url) : "") || "";
+    const qualityId = mediaMeta.qualityId || (topQ && (topQ.id || topQ.resolution)) || (lastCand && lastCand.qualityId) || "";
+    const resolution = mediaMeta.resolution || (topQ && topQ.resolution) || (lastCand && lastCand.resolution) || "";
+    const videoFilter = mediaMeta.videoFilter || (topQ && (topQ.videoFilter || topQ.resolution)) || "best";
+    const videoSrc = mediaMeta.videoSrc || (lastCand ? (lastCand.url || lastCand.videoUrl) : "") || "";
 
     safeSendRuntimeMessage({
       action: "downloadMedia",
       candidateId,
       qualityId,
+      resolution,
+      videoFilter,
+      selectedQuality: topQ,
       url: videoSrc,
       isMseBlob: Boolean(mediaMeta.isMseBlob),
       pageTitle: mediaMeta.pageTitle || document.title || "video",
@@ -912,8 +966,8 @@ function initContentScript() {
         const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
         const taskId = (resp.result && resp.result.taskId) ? resp.result.taskId : "";
         if (btn) {
-          btn.textContent = isFallback ? "Browser Download" : "Queued in Flux \u2713";
-          btn.title = taskId ? ("Task ID: " + taskId) : "Queued in Flux";
+          btn.textContent = isFallback ? "Browser Download" : "Queued in Radium \u2713";
+          btn.title = taskId ? ("Task ID: " + taskId) : "Queued in Radium";
           btn.disabled = false;
           if (btn.style) btn.style.cssText = baseStyle + "border-color:#22C55E;color:#86EFAC;";
         }
@@ -925,7 +979,7 @@ function initContentScript() {
 
       if (btn && typeof setTimeout === "function") {
         setTimeout(() => {
-          btn.textContent = "Download with Flux";
+          btn.textContent = "Download with Radium";
           if (btn.style && baseStyle) btn.style.cssText = baseStyle;
         }, 3500);
       }

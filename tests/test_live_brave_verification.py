@@ -11,7 +11,11 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NMH_PATH = os.path.join(ROOT, "build", "win-x64", "Release", "flux-nmh.exe")
+NMH_PATH = os.path.join(ROOT, "build", "win-x64", "Release", "radium-nmh.exe")
+if not os.path.isfile(NMH_PATH):
+    NMH_PATH = os.path.join(ROOT, "dist", "radium-nmh.exe")
+if not os.path.isfile(NMH_PATH):
+    NMH_PATH = os.path.join(ROOT, "build", "win-x64", "Release", "flux-nmh.exe")
 if not os.path.isfile(NMH_PATH):
     NMH_PATH = os.path.join(ROOT, "dist", "flux-nmh.exe")
 
@@ -30,7 +34,9 @@ def send_nmh_rpc(req):
     return json.loads(data)
 
 def get_flux_log_tail(lines=30):
-    log_path = os.path.expandvars(r"%LOCALAPPDATA%\Flux Download Manager\flux.log")
+    log_path = os.path.expandvars(r"%LOCALAPPDATA%\Radium Download Manager\radium.log")
+    if not os.path.isfile(log_path):
+        log_path = os.path.expandvars(r"%LOCALAPPDATA%\Flux Download Manager\flux.log")
     if os.path.isfile(log_path):
         with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
             all_lines = f.readlines()
@@ -38,7 +44,7 @@ def get_flux_log_tail(lines=30):
     return ""
 
 print("=================================================================")
-print("  Flux Live Desktop Dialog & NMH Verification Suite (12 Cases)   ")
+print("  Radium Live Desktop Dialog & NMH Verification Suite (12 Cases) ")
 print("=================================================================")
 
 # Case 1: Direct .zip download

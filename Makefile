@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager — Reproducible C++20 Build System
+# Radium Download Manager — Reproducible C++20 Build System
 
 CXX       := g++
 CXXFLAGS  := -std=c++20 -O2 -Wall -Wextra -Werror -pthread -Isrc
@@ -34,21 +34,23 @@ CORE_OBJS := $(patsubst src/%.cpp,$(BUILD_DIR)/obj/%.o,$(CORE_SRCS))
 
 .PHONY: all clean test
 
-all: $(BUILD_DIR)/openidm $(BUILD_DIR)/openidm-nmh $(BUILD_DIR)/N_m3u8DL-RE $(BUILD_DIR)/openidm_unit_tests
+all: $(BUILD_DIR)/radium $(BUILD_DIR)/radium-nmh $(BUILD_DIR)/N_m3u8DL-RE $(BUILD_DIR)/radium_unit_tests
 
 $(BUILD_DIR)/obj/%.o: src/%.cpp $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(BUILD_DIR)/openidm: $(CORE_OBJS) src/app/main.cpp $(HEADERS)
+$(BUILD_DIR)/radium: $(CORE_OBJS) src/app/main.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(CORE_OBJS) src/app/main.cpp -o $@ $(LDFLAGS)
 	strip -s $@
 	cp -f $@ $(BUILD_DIR)/flux
+	cp -f $@ $(BUILD_DIR)/openidm
 
-$(BUILD_DIR)/openidm-nmh: $(CORE_OBJS) src/nmh/main.cpp $(HEADERS)
+$(BUILD_DIR)/radium-nmh: $(CORE_OBJS) src/nmh/main.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(CORE_OBJS) src/nmh/main.cpp -o $@ $(LDFLAGS)
 	strip -s $@
 	cp -f $@ $(BUILD_DIR)/flux-nmh
+	cp -f $@ $(BUILD_DIR)/openidm-nmh
 
 $(BUILD_DIR)/N_m3u8DL-RE: $(BUILD_DIR)/obj/common/crypto_utils.o $(BUILD_DIR)/obj/brisk_engine/http_client.o src/worker_stream/nm3u8dl_re_worker.cpp $(HEADERS)
 	@mkdir -p tools
@@ -57,12 +59,13 @@ $(BUILD_DIR)/N_m3u8DL-RE: $(BUILD_DIR)/obj/common/crypto_utils.o $(BUILD_DIR)/ob
 	cp -f $@ tools/N_m3u8DL-RE
 	chmod +x tools/N_m3u8DL-RE
 
-$(BUILD_DIR)/openidm_unit_tests: $(CORE_OBJS) tests/cpp/unit_tests.cpp $(HEADERS)
+$(BUILD_DIR)/radium_unit_tests: $(CORE_OBJS) tests/cpp/unit_tests.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(CORE_OBJS) tests/cpp/unit_tests.cpp -o $@ $(LDFLAGS)
 	cp -f $@ $(BUILD_DIR)/flux_unit_tests
+	cp -f $@ $(BUILD_DIR)/openidm_unit_tests
 
 test: all
-	./$(BUILD_DIR)/flux_unit_tests
+	./$(BUILD_DIR)/radium_unit_tests
 	node tests/test_extension_detection.js
 	python3 tests/run_all_integration_tests.py
 	python3 tests/test_repair_pipeline_e2e.py

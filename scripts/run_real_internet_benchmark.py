@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Real Internet Download Benchmark Harness: Flux Download Manager vs Internet Download Manager (IDM)
+Real Internet Download Benchmark Harness: Radium Download Manager vs Internet Download Manager (IDM)
 Target URL: https://fsn1-speed.hetzner.com/100MB.bin
 Target Host: Hetzner Online GmbH (Falkenstein, Germany / fsn1-speed.hetzner.com at 78.46.170.2)
 Target Size: 104,857,600 bytes (100 MiB)
@@ -30,7 +30,16 @@ EXPECTED_SHA256 = "d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22
 
 WORK_DIR = ROOT_DIR / "benchmarks" / "real_internet_work"
 IDM_BIN = Path(r"C:\Program Files (x86)\Internet Download Manager\IDMan.exe")
-FLUX_BIN = ROOT_DIR / "build" / "win-x64" / "Release" / "flux.exe"
+RADIUM_BIN_CANDIDATES = [
+    ROOT_DIR / "dist" / "Radium.exe",
+    ROOT_DIR / "dist" / "radium.exe",
+    ROOT_DIR / "build" / "win-x64" / "Release" / "radium.exe",
+    ROOT_DIR / "build" / "Release" / "radium.exe",
+    ROOT_DIR / "build" / "win-x64" / "Release" / "flux.exe",
+    ROOT_DIR / "dist" / "Flux.exe",
+]
+RADIUM_BIN = next((p for p in RADIUM_BIN_CANDIDATES if p.exists()), RADIUM_BIN_CANDIDATES[0])
+FLUX_BIN = RADIUM_BIN
 IDM_DWNL_ROOT = Path(os.environ.get("APPDATA", "")) / "IDM" / "DwnlData" / os.environ.get("USERNAME", "sayed")
 
 

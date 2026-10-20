@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Upstream Stream Worker Provisioning Script (v0.3.0)
+# Radium Download Manager -- Upstream Stream Worker Provisioning Script (v0.3.1)
 # Downloads and cryptographically verifies upstream stream workers:
 #  1. nilaoda/N_m3u8DL-RE (v0.3.0-beta win-x64) - MIT License
 #  2. FFmpeg (win-x64 essentials / GPL-3.0)
@@ -41,7 +41,7 @@ if (-not $TargetDir) {
 $TargetDir = [System.IO.Path]::GetFullPath($TargetDir)
 
 New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
-$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("flux_workers_" + [Guid]::NewGuid().ToString("N"))
+$TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("radium_workers_" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 
 function Assert-Pe64Executable([string]$FilePath) {

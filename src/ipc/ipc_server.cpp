@@ -638,6 +638,7 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
         if (state == TaskState::kDownloading || state == TaskState::kProbing ||
             state == TaskState::kMuxing || state == TaskState::kVerifying ||
+            state == TaskState::kFinalizing ||
             state == TaskState::kCompleted || state == TaskState::kFailed) {
             // User clicked Download in New Download dialog! Task has started
             res["decision"] = "ACCEPTED";
@@ -1146,6 +1147,18 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
         }
 
         t.stream_options.video_filter = params["videoFilter"].as_string("best");
+        if ((t.stream_options.video_filter.empty() || t.stream_options.video_filter == "best") && params.contains("resolution")) {
+            std::string res_str = params["resolution"].as_string();
+            if (!res_str.empty() && res_str != "Auto" && res_str != "best") {
+                t.stream_options.video_filter = res_str;
+            }
+        }
+        if ((t.stream_options.video_filter.empty() || t.stream_options.video_filter == "best") && params.contains("qualityId")) {
+            std::string qid_str = params["qualityId"].as_string();
+            if (!qid_str.empty() && qid_str != "Auto" && qid_str != "best") {
+                t.stream_options.video_filter = qid_str;
+            }
+        }
         t.stream_options.audio_filter = params["audioFilter"].as_string("best");
         t.stream_options.subtitle_filter = params["subtitleFilter"].as_string("all");
         t.stream_options.output_format = out_fmt;
@@ -1206,8 +1219,8 @@ std::string IpcServer::HandleJsonRpcMessage(std::string_view raw_json) {
             res["ok"] = true;
             return MakeRpcResult(id, std::move(res)).dump();
         }
-        if (action == "resumeAll") {
-            m_controller.ResumeAllTasks();
+        if (action == "resumeAll" || action == "startAll") {
+            m_controller.StartAllTasks();
             json::Value res = json::Object{};
             res["ok"] = true;
             return MakeRpcResult(id, std::move(res)).dump();

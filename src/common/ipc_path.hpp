@@ -42,6 +42,9 @@ inline std::string GetCurrentUserSidString() {
 #endif
 
 inline std::string GetDefaultIpcSocketPath() {
+    if (const char* env_radium = std::getenv("RADIUM_IPC_SOCKET")) {
+        if (env_radium[0] != '\0') return env_radium;
+    }
     if (const char* env_flux = std::getenv("FLUX_IPC_SOCKET")) {
         if (env_flux[0] != '\0') return env_flux;
     }

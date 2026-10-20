@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/init.js) for Flux Browser Integration.
+// Adapted from xifangczy/cat-catch (js/init.js) for Radium Browser Integration.
 // Preserves Cat Catch's G configuration model, Ext/Type/Regex rule tables, header cache,
 // per-tab/per-URL click correlation tables, redirect chains, and diagnostic pipeline log ring buffer.
 

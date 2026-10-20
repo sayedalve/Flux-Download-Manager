@@ -18,9 +18,9 @@
 #endif
 
 #ifndef FLUX_PRODUCT_NAME
-#define FLUX_PRODUCT_NAME "Flux Download Manager"
+#define FLUX_PRODUCT_NAME "Radium Download Manager"
 #endif
 
 #ifndef FLUX_FULL_VERSION_STRING
-#define FLUX_FULL_VERSION_STRING "Flux Download Manager v0.3.1 (Flux) [Brisk Engine + Cat Catch Media Detection + N_m3u8DL-RE Pipeline]\n"
+#define FLUX_FULL_VERSION_STRING "Radium Download Manager v0.3.1 (Radium) [Brisk Engine + Cat Catch Media Detection + N_m3u8DL-RE Pipeline]\n"
 #endif

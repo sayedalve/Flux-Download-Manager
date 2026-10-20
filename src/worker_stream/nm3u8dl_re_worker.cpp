@@ -212,7 +212,7 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
 
     for (const auto& tok : expanded) {
         if (tok == "--version" || tok == "-v") {
-            std::cout << "N_m3u8DL-RE (Flux Stream Worker v0.3.0 / N_m3u8DL-RE v0.3.0-beta CLI contract)\n";
+            std::cout << "N_m3u8DL-RE (Radium Stream Worker v0.3.0 / N_m3u8DL-RE v0.3.0-beta CLI contract)\n";
             std::exit(0);
         }
         if (tok == "--help" || tok == "-h") {
@@ -396,9 +396,12 @@ WorkerOptions ParseWorkerArgs(int argc, char* argv[]) {
         }
     }
 
+    const char* env_radium = std::getenv("RADIUM_ALLOW_LOOPBACK");
     const char* env_lb1 = std::getenv("FLUX_ALLOW_LOOPBACK");
     const char* env_lb2 = std::getenv("OPENIDM_ALLOW_LOOPBACK");
-    if ((env_lb1 && std::string(env_lb1) == "1") || (env_lb2 && std::string(env_lb2) == "1")) {
+    if ((env_radium && std::string(env_radium) == "1") ||
+        (env_lb1 && std::string(env_lb1) == "1") ||
+        (env_lb2 && std::string(env_lb2) == "1")) {
         opts.allow_loopback = true;
     }
 
@@ -2086,7 +2089,7 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--version" || a == "-v") {
-            std::cout << "N_m3u8DL-RE (Flux Stream Worker v0.3.0 / N_m3u8DL-RE v0.3.0-beta CLI contract)\n";
+            std::cout << "N_m3u8DL-RE (Radium Stream Worker v0.3.0 / N_m3u8DL-RE v0.3.0-beta CLI contract)\n";
             return 0;
         }
         if (a == "--help" || a == "-h") {

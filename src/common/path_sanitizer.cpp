@@ -98,6 +98,7 @@ std::string TaskStateToString(TaskState s) {
         case TaskState::kDownloading: return "DOWNLOADING";
         case TaskState::kMuxing: return "MUXING";
         case TaskState::kVerifying: return "VERIFYING";
+        case TaskState::kFinalizing: return "FINALIZING";
         case TaskState::kPaused: return "PAUSED";
         case TaskState::kCompleted: return "COMPLETED";
         case TaskState::kFailed: return "FAILED";
@@ -111,6 +112,7 @@ TaskState TaskStateFromString(const std::string& s) {
     if (s == "DOWNLOADING") return TaskState::kDownloading;
     if (s == "MUXING") return TaskState::kMuxing;
     if (s == "VERIFYING") return TaskState::kVerifying;
+    if (s == "FINALIZING") return TaskState::kFinalizing;
     if (s == "PAUSED") return TaskState::kPaused;
     if (s == "COMPLETED") return TaskState::kCompleted;
     if (s == "FAILED") return TaskState::kFailed;
@@ -546,50 +548,68 @@ std::filesystem::path PathSanitizer::GetExecutableDir(const char* argv0) {
     return std::filesystem::current_path(ec);
 }
 
-bool PathSanitizer::MigrateLegacyDataIfNeeded(const std::filesystem::path& target_flux_dir) {
+bool PathSanitizer::MigrateLegacyDataIfNeeded(const std::filesystem::path& target_radium_dir) {
     std::error_code ec;
-#ifdef _WIN32
-    const char* local_app_data = std::getenv("LOCALAPPDATA");
-    if (!local_app_data || local_app_data[0] == '\0') return false;
-    std::filesystem::path legacy_dir = std::filesystem::path(local_app_data) / "OpenIDM";
-#else
-    const char* env_dir = std::getenv("OPENIDM_DATA_DIR");
-    std::filesystem::path legacy_dir = env_dir ? std::filesystem::path(env_dir) : (std::filesystem::temp_directory_path(ec) / "openidm_data");
-#endif
-    if (!std::filesystem::exists(legacy_dir / "state.db", ec)) {
-        return false; // No legacy data to migrate
-    }
-
     // Only migrate if target does not already have a state.db
-    if (std::filesystem::exists(target_flux_dir / "state.db", ec)) {
+    if (std::filesystem::exists(target_radium_dir / "state.db", ec)) {
         return false;
     }
 
-    std::filesystem::create_directories(target_flux_dir, ec);
-    const char* files_to_copy[] = {"state.db", "state.db-wal", "state.db-shm", "settings.json"};
-    for (const char* f : files_to_copy) {
-        std::filesystem::path src = legacy_dir / f;
-        if (std::filesystem::exists(src, ec)) {
-            std::filesystem::copy_file(src, target_flux_dir / f, std::filesystem::copy_options::update_existing, ec);
+    std::vector<std::filesystem::path> legacy_dirs;
+#ifdef _WIN32
+    if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
+        if (local_app_data[0] != '\0') {
+            legacy_dirs.push_back(std::filesystem::path(local_app_data) / "Flux Download Manager");
+            legacy_dirs.push_back(std::filesystem::path(local_app_data) / "OpenIDM");
         }
     }
-    return true;
+#else
+    if (const char* env_flux = std::getenv("FLUX_DATA_DIR")) {
+        if (env_flux[0] != '\0') legacy_dirs.push_back(std::filesystem::path(env_flux));
+    }
+    if (const char* env_dir = std::getenv("OPENIDM_DATA_DIR")) {
+        if (env_dir[0] != '\0') legacy_dirs.push_back(std::filesystem::path(env_dir));
+    }
+    legacy_dirs.push_back(std::filesystem::temp_directory_path(ec) / "Flux_Data");
+    legacy_dirs.push_back(std::filesystem::temp_directory_path(ec) / "openidm_data");
+#endif
+
+    for (const auto& legacy_dir : legacy_dirs) {
+        if (std::filesystem::exists(legacy_dir / "state.db", ec)) {
+            std::filesystem::create_directories(target_radium_dir, ec);
+            const char* files_to_copy[] = {"state.db", "state.db-wal", "state.db-shm", "settings.json"};
+            for (const char* f : files_to_copy) {
+                std::filesystem::path src = legacy_dir / f;
+                if (std::filesystem::exists(src, ec)) {
+                    std::filesystem::copy_file(src, target_radium_dir / f, std::filesystem::copy_options::update_existing, ec);
+                }
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 std::filesystem::path PathSanitizer::GetDefaultAppDataDir() {
     std::error_code ec;
 #ifdef _WIN32
+    if (const char* env_radium = std::getenv("RADIUM_DATA_DIR")) {
+        if (env_radium[0] != '\0') return std::filesystem::path(env_radium);
+    }
     if (const char* env_flux = std::getenv("FLUX_DATA_DIR")) {
         if (env_flux[0] != '\0') return std::filesystem::path(env_flux);
     }
     if (const char* local_app_data = std::getenv("LOCALAPPDATA")) {
         if (local_app_data[0] != '\0') {
-            std::filesystem::path flux_dir = std::filesystem::path(local_app_data) / "Flux Download Manager";
-            MigrateLegacyDataIfNeeded(flux_dir);
-            return flux_dir;
+            std::filesystem::path radium_dir = std::filesystem::path(local_app_data) / "Radium Download Manager";
+            MigrateLegacyDataIfNeeded(radium_dir);
+            return radium_dir;
         }
     }
 #else
+    if (const char* env_radium = std::getenv("RADIUM_DATA_DIR")) {
+        if (env_radium[0] != '\0') return std::filesystem::path(env_radium);
+    }
     if (const char* env_flux = std::getenv("FLUX_DATA_DIR")) {
         if (env_flux[0] != '\0') return std::filesystem::path(env_flux);
     }
@@ -597,7 +617,7 @@ std::filesystem::path PathSanitizer::GetDefaultAppDataDir() {
         if (env_legacy[0] != '\0') return std::filesystem::path(env_legacy);
     }
 #endif
-    std::filesystem::path fallback_dir = std::filesystem::temp_directory_path(ec) / "Flux_Data";
+    std::filesystem::path fallback_dir = std::filesystem::temp_directory_path(ec) / "Radium_Data";
     MigrateLegacyDataIfNeeded(fallback_dir);
     return fallback_dir;
 }
@@ -605,15 +625,21 @@ std::filesystem::path PathSanitizer::GetDefaultAppDataDir() {
 std::filesystem::path PathSanitizer::GetDefaultDownloadsDir(const std::filesystem::path& exe_dir) {
     (void)exe_dir;
 #ifdef _WIN32
+    if (const char* env_radium_dl = std::getenv("RADIUM_DOWNLOAD_DIR")) {
+        if (env_radium_dl[0] != '\0') return std::filesystem::path(env_radium_dl);
+    }
     if (const char* env_dl = std::getenv("FLUX_DOWNLOAD_DIR")) {
         if (env_dl[0] != '\0') return std::filesystem::path(env_dl);
     }
     if (const char* user_profile = std::getenv("USERPROFILE")) {
         if (user_profile[0] != '\0') {
-            return std::filesystem::path(user_profile) / "Downloads" / "Flux";
+            return std::filesystem::path(user_profile) / "Downloads" / "Radium";
         }
     }
 #else
+    if (const char* env_radium_dl = std::getenv("RADIUM_DOWNLOAD_DIR")) {
+        if (env_radium_dl[0] != '\0') return std::filesystem::path(env_radium_dl);
+    }
     if (const char* env_dl = std::getenv("FLUX_DOWNLOAD_DIR")) {
         if (env_dl[0] != '\0') return std::filesystem::path(env_dl);
     }
@@ -622,7 +648,7 @@ std::filesystem::path PathSanitizer::GetDefaultDownloadsDir(const std::filesyste
     }
 #endif
     std::error_code ec;
-    return std::filesystem::temp_directory_path(ec) / "Flux_Downloads";
+    return std::filesystem::temp_directory_path(ec) / "Radium_Downloads";
 }
 
 std::filesystem::path PathSanitizer::FindWorkerBinary(

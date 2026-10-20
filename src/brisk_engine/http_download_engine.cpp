@@ -430,6 +430,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         uint64_t last_progress_bytes = 0;
 
         std::atomic<bool> stop_flag{false};
+        uint64_t single_stream_speed = 0;
         auto single_res = HttpClient::PerformGet(
             task.url,
             req_headers,
@@ -454,9 +455,14 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
 
                 auto now = std::chrono::steady_clock::now();
                 auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_tp).count();
-                if (diff_ms >= 50 && on_progress) {
+                if (diff_ms >= 100 && on_progress) {
                     uint64_t interval_bytes = written_offset - last_progress_bytes;
-                    uint64_t speed = (interval_bytes * 1000ULL) / std::max<int64_t>(1, diff_ms);
+                    uint64_t inst_speed = (interval_bytes * 1000ULL) / std::max<int64_t>(1, diff_ms);
+                    if (single_stream_speed == 0) {
+                        single_stream_speed = inst_speed;
+                    } else {
+                        single_stream_speed = static_cast<uint64_t>(0.25 * static_cast<double>(inst_speed) + 0.75 * static_cast<double>(single_stream_speed));
+                    }
                     last_progress_bytes = written_offset;
                     last_progress_tp = now;
 
@@ -465,7 +471,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                     ep.state = TaskState::kDownloading;
                     ep.downloaded_bytes = written_offset;
                     ep.total_bytes = total_bytes;
-                    ep.speed_bps = speed;
+                    ep.speed_bps = single_stream_speed;
                     ep.range_supported = false;
                     ep.resolved_filename = task.file_name;
                     on_progress(ep);
@@ -519,8 +525,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                     }
                     // Back off briefly in case a running segment becomes eligible for work-stealing soon
                     bool acquired = false;
-                    for (int idle_retry = 0; idle_retry < 6; ++idle_retry) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    for (int idle_retry = 0; idle_retry < 15; ++idle_retry) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         if (fatal_abort.load() || pause_requested.load() || cancel_requested.load() || scheduler.AllCompleted()) {
                             break;
                         }
@@ -692,14 +698,21 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         uint64_t current_speed = 0;
 
         std::vector<std::thread> workers;
-        workers.emplace_back(worker_fn, 0);
+        // Immediately pre-spawn workers for all splittable segments up to max_conns
+        uint32_t target_initial = 1;
+        while (target_initial < max_conns && scheduler.CanSplitAnySegment()) {
+            ++target_initial;
+        }
+        for (uint32_t i = 0; i < target_initial; ++i) {
+            workers.emplace_back(worker_fn, i);
+        }
 
-        uint32_t spawned = 1;
+        uint32_t spawned = target_initial;
         while (!scheduler.AllCompleted() && !fatal_abort.load() && !pause_requested.load() && !cancel_requested.load()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
             if (running_workers.load() < max_conns && spawned < (max_conns * 8) && !disable_splitting.load() &&
-                scheduler.CanSplitAnySegment() && (scheduler.TotalDownloadedBytes() > initial_bytes || is_resume)) {
+                scheduler.CanSplitAnySegment()) {
                 workers.emplace_back(worker_fn, spawned++);
             }
 
@@ -712,7 +725,12 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             auto diff_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_sp_tp).count();
             if (diff_ms >= 100) {
                 uint64_t delta_bytes = (dl >= last_sp_bytes) ? (dl - last_sp_bytes) : 0;
-                current_speed = (delta_bytes * 1000ULL) / std::max<int64_t>(1, diff_ms);
+                uint64_t inst_speed = (delta_bytes * 1000ULL) / std::max<int64_t>(1, diff_ms);
+                if (current_speed == 0) {
+                    current_speed = inst_speed;
+                } else {
+                    current_speed = static_cast<uint64_t>(0.25 * static_cast<double>(inst_speed) + 0.75 * static_cast<double>(current_speed));
+                }
                 last_sp_bytes = dl;
                 last_sp_tp = now;
             }

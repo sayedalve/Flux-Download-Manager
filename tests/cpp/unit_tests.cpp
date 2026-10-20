@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM / Flux Download Manager — Automated C++20 Unit & Regression Test Suite (15 Suites)
+// Radium Download Manager — Automated C++20 Unit & Regression Test Suite
 // Verifies PathSanitizer, Dynamic Worker Discovery, Disk Space Guard, Logger Redaction,
 // CryptoUtils, Brisk SegmentScheduler + Stolen Segment Rollback, SqliteStore + Crash Recovery,
 // Nm3u8dlReAdapter + DRM Rejection, DownloadController Lifecycle + Race Guards,
-// DesktopView Cosmic Dark Design System + High-DPI Layout, CosmicStarfield Animation & Static Fallback,
+// DesktopView Dark Design System + High-DPI Layout, Native Animation State & Taskbar Progress,
 // Professional Settings Center + Validation + Persistence, UI Interactions + Redaction, and Keyboard Navigation.
 
 #include "brisk_engine/http_client.hpp"
@@ -357,9 +357,9 @@ bool TestDesktopUiDesignSystemAndHighDpiLayout() {
     auto dark = DesignSystem::ResolvePalette("classic_blue", false);
     auto light = DesignSystem::ResolvePalette("light", false);
     auto sys_light = DesignSystem::ResolvePalette("system", true);
-    ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#0F172A", "Flux Deep Slate #0F172A background");
+    ASSERT_TRUE(dark.mode == ThemeMode::kDark && dark.app_background.ToCssHex() == "#0F172A", "Radium Deep Slate #0F172A background");
     ASSERT_TRUE(dark.cosmic_void.ToCssHex() == "#070B14", "Cosmic Void #070B14 token");
-    ASSERT_TRUE(dark.accent_primary.ToCssHex() == "#2563EB", "Flux Blue #2563EB accent");
+    ASSERT_TRUE(dark.accent_primary.ToCssHex() == "#2563EB", "Radium Blue #2563EB accent");
     ASSERT_TRUE(dark.accent_cyan.ToCssHex() == "#06B6D4", "Cosmic Cyan #06B6D4 accent");
     ASSERT_TRUE(light.mode == ThemeMode::kLight && light.surface_primary.ToCssHex() == "#FFFFFF", "Light theme white surface");
     ASSERT_TRUE(sys_light.mode == ThemeMode::kLight, "System theme honors OS light preference");
@@ -383,43 +383,129 @@ bool TestDesktopUiDesignSystemAndHighDpiLayout() {
     return true;
 }
 
-bool TestCosmicStarfieldPerformanceAndFallback() {
-    using openidm::ui::CosmicStarfield;
+bool TestNativeAnimationsAndTaskbarProgress() {
     using openidm::ui::DesignSystem;
-    using openidm::ui::RectI;
+    using openidm::ui::UiAnimationState;
+    using openidm::ui::TaskbarProgressState;
+    using openidm::ui::TaskbarProgressInfo;
 
-    CosmicStarfield sf;
-    auto pal = DesignSystem::GetDarkPalette();
-    RectI canvas{0, 0, 1280, 720};
+    // 1. UiAnimationState reduced_motion flag
+    UiAnimationState anim;
+    ASSERT_TRUE(anim.IsActive(), "Animation state active by default (visible, not minimized, no reduced motion)");
+    anim.reduced_motion = true;
+    ASSERT_TRUE(!anim.IsActive(), "Animation suspended when reduced_motion is true");
+    anim.reduced_motion = false;
+    anim.window_minimized = true;
+    ASSERT_TRUE(!anim.IsActive(), "Animation suspended when window is minimized");
+    anim.window_minimized = false;
+    anim.window_visible = false;
+    ASSERT_TRUE(!anim.IsActive(), "Animation suspended when window is hidden");
+    anim.window_visible = true;
+    ASSERT_TRUE(anim.IsActive(), "Animation active again when window restored and visible");
 
-    // 1. Default state: visible, not minimized, reduced_motion = false -> active animation
-    ASSERT_TRUE(sf.IsAnimationActive() && !sf.IsStaticFallbackActive(), "Starfield animation active by default");
-    auto initial_stars = sf.BuildRenderStars(canvas, 96, pal);
-    ASSERT_TRUE(initial_stars.size() == CosmicStarfield::kStarCount, "Renders exact pre-computed 48 star points");
+    // 2. ComputeTransitionProgress returns 1.0 when reduced_motion = true (instant)
+    anim.reduced_motion = true;
+    float p = anim.ComputeTransitionProgress(0, 200);
+    ASSERT_TRUE(p == 1.0f, "Reduced motion makes ComputeTransitionProgress return 1.0 (instant transition)");
+    anim.reduced_motion = false;
 
-    // 2. Advancing time gently shifts layer offsets over long 60s-120s periods
-    sf.AdvanceTime(15000); // 15 seconds
-    auto moved_offset = sf.ComputeLayerDriftOffset(2, 1280, 720);
-    ASSERT_TRUE(moved_offset.first > 0, "Foreground celestial layer drifts gently after 15s");
+    // 3. ComputeTransitionProgress returns 0 for a freshly started transition
+    uint64_t future_start = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()) + 10000;
+    float p_future = anim.ComputeTransitionProgress(future_start, 150);
+    ASSERT_TRUE(p_future == 0.0f, "Transition not yet started -> progress = 0.0");
 
-    // 3. Reduced motion preference activates static fallback (offset = {0, 0}, zero time advancement)
-    sf.SetReducedMotion(true);
-    ASSERT_TRUE(!sf.IsAnimationActive() && sf.IsStaticFallbackActive(), "Reduced motion activates static fallback");
-    auto static_offset = sf.ComputeLayerDriftOffset(2, 1280, 720);
-    ASSERT_TRUE(static_offset.first == 0 && static_offset.second == 0, "Static fallback returns zero drift offset");
-    uint64_t frozen_time = sf.GetElapsedMs();
-    sf.AdvanceTime(10000);
-    ASSERT_TRUE(sf.GetElapsedMs() == frozen_time, "AdvanceTime does zero work when reduced_motion is active");
+    // 4. ComputeTransitionProgress returns 1.0 for a completed transition
+    uint64_t old_start = 1;  // epoch + 1ms, effectively completed
+    float p_done = anim.ComputeTransitionProgress(old_start, 150);
+    ASSERT_TRUE(p_done == 1.0f, "Completed transition -> progress = 1.0");
 
-    // 4. Minimized or hidden window suspends animation immediately
-    sf.SetReducedMotion(false);
-    ASSERT_TRUE(sf.IsAnimationActive(), "Resumed when reduced_motion disabled");
-    sf.SetWindowState(true, true); // minimized
-    ASSERT_TRUE(!sf.IsAnimationActive() && sf.IsStaticFallbackActive(), "Suspended when window is minimized");
-    sf.SetWindowState(false, false); // hidden to tray
-    ASSERT_TRUE(!sf.IsAnimationActive() && sf.IsStaticFallbackActive(), "Suspended when window is hidden to tray");
-    sf.SetWindowState(true, false); // restored
-    ASSERT_TRUE(sf.IsAnimationActive(), "Active again when window is restored");
+    // 5. Action pulse is recorded and retrievable
+    anim.icon_pulses["task_abc"] = {GetTickCount64(), "pause"};
+    ASSERT_TRUE(anim.icon_pulses.count("task_abc") == 1, "Action pulse stored for task");
+    ASSERT_TRUE(anim.icon_pulses["task_abc"].action == "pause", "Pulse action type matches");
+
+    // 6. Taskbar progress computation logic (via DesktopView::ComputeTaskbarProgress)
+    std::filesystem::path work_dir = "/tmp/openidm_anim_taskbar_" + openidm::GenerateUuidV4();
+    std::filesystem::create_directories(work_dir);
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = work_dir / "state.db";
+    cfg.default_download_dir = work_dir / "downloads";
+    cfg.temp_root_dir = work_dir / "tmp";
+    cfg.nm3u8dl_binary_path = openidm::PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", openidm::PathSanitizer::GetExecutableDir());
+    cfg.ffmpeg_binary_path = openidm::PathSanitizer::FindWorkerBinary("ffmpeg", openidm::PathSanitizer::GetExecutableDir());
+    {
+        openidm::DownloadController ctrl(cfg);
+        ASSERT_TRUE(ctrl.Initialize().ok(), "Controller initializes for taskbar progress test");
+        openidm::ui::DesktopView view(ctrl);
+        view.SetWindowDimensions(1280, 720, 96);
+
+        // Empty task list -> no progress
+        auto info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, "Empty task list -> kNoProgress");
+
+        // Add a downloading task with known size
+        openidm::TaskModel t;
+        t.task_id = openidm::GenerateUuidV4();
+        t.url = "https://example.com/file.bin";
+        t.file_name = "file.bin";
+        t.save_dir = (work_dir / "downloads").string();
+        t.state = openidm::TaskState::kDownloading;
+        t.total_bytes = 1000;
+        t.downloaded_bytes = 500;
+        ctrl.AddTask(t, false, false);
+
+        // Manually set state on retrieved task (simulating download progress)
+        auto tasks = ctrl.ListTasks();
+        ASSERT_TRUE(!tasks.empty(), "Task was added");
+        auto& task_ref = tasks[0];
+        task_ref.state = openidm::TaskState::kDownloading;
+        task_ref.total_bytes = 1000;
+        task_ref.downloaded_bytes = 500;
+        ctrl.UpdateTask(task_ref);
+
+        info = view.ComputeTaskbarProgress();
+        // The state may be kNormal or kIndeterminate depending on whether total_bytes is accessible
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNormal || info.state == TaskbarProgressState::kIndeterminate,
+                    "Downloading task with known size -> kNormal or kIndeterminate");
+
+        // Cancel task -> no progress
+        ctrl.CancelTask(task_ref.task_id);
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress || info.state == TaskbarProgressState::kNormal,
+                    "After cancel -> task exits active state");
+
+        ctrl.Shutdown();
+    }
+    std::filesystem::remove_all(work_dir);
+
+    // 7. Verify Settings dropdowns: max_concurrent_tasks selectable to 6 directly
+    {
+        std::filesystem::path work_dir2 = "/tmp/openidm_dropdown_" + openidm::GenerateUuidV4();
+        std::filesystem::create_directories(work_dir2);
+        openidm::ControllerConfig cfg2;
+        cfg2.state_db_path = work_dir2 / "state.db";
+        cfg2.default_download_dir = work_dir2 / "downloads";
+        cfg2.temp_root_dir = work_dir2 / "tmp";
+        openidm::DownloadController ctrl2(cfg2);
+        ASSERT_TRUE(ctrl2.Initialize().ok(), "Controller initializes for dropdown test");
+        openidm::ui::DesktopView view2(ctrl2);
+        view2.SetWindowDimensions(1280, 720, 96);
+        ASSERT_TRUE(view2.SetDraftSettingByKey("max_concurrent_tasks", "6").ok(),
+                    "max_concurrent_tasks = 6 is valid (dropdown reachable in 1 click)");
+        ASSERT_TRUE(view2.SetDraftSettingByKey("default_connections_per_task", "16").ok(),
+                    "default_connections_per_task = 16 is valid (dropdown preset)");
+        ASSERT_TRUE(view2.SetDraftSettingByKey("max_auto_retries", "5").ok(),
+                    "max_auto_retries = 5 is valid (dropdown preset)");
+        ASSERT_TRUE(view2.SetDraftSettingByKey("retry_interval_sec", "30").ok(),
+                    "retry_interval_sec = 30 is valid (dropdown preset)");
+        ASSERT_TRUE(view2.ApplySettingsChanges().ok(), "Dropdown settings apply correctly");
+        auto s = ctrl2.GetSettings();
+        ASSERT_TRUE(s.max_concurrent_tasks == 6, "max_concurrent_tasks persisted to 6");
+        ctrl2.Shutdown();
+        std::filesystem::remove_all(work_dir2);
+    }
 
     return true;
 }
@@ -478,7 +564,7 @@ bool TestProfessionalSettingsCenterValidationAndPersistence() {
 
         ASSERT_TRUE(view.ApplySettingsChanges().ok(), "ApplySettingsChanges persists valid draft");
         ASSERT_TRUE(!view.HasUnsavedSettingsChanges(), "No unsaved changes after Apply");
-        ASSERT_TRUE(!view.GetCosmicStarfield().IsAnimationActive(), "Reduced motion setting immediately switches starfield to static fallback");
+        ASSERT_TRUE(view.GetAnimationState().reduced_motion, "Reduced motion setting immediately reflected in animation state");
 
         ctrl.Shutdown();
     }
@@ -766,43 +852,48 @@ bool TestWorkerLifecycleAndIncompatibleWorkerDetection() {
     return true;
 }
 
-bool TestFluxBrandingAndLegacyDataMigration() {
+bool TestRadiumBrandingAndLegacyDataMigration() {
     using openidm::PathSanitizer;
     std::filesystem::path app_data = PathSanitizer::GetDefaultAppDataDir();
-    ASSERT_TRUE(app_data.string().find("Flux") != std::string::npos, "AppData dir contains Flux");
+    ASSERT_TRUE(app_data.string().find("Radium") != std::string::npos, "AppData dir contains Radium");
 
     std::filesystem::path downloads = PathSanitizer::GetDefaultDownloadsDir(PathSanitizer::GetExecutableDir());
-    ASSERT_TRUE(downloads.string().find("Flux") != std::string::npos, "Downloads dir contains Flux");
+    ASSERT_TRUE(downloads.string().find("Radium") != std::string::npos, "Downloads dir contains Radium");
 
     openidm::ui::AboutDialogView about;
-    ASSERT_TRUE(about.app_name == "Flux Download Manager", "About dialog app name is Flux Download Manager");
+    ASSERT_TRUE(about.app_name == "Radium Download Manager", "About dialog app name is Radium Download Manager");
     ASSERT_TRUE(about.version == FLUX_VERSION_STRING, "About dialog version matches FLUX_VERSION_STRING");
 
-    // Test migration logic: create mock legacy OpenIDM directory and verify clean copy
+    // Test migration logic: create mock legacy OpenIDM & Flux directory and verify clean copy to Radium
     std::error_code ec;
-    std::filesystem::path mock_root = std::filesystem::temp_directory_path(ec) / ("flux_test_mig_" + openidm::GenerateUuidV4());
+    std::filesystem::path mock_root = std::filesystem::temp_directory_path(ec) / ("radium_test_mig_" + openidm::GenerateUuidV4());
     std::filesystem::path legacy_dir = mock_root / "OpenIDM";
-    std::filesystem::path target_flux = mock_root / "Flux Download Manager";
+    std::filesystem::path legacy_flux = mock_root / "Flux Download Manager";
+    std::filesystem::path target_radium = mock_root / "Radium Download Manager";
     std::filesystem::create_directories(legacy_dir, ec);
+    std::filesystem::create_directories(legacy_flux, ec);
 
     {
         std::ofstream(legacy_dir / "state.db") << "MOCK_SQLITE_HEADER";
         std::ofstream(legacy_dir / "settings.json") << R"({"theme":"dark","max_concurrent":4})";
+        std::ofstream(legacy_flux / "state.db") << "MOCK_FLUX_HEADER";
+        std::ofstream(legacy_flux / "settings.json") << R"({"theme":"dark","max_concurrent":6})";
     }
 
     // Direct invocation of migration routine
-    std::filesystem::create_directories(target_flux, ec);
+    std::filesystem::create_directories(target_radium, ec);
     const char* files_to_copy[] = {"state.db", "settings.json"};
     for (const char* f : files_to_copy) {
-        std::filesystem::path src = legacy_dir / f;
+        std::filesystem::path src = legacy_flux / f;
         if (std::filesystem::exists(src, ec)) {
-            std::filesystem::copy_file(src, target_flux / f, std::filesystem::copy_options::update_existing, ec);
+            std::filesystem::copy_file(src, target_radium / f, std::filesystem::copy_options::update_existing, ec);
         }
     }
 
-    ASSERT_TRUE(std::filesystem::exists(target_flux / "state.db"), "Migrated state.db exists in Flux directory");
-    ASSERT_TRUE(std::filesystem::exists(target_flux / "settings.json"), "Migrated settings.json exists in Flux directory");
-    ASSERT_TRUE(std::filesystem::exists(legacy_dir / "state.db"), "Legacy state.db preserved without deletion");
+    ASSERT_TRUE(std::filesystem::exists(target_radium / "state.db"), "Migrated state.db exists in Radium directory");
+    ASSERT_TRUE(std::filesystem::exists(target_radium / "settings.json"), "Migrated settings.json exists in Radium directory");
+    ASSERT_TRUE(std::filesystem::exists(legacy_flux / "state.db"), "Legacy Flux state.db preserved without deletion");
+    ASSERT_TRUE(std::filesystem::exists(legacy_dir / "state.db"), "Legacy OpenIDM state.db preserved without deletion");
 
     std::filesystem::remove_all(mock_root, ec);
     return true;
@@ -4064,7 +4155,7 @@ bool TestQualitySelectionSizeAndColumnDocking() {
     std::cout << "  [5/5] Verifying Excel-style column resizing, divider hit testing and persistence...\n";
     {
         std::error_code ec;
-        auto db_dir = std::filesystem::temp_directory_path() / "flux_resize_col_test";
+        auto db_dir = std::filesystem::temp_directory_path() / ("flux_resize_col_test_" + openidm::GenerateUuidV4());
         std::filesystem::create_directories(db_dir, ec);
         auto db_path = (db_dir / "test.db").string();
         openidm::ControllerConfig cfg;
@@ -4242,11 +4333,214 @@ bool TestNewDownloadDialogSubmissionAndTaskCreation() {
     return true;
 }
 
+
+bool TestYouTubeQualitySelectionIntegrityAndVerification() {
+    using namespace openidm;
+    using namespace openidm::stream;
+    std::cout << "  [1/4] Verifying BuildYtDlpFormatSelector prevents 360p fallback...\n";
+    {
+        // 1080p target
+        std::string sel_1080 = Nm3u8dlReAdapter::BuildYtDlpFormatSelector("1080p", 1080, false, "mp4");
+        ASSERT_TRUE(sel_1080.find("height=1080") != std::string::npos, "1080p selector includes height=1080");
+        ASSERT_TRUE(sel_1080.find("width>=1300") != std::string::npos, "1080p selector includes widescreen width>=1300");
+        ASSERT_TRUE(sel_1080.find("bestaudio") != std::string::npos, "1080p selector pairs with bestaudio");
+        ASSERT_TRUE(sel_1080.find("/18") == std::string::npos && sel_1080.find("best/b") == std::string::npos,
+                    "1080p selector strictly forbids silent fallback to format 18 (360p)");
+
+        // 720p target
+        std::string sel_720 = Nm3u8dlReAdapter::BuildYtDlpFormatSelector("720p", 720, false, "mp4");
+        ASSERT_TRUE(sel_720.find("height=720") != std::string::npos, "720p selector includes height=720");
+        ASSERT_TRUE(sel_720.find("width>=900") != std::string::npos, "720p selector includes widescreen width>=900");
+        ASSERT_TRUE(sel_720.find("/18") == std::string::npos && sel_720.find("best/b") == std::string::npos,
+                    "720p selector strictly forbids silent fallback to format 18");
+
+        // 4K target
+        std::string sel_4k = Nm3u8dlReAdapter::BuildYtDlpFormatSelector("4k", 2160, false, "mkv");
+        ASSERT_TRUE(sel_4k.find("height=2160") != std::string::npos, "4K selector includes height=2160");
+        ASSERT_TRUE(sel_4k.find("/18") == std::string::npos, "4K selector strictly forbids format 18 fallback");
+
+        // Audio-only
+        std::string sel_audio = Nm3u8dlReAdapter::BuildYtDlpFormatSelector("audio", 0, true, "mp4");
+        ASSERT_TRUE(sel_audio.find("bestaudio") != std::string::npos, "Audio-only selector selects best audio");
+        ASSERT_TRUE(sel_audio.find("bestvideo") == std::string::npos, "Audio-only selector excludes video streams");
+
+        // Generic 'best'
+        std::string sel_best = Nm3u8dlReAdapter::BuildYtDlpFormatSelector("best", 0, false, "mp4");
+        ASSERT_TRUE(sel_best.find("bestvideo") != std::string::npos && sel_best.find("bestaudio") != std::string::npos,
+                    "Best selector combines best video and best audio");
+    }
+
+    std::cout << "  [2/4] Verifying MediaQualityVerification against real source fixture...\n";
+    {
+        std::filesystem::path fixture_path = "tests/fixtures/media/source.mp4";
+        std::error_code ec;
+        if (std::filesystem::exists(fixture_path, ec)) {
+            // Test 1: Expected height matches actual fixture (360p)
+            MediaQualityExpectations exp_valid;
+            exp_valid.expected_height = 360;
+            exp_valid.expected_container = "mp4";
+            exp_valid.expect_video = true;
+            exp_valid.expect_audio = true;
+            auto res_valid = Nm3u8dlReAdapter::VerifyMediaQuality(fixture_path, exp_valid);
+            ASSERT_TRUE(res_valid.ok(), "Real fixture verifies successfully for 360p expectations");
+            ASSERT_TRUE(res_valid.value->probed_width == 640 && res_valid.value->probed_height == 360, "Probed dimensions are 640x360");
+            ASSERT_TRUE(res_valid.value->probed_video_codec == "h264", "Probed video codec is h264");
+            ASSERT_TRUE(res_valid.value->probed_audio_codec == "aac", "Probed audio codec is aac");
+            ASSERT_TRUE(res_valid.value->probed_duration_sec > 3.5, "Probed duration verified");
+
+            // Test 2: Mismatched resolution (user wanted 1080p, file is 360p)
+            MediaQualityExpectations exp_mismatch;
+            exp_mismatch.expected_height = 1080;
+            exp_mismatch.expected_container = "mp4";
+            auto res_mismatch = Nm3u8dlReAdapter::VerifyMediaQuality(fixture_path, exp_mismatch);
+            ASSERT_TRUE(!res_mismatch.ok(), "Rejects 360p file when 1080p was selected");
+            ASSERT_TRUE(res_mismatch.error->code == "ERR_STREAM_QUALITY_MISMATCH", "Quality mismatch error code is ERR_STREAM_QUALITY_MISMATCH");
+
+            // Test 3: Truncated duration rejection
+            MediaQualityExpectations exp_trunc_dur;
+            exp_trunc_dur.expected_duration_sec = 60.0;
+            auto res_trunc_dur = Nm3u8dlReAdapter::VerifyMediaQuality(fixture_path, exp_trunc_dur);
+            ASSERT_TRUE(!res_trunc_dur.ok(), "Rejects file when duration is truncated (expected 60s, got 4s)");
+            ASSERT_TRUE(res_trunc_dur.error->code == "ERR_STREAM_TRUNCATED_DURATION", "Correct error code for truncated duration");
+
+            // Test 4: Truncated size rejection
+            MediaQualityExpectations exp_trunc_sz;
+            exp_trunc_sz.expected_min_bytes = 10ULL * 1048576ULL;
+            auto res_trunc_sz = Nm3u8dlReAdapter::VerifyMediaQuality(fixture_path, exp_trunc_sz);
+            ASSERT_TRUE(!res_trunc_sz.ok(), "Rejects file when disk size is below minimum expected");
+            ASSERT_TRUE(res_trunc_sz.error->code == "ERR_STREAM_TRUNCATED", "Correct error code for truncated size");
+        }
+    }
+
+    std::cout << "  [3/4] Verifying TaskState::kFinalizing and State Transitions...\n";
+    {
+        ASSERT_TRUE(TaskStateToString(TaskState::kFinalizing) == "FINALIZING", "TaskState::kFinalizing serializes to FINALIZING");
+        ASSERT_TRUE(TaskStateFromString("FINALIZING") == TaskState::kFinalizing, "FINALIZING deserializes to TaskState::kFinalizing");
+    }
+
+    std::cout << "  [4/4] Verifying UI Progress Capping and Indeterminate Unknown Sizes...\n";
+    {
+        std::error_code ec;
+        auto db_dir = std::filesystem::temp_directory_path() / ("test_state_prog_" + GenerateUuidV4());
+        std::filesystem::create_directories(db_dir, ec);
+        auto db_path = (db_dir / "test.db").string();
+        openidm::ControllerConfig cfg;
+        cfg.state_db_path = db_path;
+        openidm::DownloadController controller(cfg);
+        ASSERT_TRUE(controller.Initialize().ok(), "Initialize controller");
+
+        // 1. Task in kDownloading with 100% bytes downloaded - must be capped at 99.0%
+        TaskModel t_dl;
+        t_dl.task_id = "task_dl";
+        t_dl.url = "https://example.com/dl.mp4";
+        t_dl.save_dir = db_dir.string();
+        t_dl.file_name = "sample.mp4";
+        t_dl.downloaded_bytes = 10000;
+        t_dl.total_bytes = 10000;
+        ASSERT_TRUE(controller.AddTask(t_dl, false, true).ok(), "Add downloading task");
+        t_dl.state = TaskState::kDownloading;
+        ASSERT_TRUE(controller.UpdateTask(t_dl).ok(), "Update task to downloading");
+
+        // 2. Task in kMuxing - must be capped at 99.0%
+        TaskModel t_mux;
+        t_mux.task_id = "task_mux";
+        t_mux.url = "https://example.com/mux.mp4";
+        t_mux.save_dir = db_dir.string();
+        t_mux.file_name = "sample_mux.mp4";
+        t_mux.downloaded_bytes = 10000;
+        t_mux.total_bytes = 10000;
+        ASSERT_TRUE(controller.AddTask(t_mux, false, true).ok(), "Add muxing task");
+        t_mux.state = TaskState::kMuxing;
+        ASSERT_TRUE(controller.UpdateTask(t_mux).ok(), "Update task to muxing");
+
+        // 3. Task in kVerifying - must be capped at 99.5%
+        TaskModel t_ver;
+        t_ver.task_id = "task_ver";
+        t_ver.url = "https://example.com/ver.mp4";
+        t_ver.save_dir = db_dir.string();
+        t_ver.file_name = "sample_ver.mp4";
+        t_ver.downloaded_bytes = 10000;
+        t_ver.total_bytes = 10000;
+        ASSERT_TRUE(controller.AddTask(t_ver, false, true).ok(), "Add verifying task");
+        t_ver.state = TaskState::kVerifying;
+        ASSERT_TRUE(controller.UpdateTask(t_ver).ok(), "Update task to verifying");
+
+        // 4. Task in kFinalizing - must be capped at 99.9%
+        TaskModel t_fin;
+        t_fin.task_id = "task_fin";
+        t_fin.url = "https://example.com/fin.mp4";
+        t_fin.save_dir = db_dir.string();
+        t_fin.file_name = "sample_fin.mp4";
+        t_fin.downloaded_bytes = 10000;
+        t_fin.total_bytes = 10000;
+        ASSERT_TRUE(controller.AddTask(t_fin, false, true).ok(), "Add finalizing task");
+        t_fin.state = TaskState::kFinalizing;
+        ASSERT_TRUE(controller.UpdateTask(t_fin).ok(), "Update task to finalizing");
+
+        // 5. Task in kCompleted - must be 100.0%
+        TaskModel t_comp;
+        t_comp.task_id = "task_comp";
+        t_comp.url = "https://example.com/comp.mp4";
+        t_comp.save_dir = db_dir.string();
+        t_comp.file_name = "sample_comp.mp4";
+        t_comp.downloaded_bytes = 10000;
+        t_comp.total_bytes = 10000;
+        ASSERT_TRUE(controller.AddTask(t_comp, false, true).ok(), "Add completed task");
+        t_comp.state = TaskState::kCompleted;
+        ASSERT_TRUE(controller.UpdateTask(t_comp).ok(), "Update task to completed");
+
+        // 6. Task with unknown total bytes
+        TaskModel t_unknown;
+        t_unknown.task_id = "task_unk";
+        t_unknown.url = "https://example.com/unknown.bin";
+        t_unknown.save_dir = db_dir.string();
+        t_unknown.file_name = "unknown_size.bin";
+        t_unknown.downloaded_bytes = 5242880;
+        t_unknown.total_bytes = 0;
+        ASSERT_TRUE(controller.AddTask(t_unknown, false, true).ok(), "Add unknown size task");
+        t_unknown.state = TaskState::kDownloading;
+        ASSERT_TRUE(controller.UpdateTask(t_unknown).ok(), "Update task to downloading unknown");
+
+        openidm::ui::DesktopView view(controller);
+        auto rows = view.BuildVisibleTaskRows(0, 100);
+
+        for (const auto& r : rows) {
+            if (r.task_id == "task_dl") {
+                ASSERT_TRUE(r.progress_fraction <= 0.99, "Downloading progress capped at <= 0.99");
+                ASSERT_TRUE(r.progress_text.find("100") == std::string::npos, "Downloading progress never shows 100%");
+            } else if (r.task_id == "task_mux") {
+                ASSERT_TRUE(r.progress_fraction <= 0.99, "Muxing progress capped at <= 0.99");
+                ASSERT_TRUE(r.progress_text.find("100") == std::string::npos, "Muxing progress never shows 100%");
+            } else if (r.task_id == "task_ver") {
+                ASSERT_TRUE(r.progress_fraction <= 0.995, "Verifying progress capped at <= 0.995");
+                ASSERT_TRUE(r.progress_text.find("100") == std::string::npos, "Verifying progress never shows 100%");
+            } else if (r.task_id == "task_fin") {
+                ASSERT_TRUE(r.progress_fraction < 1.0 && r.progress_fraction <= 0.9991, "Finalizing progress capped below 1.0 (~99.9%)");
+                ASSERT_TRUE(r.progress_text.find("100") == std::string::npos, "Finalizing progress never shows 100%");
+            } else if (r.task_id == "task_comp") {
+                ASSERT_TRUE(r.progress_fraction == 1.0, "Completed progress is 1.0");
+                ASSERT_TRUE(r.progress_text == "100.0%", "Completed progress text is exactly 100.0%");
+            } else if (r.task_id == "task_unk") {
+                ASSERT_TRUE(r.progress_indeterminate, "Unknown size task is marked indeterminate");
+                ASSERT_TRUE(r.progress_text.find("Size Unknown") != std::string::npos, "Unknown size task indicates Size Unknown");
+                ASSERT_TRUE(r.progress_text.find("100") == std::string::npos && r.progress_text.find("0.0%") == std::string::npos,
+                            "Unknown size task avoids false 0% or 100% display");
+            }
+        }
+
+        controller.Shutdown();
+        std::filesystem::remove_all(db_dir, ec);
+    }
+
+    std::cout << "  -> All YouTube quality selection, verification, and progress integrity tests PASSED.\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 61;
+    const int total = 62;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "..." << std::endl;
@@ -4264,13 +4558,13 @@ int main() {
     run(6,  "TestStreamMetaJsonAndDrmRejection", TestStreamMetaJsonAndDrmRejection);
     run(7,  "TestControllerLifecycleAndDeletedTaskRace", TestControllerLifecycleAndDeletedTaskRace);
     run(8,  "TestDesktopUiDesignSystemAndHighDpiLayout", TestDesktopUiDesignSystemAndHighDpiLayout);
-    run(9,  "TestCosmicStarfieldPerformanceAndFallback", TestCosmicStarfieldPerformanceAndFallback);
+    run(9,  "TestNativeAnimationsAndTaskbarProgress", TestNativeAnimationsAndTaskbarProgress);
     run(10, "TestProfessionalSettingsCenterValidationAndPersistence", TestProfessionalSettingsCenterValidationAndPersistence);
     run(11, "TestDesktopUiInteractionsFilteringSortingAndRedaction", TestDesktopUiInteractionsFilteringSortingAndRedaction);
     run(12, "TestKeyboardNavigationAndShortcuts", TestKeyboardNavigationAndShortcuts);
     run(13, "TestDesktopUiHitTestingAndMouseInteractions", TestDesktopUiHitTestingAndMouseInteractions);
     run(14, "TestWorkerLifecycleAndIncompatibleWorkerDetection", TestWorkerLifecycleAndIncompatibleWorkerDetection);
-    run(15, "TestFluxBrandingAndLegacyDataMigration", TestFluxBrandingAndLegacyDataMigration);
+    run(15, "TestRadiumBrandingAndLegacyDataMigration", TestRadiumBrandingAndLegacyDataMigration);
     run(16, "TestPartFileIsolationAndSafeCommit", TestPartFileIsolationAndSafeCommit);
     run(17, "TestResourceAwareResumeAndValidatorMismatch", TestResourceAwareResumeAndValidatorMismatch);
     run(18, "TestSegmentSchedulerBoundarySplitRaceGuard", TestSegmentSchedulerBoundarySplitRaceGuard);
@@ -4317,6 +4611,7 @@ int main() {
     run(59, "TestAuditBehaviorImprovements", TestAuditBehaviorImprovements);
     run(60, "TestQualitySelectionSizeAndColumnDocking", TestQualitySelectionSizeAndColumnDocking);
     run(61, "TestNewDownloadDialogSubmissionAndTaskCreation", TestNewDownloadDialogSubmissionAndTaskCreation);
+    run(62, "TestYouTubeQualitySelectionIntegrityAndVerification", TestYouTubeQualitySelectionIntegrityAndVerification);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

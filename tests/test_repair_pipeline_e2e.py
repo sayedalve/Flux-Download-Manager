@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager — End-to-End Browser Detection & Download Pipeline Verification Suite
+# Radium Download Manager -- End-to-End Browser Detection & Download Pipeline Verification Suite
 # Tests all 10 deterministic fixtures required by Section 4 & Section 7:
 #   1. Direct PDF download (click -> click metadata -> download event -> download.offer -> Brisk engine -> valid PDF)
 #   2. Direct ZIP download (click -> click metadata -> download event -> download.offer -> Brisk engine -> valid ZIP + Alt bypass)
@@ -34,6 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 IS_WINDOWS = (os.name == "nt" or platform.system().lower().startswith("win"))
 EXE_EXT = ".exe" if IS_WINDOWS else ""
+os.environ["RADIUM_ALLOW_LOOPBACK"] = "1"
 os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
 os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
@@ -59,8 +60,8 @@ def find_binary(name: str) -> Path:
     return candidates[0]
 
 
-FLUX_BIN = find_binary("Flux") if (ROOT / "dist" / f"Flux{EXE_EXT}").is_file() else find_binary("flux")
-NMH_BIN = find_binary("flux-nmh")
+FLUX_BIN = find_binary("Radium") if (ROOT / "dist" / f"Radium{EXE_EXT}").is_file() else find_binary("radium")
+NMH_BIN = find_binary("radium-nmh") if find_binary("radium-nmh").is_file() else find_binary("flux-nmh")
 STREAM_WORKER = find_binary("N_m3u8DL-RE")
 FFMPEG_BIN = find_binary("ffmpeg")
 
@@ -210,14 +211,14 @@ def create_all_deterministic_fixtures(fixture_dir: Path, base_url: str) -> dict:
         str(FFMPEG_BIN), "-y", "-loglevel", "error",
         "-i", str(mp4_path),
         "-c", "copy", "-f", "segment", "-segment_time", "2",
-        "-segment_list", str(hls_dir / "720p.m3u8"),
+        "-segment_list", str(hls_dir / "360p.m3u8"),
         str(hls_dir / "seg_%03d.ts")
     ], check=True)
     (hls_dir / "master.m3u8").write_text(
         "#EXTM3U\n"
         "#EXT-X-VERSION:3\n"
         '#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=640x360,CODECS="avc1.64001f,mp4a.40.2"\n'
-        "720p.m3u8\n",
+        "360p.m3u8\n",
         encoding="utf-8"
     )
 
@@ -719,7 +720,7 @@ def main():
 
     try:
         print("=================================================================")
-        print("  Flux Download Manager — 10-Fixture End-to-End Repair Suite     ")
+        print("  Radium Download Manager -- 10-Fixture End-to-End Repair Suite  ")
         print("=================================================================")
         meta = create_all_deterministic_fixtures(fixture_dir, base_url)
 
@@ -731,6 +732,7 @@ def main():
         time.sleep(0.25)
 
         env = os.environ.copy()
+        env["RADIUM_IPC_SOCKET"] = sock_path
         env["FLUX_IPC_SOCKET"] = sock_path
         env["OPENIDM_IPC_SOCKET"] = sock_path
         nmh_proc = subprocess.Popen(
@@ -969,7 +971,7 @@ function callNativeHost(payload) {
   const childDet = bg.onHeadersReceivedHandler({{
     requestId: "r-hls-c",
     tabId: 17,
-    url: "{base_url}/fixtures/hls/720p.m3u8",
+    url: "{base_url}/fixtures/hls/360p.m3u8",
     statusCode: 200,
     responseHeaders: [{{ name: "Content-Type", value: "application/vnd.apple.mpegurl" }}]
   }});
@@ -979,7 +981,7 @@ function callNativeHost(payload) {
 """, sock_path)
         assert res7["masterAdded"] is True and res7["childGrouped"] is True
         t7 = wait_for_task(nmh_proc, res7["submitRes"]["taskId"])
-        assert t7["state"] == "COMPLETED" and t7["taskType"] == "STREAM_HLS"
+        assert t7["state"] == "COMPLETED" and t7["taskType"] == "STREAM_HLS", f"Task 7 failed with state {t7.get('state')}: {t7.get('errorMessage')}"
         hls_out = Path(t7["saveDir"]) / t7["fileName"]
         streams7, dur7 = ffprobe_streams(hls_out)
         assert "video" in streams7 and "audio" in streams7 and dur7 >= 3.5
@@ -1088,7 +1090,7 @@ function callNativeHost(payload) {
     pageTitle: "Flux YouTube Adaptive Mux Test",
     tabUrl: "{base_url}/watch?v=FluxTestYt01"
   }};
-  const submitRes = await bg.submitMediaCandidateToFlux(ytCand, {{ pageTitle: "Flux YouTube Adaptive Mux Test", qualityId: "720p", videoFilter: "720p" }}, callNativeHost);
+  const submitRes = await bg.submitMediaCandidateToFlux(ytCand, {{ pageTitle: "Radium YouTube Adaptive Mux Test", qualityId: "360p", videoFilter: "360p" }}, callNativeHost);
   console.log(JSON.stringify({{ jsonAsHlsRejected, submitRes }}));
 }})();
 """, sock_path)
@@ -1103,11 +1105,13 @@ function callNativeHost(payload) {
         assert "video" in streams10 and "audio" in streams10 and dur10 >= 3.5, f"Expected both video and audio in muxed YouTube output, got {streams10}, dur={dur10}"
         print(f"  -> PASS (YouTube watch page extracted adaptive video+audio tracks & muxed via FFmpeg -> {yt_out.name}, streams={streams10}, dur={dur10:.2f}s)")
 
-        # Verify correlation IDs in flux.log
-        log_path = db_path.parent / "flux.log"
-        assert log_path.exists(), "flux.log should exist"
+        # Verify correlation IDs in radium.log (or flux.log)
+        log_path = db_path.parent / "radium.log"
+        if not log_path.exists():
+            log_path = db_path.parent / "flux.log"
+        assert log_path.exists(), "radium.log or flux.log should exist"
         log_text = log_path.read_text(encoding="utf-8")
-        assert "Dispatching task=" in log_text and "YOUTUBE_EXTRACTION" in log_text, f"Expected correlation & dispatch logs in flux.log. Actual log contents:\n{log_text}"
+        assert "Dispatching task=" in log_text and "YOUTUBE_EXTRACTION" in log_text, f"Expected correlation & dispatch logs in radium.log. Actual log contents:\n{log_text}"
 
         print("\n=================================================================")
         print("  ALL 10 DETERMINISTIC FIXTURES & OFFLINE SIMULATION TESTS PASSED!    ")

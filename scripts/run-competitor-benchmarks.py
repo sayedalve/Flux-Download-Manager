@@ -220,6 +220,11 @@ class BenchmarkHarness:
         if custom_path and custom_path.is_file():
             return custom_path
         candidates = [
+            ROOT / "build" / "win-x64" / "Release" / "radium.exe",
+            ROOT / "build" / "Release" / "radium.exe",
+            ROOT / "dist" / "Radium.exe",
+            ROOT / "dist" / "radium.exe",
+            ROOT / "build" / "radium.exe",
             ROOT / "build" / "win-x64" / "Release" / "flux.exe",
             ROOT / "build" / "Release" / "flux.exe",
             ROOT / "dist" / "Flux.exe",
@@ -591,12 +596,12 @@ class BenchmarkHarness:
         """Inspects and provisions each of the 5 target tools."""
         logger.info("=== Provisioning & Auditing Benchmark Tools (Mode: %s) ===", self.mode.upper())
 
-        # 1. Flux Download Manager
+        # 1. Radium Download Manager
         if self.flux_bin.exists():
             v_res = subprocess.run([str(self.flux_bin), "--version"], capture_output=True, text=True)
-            v_str = v_res.stdout.strip() if v_res.returncode == 0 else "v0.3.0"
+            v_str = v_res.stdout.strip() if v_res.returncode == 0 else "v0.3.1"
             self.tool_status["flux_8"] = {
-                "name": "Flux Download Manager",
+                "name": "Radium Download Manager",
                 "version": v_str,
                 "connections": 8,
                 "path": str(self.flux_bin),
@@ -605,7 +610,7 @@ class BenchmarkHarness:
                 "notes": "Native C++20 / WinHTTP segmented download engine (8 connections)",
             }
             self.tool_status["flux_32"] = {
-                "name": "Flux Download Manager",
+                "name": "Radium Download Manager",
                 "version": v_str,
                 "connections": 32,
                 "path": str(self.flux_bin),

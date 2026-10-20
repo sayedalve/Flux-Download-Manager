@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- FFmpeg Capability and Requirement Auditor
+# Radium Download Manager -- FFmpeg Capability and Requirement Auditor
 #
 # Inspects an ffmpeg.exe binary and verifies that all demuxers, muxers, parsers,
-# decoders, encoders, bitstream filters (BSFs), and protocols required by Flux's
+# decoders, encoders, bitstream filters (BSFs), and protocols required by Radium's
 # stream download and muxing workflows are supported.
 #
 # Workflows Audited:
@@ -43,7 +43,7 @@ if (-not $FfmpegPath) {
 $FfmpegPath = [System.IO.Path]::GetFullPath($FfmpegPath)
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   Flux Download Manager -- FFmpeg Capability Auditor            " -ForegroundColor Cyan
+Write-Host "   Radium Download Manager -- FFmpeg Capability Auditor          " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "Target Executable: $FfmpegPath" -ForegroundColor White
 

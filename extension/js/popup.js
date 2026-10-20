@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/popup.js) for Flux Cosmic Dark Popup UI.
+// Adapted from xifangczy/cat-catch (js/popup.js) for Radium Cosmic Dark Popup UI.
 // Supports media type filtering (All / Streams / Direct), live count badges, search filtering,
 // resolution/size formatting, real-time background query, and batch/single download handoff.
 
@@ -64,7 +64,7 @@ function renderDetectedMediaList(candidates, options = {}) {
   } = options;
 
   if (loading) {
-    return '<p class="empty" data-state="loading">Probing tab media &amp; connecting to Flux...</p>';
+    return '<p class="empty" data-state="loading">Probing tab media &amp; connecting to Radium...</p>';
   }
   if (errorMessage) {
     return `<div class="error-banner" data-state="error">${escapeHtml(errorMessage)}</div>`;
@@ -72,7 +72,7 @@ function renderDetectedMediaList(candidates, options = {}) {
 
   const connBanner = desktopConnected
     ? ""
-    : '<div class="error-banner" data-state="disconnected">Flux Desktop is offline. Direct files will fall back to browser download.</div>';
+    : '<div class="error-banner" data-state="disconnected">Radium Desktop is offline. Direct files will fall back to browser download.</div>';
 
   if (filterMode === "links") {
     const pageLinks = options.pageLinks || [];
@@ -98,7 +98,7 @@ function renderDetectedMediaList(candidates, options = {}) {
           </div>
         </div>
         <div class="media-actions">
-          <button class="dl-btn dl-link-btn" data-url="${safeUrl}" data-name="${safeName}">${desktopConnected ? "Download in Flux" : "Browser Download"}</button>
+          <button class="dl-btn dl-link-btn" data-url="${safeUrl}" data-name="${safeName}">${desktopConnected ? "Download in Radium" : "Browser Download"}</button>
         </div>
       </div>`;
     }).join("\n");
@@ -132,23 +132,40 @@ function renderDetectedMediaList(candidates, options = {}) {
       ? `<span class="item-variants">(+${item.variants.length} sub-playlists grouped)</span>`
       : "";
     const statusText = escapeHtml(item.handoffStatus || "Ready");
-    const isAlreadyQueued = (item.handoffStatus === "Queued in Flux");
+    const isAlreadyQueued = (item.handoffStatus === "Queued in Radium");
     const actionLabel = isAlreadyQueued
-      ? "Queued in Flux"
-      : ((!desktopConnected && !isStream) ? "Browser Download" : "Download in Flux");
+      ? "Queued in Radium"
+      : ((!desktopConnected && !isStream) ? "Browser Download" : "Download in Radium");
     const btnClass = isAlreadyQueued ? "dl-btn dl-queued" : "dl-btn";
 
     let qualityDropdownHtml = "";
     if (Array.isArray(item.qualities) && item.qualities.length > 1) {
+      const topNonAudio = item.qualities.find(q => !q.isAudioOnly) || item.qualities[0];
+      const defaultId = String((topNonAudio && (topNonAudio.id || topNonAudio.resolution)) || "").toLowerCase();
+      const selKey = String(item.selectedQualityId || item.resolution || "").toLowerCase();
+      let hasSel = false;
+
       const optsHtml = item.qualities.map(q => {
         const qid = escapeHtml(q.id || q.resolution || "");
         const szText = q.size > 0 ? (` · ${q.sizeEstimated ? "~" : ""}${formatMediaSize(q.size)}`) : "";
         const qlbl = escapeHtml((q.label || q.resolution || qid) + szText);
-        const isSelected = (String(q.id || "").toLowerCase() === String(item.resolution || "").toLowerCase() ||
-                            String(q.resolution || "").toLowerCase() === String(item.resolution || "").toLowerCase());
-        return `<option value="${qid}" ${isSelected ? "selected" : ""}>${qlbl}</option>`;
-      }).join("");
-      qualityDropdownHtml = `<select class="quality-select" data-id="${escapeHtml(item.candidateId)}" aria-label="Select stream quality">${optsHtml}</select>`;
+        let isSelected = false;
+        if (!hasSel && selKey && (String(q.id || "").toLowerCase() === selKey || String(q.resolution || "").toLowerCase() === selKey)) {
+          isSelected = true;
+          hasSel = true;
+        }
+        return { qid, qlbl, isSelected, isDefault: (String(q.id || "").toLowerCase() === defaultId) };
+      });
+
+      if (!hasSel) {
+        for (const opt of optsHtml) {
+          if (opt.isDefault) { opt.isSelected = true; hasSel = true; break; }
+        }
+        if (!hasSel && optsHtml.length > 0) optsHtml[0].isSelected = true;
+      }
+
+      const optsStr = optsHtml.map(o => `<option value="${o.qid}" ${o.isSelected ? "selected" : ""}>${o.qlbl}</option>`).join("");
+      qualityDropdownHtml = `<select class="quality-select" data-id="${escapeHtml(item.candidateId)}" aria-label="Select stream quality">${optsStr}</select>`;
     } else if (Array.isArray(item.qualities) && item.qualities.length === 1) {
       const singleQ = item.qualities[0];
       const singleSz = singleQ.size > 0 ? (` · ${singleQ.sizeEstimated ? "~" : ""}${formatMediaSize(singleQ.size)}`) : "";
@@ -274,6 +291,9 @@ function initPopupUI() {
           const chosen = cand.qualities.find(q => (q.id || q.resolution) === selTarget.value);
           if (chosen) {
             cand.resolution = chosen.resolution || chosen.id;
+            cand.selectedQualityId = chosen.id;
+            cand.videoFilter = chosen.videoFilter || chosen.resolution || chosen.id;
+            cand.size = chosen.size || cand.size;
             const itemBox = selTarget.closest ? selTarget.closest(".media-item") : null;
             const metaMono = itemBox ? itemBox.querySelector(".meta-mono") : null;
             if (metaMono) {
@@ -295,7 +315,16 @@ function initPopupUI() {
 
         const itemContainer = targetBtn.closest ? targetBtn.closest(".media-item") : null;
         const qualitySelect = itemContainer ? itemContainer.querySelector(".quality-select") : null;
-        const selectedQualityId = qualitySelect ? qualitySelect.value : "";
+        const itemCand = currentCandidates.find(c => c.candidateId === candidateId);
+        const selectedQualityId = qualitySelect ? qualitySelect.value : (itemCand ? (itemCand.selectedQualityId || itemCand.resolution) : "");
+        let chosenQ = null;
+        if (itemCand && Array.isArray(itemCand.qualities)) {
+          chosenQ = itemCand.qualities.find(q => (q.id || q.resolution) === selectedQualityId) || itemCand.qualities[0];
+          if (chosenQ) {
+            itemCand.resolution = chosenQ.resolution || chosenQ.id;
+            itemCand.selectedQualityId = chosenQ.id;
+          }
+        }
 
         targetBtn.textContent = "Connecting...";
         targetBtn.disabled = true;
@@ -305,6 +334,9 @@ function initPopupUI() {
             action: "downloadMedia",
             candidateId,
             qualityId: selectedQualityId,
+            resolution: chosenQ ? chosenQ.resolution : (itemCand ? itemCand.resolution : ""),
+            videoFilter: chosenQ ? (chosenQ.videoFilter || chosenQ.resolution) : "best",
+            selectedQuality: chosenQ,
             url,
             tabId: currentTabId,
             tabUrl: currentTabUrl
@@ -312,12 +344,12 @@ function initPopupUI() {
             const lastErr = chrome.runtime.lastError ? chrome.runtime.lastError.message : null;
             if (!lastErr && resp && resp.success) {
               const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
-              targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Flux";
+              targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Radium";
               targetBtn.classList.add("dl-queued");
               const taskId = (resp.result && resp.result.taskId) ? resp.result.taskId : "";
               if (taskId) targetBtn.setAttribute("data-task-id", taskId);
               const itemCand = currentCandidates.find(c => c.candidateId === candidateId);
-              if (itemCand) itemCand.handoffStatus = isFallback ? "Browser Fallback" : "Queued in Flux";
+              if (itemCand) itemCand.handoffStatus = isFallback ? "Browser Fallback" : "Queued in Radium";
             } else {
               const errMsg = lastErr || (resp && resp.error) || "Failed";
               targetBtn.textContent = "Failed";
@@ -350,7 +382,7 @@ function initPopupUI() {
             const lastErr = chrome.runtime.lastError ? chrome.runtime.lastError.message : null;
             if (!lastErr && resp && resp.success) {
               const isFallback = Boolean(resp.result && resp.result.fallbackToBrowser);
-              targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Flux";
+              targetBtn.textContent = isFallback ? "Browser Download" : "Queued in Radium";
               targetBtn.classList.add("dl-queued");
             } else {
               targetBtn.textContent = "Failed";
@@ -368,7 +400,7 @@ function initPopupUI() {
     if (isDesktopConnected) {
       connectionBadge.textContent = "Desktop Connected";
       connectionBadge.className = "conn-badge conn-connected";
-      connectionBadge.title = "Flux desktop application is running and communicating via Native Messaging.";
+      connectionBadge.title = "Radium desktop application is running and communicating via Native Messaging.";
     } else if (errCategory === "UNAUTHORIZED_EXTENSION_ORIGIN") {
       connectionBadge.textContent = "Origin Unauthorized";
       connectionBadge.className = "conn-badge conn-warning";
@@ -380,7 +412,7 @@ function initPopupUI() {
     } else {
       connectionBadge.textContent = "Desktop Offline";
       connectionBadge.className = "conn-badge conn-disconnected";
-      connectionBadge.title = "Flux desktop application is not running or named pipe IPC is unreachable.";
+      connectionBadge.title = "Radium desktop application is not running or named pipe IPC is unreachable.";
     }
   }
 
@@ -522,7 +554,7 @@ function initPopupUI() {
     });
   }
 
-  // Download all in Flux button
+  // Download all in Radium button
   if (batchDownloadBtn) {
     batchDownloadBtn.addEventListener("click", () => {
       if (activeFilterMode === "links") {
@@ -559,11 +591,18 @@ function initPopupUI() {
         if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
           const itemEl = mediaListEl ? mediaListEl.querySelector(`.media-item[data-id="${item.candidateId}"]`) : null;
           const qSelect = itemEl ? itemEl.querySelector(".quality-select") : null;
-          const qId = qSelect ? qSelect.value : "";
+          const qId = qSelect ? qSelect.value : (item.selectedQualityId || item.resolution || "");
+          let chosenQ = null;
+          if (Array.isArray(item.qualities)) {
+            chosenQ = item.qualities.find(q => (q.id || q.resolution) === qId) || item.qualities[0];
+          }
           chrome.runtime.sendMessage({
             action: "downloadMedia",
             candidateId: item.candidateId,
             qualityId: qId,
+            resolution: chosenQ ? chosenQ.resolution : (item.resolution || ""),
+            videoFilter: chosenQ ? (chosenQ.videoFilter || chosenQ.resolution) : "best",
+            selectedQuality: chosenQ,
             url: item.url,
             tabId: currentTabId,
             tabUrl: currentTabUrl

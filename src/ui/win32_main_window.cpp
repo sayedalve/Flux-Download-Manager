@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 #include "ui/win32_main_window.hpp"
 
 #include "brisk_engine/http_client.hpp"
@@ -14,6 +14,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <regex>
 #include <sstream>
 #include <thread>
 
@@ -25,6 +26,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -40,6 +42,7 @@ namespace openidm::ui {
 namespace {
 
 #ifdef _WIN32
+HICON CreateRadiumAppIcon();
 HICON CreateFluxAppIcon();
 
 std::wstring Utf8ToW(std::string_view sv) {
@@ -65,6 +68,10 @@ std::string ToLower(std::string_view sv) {
     std::string s(sv);
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+inline std::string ToLowerStr(std::string_view sv) {
+    return ToLower(sv);
 }
 
 std::string FormatTimestampUtc(int64_t epoch_ms) {
@@ -99,8 +106,9 @@ DesktopView::DesktopView(DownloadController& controller, ipc::IpcServer* ipc_ser
       m_palette(DesignSystem::GetRedesignPalette()) {
     auto settings = m_controller.GetSettings();
     m_draft_settings = settings;
-    m_starfield.SetReducedMotion(settings.reduced_motion);
-    m_starfield.SetWindowState(!settings.start_minimized, settings.start_minimized);
+    m_anim.reduced_motion = settings.reduced_motion;
+    m_anim.window_visible = !settings.start_minimized;
+    m_anim.window_minimized = settings.start_minimized;
     SetTheme(settings.theme, false);
     LoadColumnWidthsFromSettings();
 }
@@ -112,15 +120,71 @@ void DesktopView::SetWindowDimensions(int width, int height, uint32_t dpi) {
 }
 
 void DesktopView::SetWindowVisibility(bool visible, bool minimized) {
-    m_starfield.SetWindowState(visible, minimized);
+    m_anim.window_visible = visible;
+    m_anim.window_minimized = minimized;
 }
 
-void DesktopView::AdvanceCosmicBackground(uint64_t delta_ms) {
-    m_starfield.AdvanceTime(delta_ms);
+void DesktopView::TriggerActionPulse(const std::string& task_id, const std::string& action) {
+    if (!m_anim.IsActive()) return;
+    m_anim.icon_pulses[task_id] = {GetTickCount64(), action};
 }
 
-std::vector<StarRenderInstance> DesktopView::BuildCosmicBackgroundStars() const {
-    return m_starfield.BuildRenderStars({0, 0, m_window_width, m_window_height}, m_metrics.dpi, m_palette);
+TaskbarProgressInfo DesktopView::ComputeTaskbarProgress() const {
+    TaskbarProgressInfo info;
+    auto tasks = m_controller.ListTasks();
+    if (tasks.empty()) {
+        info.state = TaskbarProgressState::kNoProgress;
+        return info;
+    }
+
+    size_t active_count = 0;
+    size_t paused_count = 0;
+    uint64_t active_completed = 0;
+    uint64_t active_total = 0;
+    bool has_indeterminate_active = false;
+
+    uint64_t paused_completed = 0;
+    uint64_t paused_total = 0;
+
+    for (const auto& t : tasks) {
+        if (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kMuxing) {
+            active_count++;
+            if (t.state == TaskState::kProbing || t.total_bytes == 0) {
+                has_indeterminate_active = true;
+            } else {
+                active_completed += t.downloaded_bytes;
+                active_total += t.total_bytes;
+            }
+        } else if (t.state == TaskState::kPaused) {
+            paused_count++;
+            if (t.total_bytes > 0) {
+                paused_completed += t.downloaded_bytes;
+                paused_total += t.total_bytes;
+            }
+        }
+    }
+
+    if (active_count > 0) {
+        if (has_indeterminate_active || active_total == 0) {
+            info.state = TaskbarProgressState::kIndeterminate;
+        } else {
+            info.state = TaskbarProgressState::kNormal;
+            info.completed_bytes = active_completed;
+            info.total_bytes = active_total;
+            info.progress_fraction = static_cast<double>(active_completed) / static_cast<double>(active_total);
+        }
+    } else if (paused_count > 0) {
+        info.state = TaskbarProgressState::kPaused;
+        info.completed_bytes = paused_completed;
+        info.total_bytes = paused_total;
+        if (paused_total > 0) {
+            info.progress_fraction = static_cast<double>(paused_completed) / static_cast<double>(paused_total);
+        }
+    } else {
+        info.state = TaskbarProgressState::kNoProgress;
+    }
+
+    return info;
 }
 
 std::vector<std::string> DesktopView::GetVisibleColumns() const {
@@ -173,14 +237,14 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     struct BtnDef { ToolbarActionId id; const char* label; bool enabled; bool primary; int base_w; };
     const BtnDef defs[] = {
         {ToolbarActionId::kAddUrl,       "+ Add download", tb.can_add_url,       true,  145},
+        {ToolbarActionId::kStartAll,     "Start all",      tb.can_start_all,     false, 82},
+        {ToolbarActionId::kPauseAll,     "Pause all",      tb.can_pause_all,     false, 82},
         {ToolbarActionId::kStart,        "Start",          tb.can_start,         false, 62},
         {ToolbarActionId::kPause,        "Pause",          tb.can_pause,         false, 62},
         {ToolbarActionId::kResume,       "Resume",         tb.can_resume,        false, 68},
         {ToolbarActionId::kRetry,        "Retry",          tb.can_retry,         false, 62},
         {ToolbarActionId::kCancel,       "Cancel",         tb.can_cancel,        false, 64},
-        {ToolbarActionId::kRemove,       "Remove",         tb.can_remove,        false, 68},
         {ToolbarActionId::kClearHistory, "Clear History",  tb.can_clear_history, false, 96},
-        {ToolbarActionId::kOpenFolder,   "Open Folder",    tb.can_open_folder,   false, 92},
         {ToolbarActionId::kSettings,     "Settings",       tb.can_open_settings, false, 36}
     };
     int act_x = filt_x + filt_w + DesignSystem::ScaleForDpi(12, m.dpi);
@@ -220,15 +284,15 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     g.sidebar_rect = {0, bar_h, 0, bar_h};
 
     int hdr_h = DesignSystem::ScaleForDpi(38, m.dpi);
-    int sb_h = DesignSystem::ScaleForDpi(36, m.dpi);
+    int sb_h = 0; // Bottom status bar permanently removed
     int det_h = (m_selected_task_id.empty() || h < DesignSystem::ScaleForDpi(580, m.dpi))
         ? 0
         : DesignSystem::ScaleForDpi(115, m.dpi);
     g.table_header_rect = {0, bar_h, w, bar_h + hdr_h};
     g.table_body_rect = {0, bar_h + hdr_h, w, h - sb_h - det_h};
     g.details_panel_rect = {0, h - sb_h - det_h, w, h - sb_h};
-    g.status_bar_rect = {0, h - sb_h, w, h};
-    g.status_toggle_off_rect = {16, h - sb_h + (sb_h - 24) / 2, 62, h - sb_h + (sb_h + 24) / 2};
+    g.status_bar_rect = {0, h, w, h};
+    g.status_toggle_off_rect = {0, 0, 0, 0};
 
     int col_chk_w = 44;
     int def_name_w = DesignSystem::ScaleForDpi(380, m.dpi);
@@ -540,9 +604,32 @@ bool DesktopView::HandleMouseClick(int x, int y, bool double_click, size_t scrol
 
 HitTestResult DesktopView::HandleMouseMove(int x, int y, size_t scroll_offset) {
     auto hit = HitTestPoint(x, y, scroll_offset);
-    m_hovered_toolbar_index = (hit.type == HitTargetType::kToolbarButton) ? hit.index : -1;
+
+    int new_toolbar_idx = (hit.type == HitTargetType::kToolbarButton) ? hit.index : -1;
+    if (new_toolbar_idx != m_hovered_toolbar_index) {
+        m_hovered_toolbar_index = new_toolbar_idx;
+        if (new_toolbar_idx >= 0) {
+            m_anim.hovered_toolbar_idx = new_toolbar_idx;
+            m_anim.toolbar_hover_start_ms = GetTickCount64();
+        } else {
+            m_anim.hovered_toolbar_idx = -1;
+            m_anim.toolbar_hover_start_ms = 0;
+        }
+    }
+
+    int new_row_idx = (hit.type == HitTargetType::kTaskRow || hit.type == HitTargetType::kTaskRowActionButton) ? hit.index : -1;
+    if (new_row_idx != m_hovered_row_index) {
+        m_hovered_row_index = new_row_idx;
+        if (new_row_idx >= 0) {
+            m_anim.hovered_row_idx = new_row_idx;
+            m_anim.row_hover_start_ms = GetTickCount64();
+        } else {
+            m_anim.hovered_row_idx = -1;
+            m_anim.row_hover_start_ms = 0;
+        }
+    }
+
     m_hovered_sidebar_index = (hit.type == HitTargetType::kSidebarCategory) ? hit.index : -1;
-    m_hovered_row_index = (hit.type == HitTargetType::kTaskRow || hit.type == HitTargetType::kTaskRowActionButton) ? hit.index : -1;
     m_active_tooltip = hit.tooltip_text;
     return hit;
 }
@@ -793,6 +880,11 @@ void DesktopView::CycleFilterDropdown() {
 }
 
 void DesktopView::SelectCategory(SidebarCategory category) {
+    if (m_selected_category != category) {
+        m_anim.prev_category_idx = static_cast<int>(m_selected_category);
+        m_anim.current_category_idx = static_cast<int>(category);
+        m_anim.category_transition_start_ms = GetTickCount64();
+    }
     m_selected_category = category;
     auto visible = GetFilteredAndSortedTasks();
     bool still_visible = false;
@@ -827,7 +919,8 @@ bool DesktopView::MatchesCategory(const TaskModel& t, SidebarCategory cat) const
             return true;
         case SidebarCategory::kInProgress:
             return t.state == TaskState::kProbing || t.state == TaskState::kDownloading ||
-                   t.state == TaskState::kMuxing || t.state == TaskState::kVerifying;
+                   t.state == TaskState::kMuxing || t.state == TaskState::kVerifying ||
+                   t.state == TaskState::kFinalizing;
         case SidebarCategory::kQueued:
             return t.state == TaskState::kQueued || (t.state == TaskState::kPaused && !t.scheduled);
         case SidebarCategory::kCompleted:
@@ -1065,8 +1158,13 @@ std::vector<TaskModel> DesktopView::GetFilteredAndSortedTasks() const {
 
     auto compute_pct = [](const TaskModel& t) -> double {
         if (t.state == TaskState::kCompleted) return 100.0;
-        if (t.total_bytes > 0) return (static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes);
-        return t.stream_percent;
+        double pct = (t.total_bytes > 0)
+            ? (static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes)
+            : t.stream_percent;
+        if (t.state == TaskState::kFinalizing) return std::clamp(pct, 99.8, 99.9);
+        if (t.state == TaskState::kVerifying) return std::clamp(pct, 99.0, 99.5);
+        if (t.state == TaskState::kMuxing) return std::clamp(pct, 98.0, 99.0);
+        return std::clamp(pct, 0.0, 99.0);
     };
 
     std::sort(filtered.begin(), filtered.end(), [&](const TaskModel& a, const TaskModel& b) {
@@ -1146,6 +1244,7 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
                 case TaskState::kDownloading: row.status_text = row.is_stream ? "Downloading video segments..." : "Downloading..."; break;
                 case TaskState::kMuxing:      row.status_text = "Merging tracks (FFmpeg)..."; break;
                 case TaskState::kVerifying:   row.status_text = "Verifying output..."; break;
+                case TaskState::kFinalizing:  row.status_text = "Finalizing output..."; break;
                 case TaskState::kPaused:      row.status_text = t.scheduled ? ("Scheduled (" + t.schedule_time_local + ")") : "Paused"; break;
                 case TaskState::kCompleted:   row.status_text = "Completed"; break;
                 case TaskState::kFailed:      row.status_text = "Failed (" + (t.error_code.empty() ? "Error" : t.error_code) + ")"; break;
@@ -1171,6 +1270,7 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
             case TaskState::kProbing:
             case TaskState::kMuxing:
             case TaskState::kVerifying:
+            case TaskState::kFinalizing:
                 row.status_indicator_color = m_palette.accent_violet;
                 row.progress_fill_color = row.is_stream ? m_palette.badge_stream : m_palette.accent_cyan;
                 break;
@@ -1190,18 +1290,38 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
             row.progress_fraction = 1.0;
             row.progress_text = "100.0%";
         } else if (t.total_bytes > 0) {
-            double pct = std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0);
+            double pct = (static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes);
+            if (t.state == TaskState::kFinalizing) {
+                pct = std::clamp(pct, 99.8, 99.9);
+            } else if (t.state == TaskState::kVerifying) {
+                pct = std::clamp(pct, 99.0, 99.5);
+            } else if (t.state == TaskState::kMuxing) {
+                pct = std::clamp(pct, 98.0, 99.0);
+            } else {
+                pct = std::clamp(pct, 0.0, 99.0);
+            }
             row.progress_fraction = pct / 100.0;
             prog_ss << std::fixed << std::setprecision(1) << pct << "%";
             row.progress_text = prog_ss.str();
         } else if (row.is_stream && t.total_segments > 0) {
-            double pct = std::clamp((static_cast<double>(t.completed_segments) * 100.0) / static_cast<double>(t.total_segments), 0.0, 100.0);
+            double pct = (static_cast<double>(t.completed_segments) * 100.0) / static_cast<double>(t.total_segments);
+            if (t.state == TaskState::kFinalizing) {
+                pct = std::clamp(pct, 99.8, 99.9);
+            } else if (t.state == TaskState::kVerifying) {
+                pct = std::clamp(pct, 99.0, 99.5);
+            } else if (t.state == TaskState::kMuxing) {
+                pct = std::clamp(pct, 98.0, 99.0);
+            } else {
+                pct = std::clamp(pct, 0.0, 99.0);
+            }
             row.progress_fraction = pct / 100.0;
             prog_ss << std::fixed << std::setprecision(1) << pct << "% (" << t.completed_segments << "/" << t.total_segments << " segs)";
             row.progress_text = prog_ss.str();
         } else {
             row.progress_fraction = 0.0;
-            row.progress_indeterminate = (t.state == TaskState::kDownloading || t.state == TaskState::kProbing);
+            row.progress_indeterminate = (t.state == TaskState::kDownloading || t.state == TaskState::kProbing ||
+                                          t.state == TaskState::kMuxing || t.state == TaskState::kVerifying ||
+                                          t.state == TaskState::kFinalizing);
             row.progress_text = FormatBytes(t.downloaded_bytes) + " (Size Unknown)";
         }
 
@@ -1226,9 +1346,9 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
 
         if (t.state == TaskState::kDownloading) {
             double pct = (t.total_bytes > 0)
-                ? std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0)
+                ? std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 99.0)
                 : (row.is_stream && t.total_segments > 0
-                    ? std::clamp((static_cast<double>(t.completed_segments) * 100.0) / static_cast<double>(t.total_segments), 0.0, 100.0)
+                    ? std::clamp((static_cast<double>(t.completed_segments) * 100.0) / static_cast<double>(t.total_segments), 0.0, 99.0)
                     : 0.0);
             int ipct = static_cast<int>(pct);
             row.status_text = (t.total_bytes > 0 || (row.is_stream && t.total_segments > 0)) ? ("Downloading " + std::to_string(ipct) + "%") : "Downloading...";
@@ -1246,7 +1366,16 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
             if (t.scheduled) {
                 row.status_text = "Scheduled (" + t.schedule_time_local + ")";
             } else if (t.total_bytes > 0) {
-                double pct = std::clamp((static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes), 0.0, 100.0);
+                double pct = (static_cast<double>(t.downloaded_bytes) * 100.0) / static_cast<double>(t.total_bytes);
+            if (t.state == TaskState::kFinalizing) {
+                pct = std::clamp(pct, 99.8, 99.9);
+            } else if (t.state == TaskState::kVerifying) {
+                pct = std::clamp(pct, 99.0, 99.5);
+            } else if (t.state == TaskState::kMuxing) {
+                pct = std::clamp(pct, 98.0, 99.0);
+            } else {
+                pct = std::clamp(pct, 0.0, 99.0);
+            }
                 row.status_text = "Paused " + std::to_string(static_cast<int>(pct)) + "%";
             } else {
                 row.status_text = "Paused";
@@ -1308,6 +1437,8 @@ std::vector<FormattedTaskRow> DesktopView::BuildVisibleTaskRows(size_t scroll_of
 
 ToolbarState DesktopView::ComputeToolbarState() const {
     ToolbarState st;
+    st.can_start_all = true;
+    st.can_pause_all = true;
     auto all = m_controller.ListTasks();
     for (const auto& t : all) {
         if (t.state == TaskState::kCompleted || t.state == TaskState::kCanceled) {
@@ -1406,7 +1537,7 @@ TaskDetailsViewModel DesktopView::BuildSelectedTaskDetails() const {
     } else if (t.error_code == "ERR_HTTP_403_EXPIRED_OR_AUTH") {
         vm.error_explanation = t.error_message + " — The server rejected the link or the signed token expired. Use 'Refresh URL' or re-capture from your browser.";
     } else if (t.error_code == "ERR_STREAM_DRM_PROTECTED") {
-        vm.error_explanation = t.error_message + " — Encrypted with commercial DRM (Widevine/PlayReady/FairPlay), which Flux does not circumvent.";
+        vm.error_explanation = t.error_message + " — Encrypted with commercial DRM (Widevine/PlayReady/FairPlay), which Radium does not circumvent.";
     } else if (t.error_code == "ERR_DISK_FULL") {
         vm.error_explanation = t.error_message + " — Free up disk space in the destination folder and click Resume or Retry.";
     } else {
@@ -1467,7 +1598,7 @@ StatusBarViewModel DesktopView::BuildStatusBar() const {
 std::string DesktopView::GetEmptyStateMessage() const {
     auto all = m_controller.ListTasks();
     if (all.empty()) {
-        return "No downloads yet. Click '+ Add URL' (Ctrl+N) or use the Flux Browser Extension to capture files and video streams.";
+        return "No downloads yet. Click '+ Add URL' (Ctrl+N) or use the Radium Browser Extension to capture files and video streams.";
     }
     if (!m_search_query.empty()) {
         return "No downloads match the search filter \"" + m_search_query + "\". Clear the search box to view all tasks.";
@@ -1482,7 +1613,7 @@ std::string DesktopView::GetEmptyStateMessage() const {
         case SidebarCategory::kFailed:
             return "No failed downloads. All transfers are healthy.";
         case SidebarCategory::kVideoDownloads:
-            return "No video or HLS/DASH stream downloads yet. Open a video page with the Flux Browser Extension enabled.";
+            return "No video or HLS/DASH stream downloads yet. Open a video page with the Radium Browser Extension enabled.";
         case SidebarCategory::kScheduled:
             return "No scheduled tasks configured.";
         default:
@@ -1496,6 +1627,7 @@ std::string DesktopView::GetEmptyStateMessage() const {
 
 void DesktopView::OpenSettingsCenter(SettingsCategory initial_category) {
     m_settings_center_open = true;
+    m_anim.settings_open_start_ms = GetTickCount64();
     m_settings_category = initial_category;
     m_draft_settings = m_controller.GetSettings();
     m_settings_validation_key.clear();
@@ -1677,6 +1809,29 @@ Result<void> DesktopView::SetDraftSettingByKey(std::string_view key, std::string
         m_draft_settings.min_capture_size_bytes = v;
     } else if (key == "show_completion_notification") {
         m_draft_settings.show_completion_notification = parse_bool(value_str);
+    } else if (key == "max_auto_retries") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v > 50) {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Maximum automatic retries must be between 0 and 50.";
+            return Result<void>::Err("ERR_SETTINGS_RETRIES_RANGE", m_settings_validation_error);
+        }
+        m_draft_settings.max_auto_retries = static_cast<uint32_t>(v);
+    } else if (key == "retry_interval_sec") {
+        uint64_t v = 0;
+        if (!parse_u64(value_str, v) || v < 1 || v > 600) {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Retry interval must be between 1 and 600 seconds.";
+            return Result<void>::Err("ERR_SETTINGS_RETRY_INTERVAL", m_settings_validation_error);
+        }
+        m_draft_settings.retry_interval_sec = static_cast<uint32_t>(v);
+    } else if (key == "queue_completion_action") {
+        if (value_str != "NONE" && value_str != "SLEEP" && value_str != "SHUTDOWN") {
+            m_settings_validation_key = std::string(key);
+            m_settings_validation_error = "Queue post-completion action must be NONE, SLEEP, or SHUTDOWN.";
+            return Result<void>::Err("ERR_SETTINGS_COMPLETION_ACTION", m_settings_validation_error);
+        }
+        m_draft_settings.queue_completion_action = std::string(value_str);
     } else {
         return Result<void>::Err("ERR_SETTINGS_UNKNOWN_KEY", "Unknown setting key: " + std::string(key));
     }
@@ -1854,7 +2009,7 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
     add_item(
         "start_minimized", SettingsCategory::kGeneral, "Startup & Window Behavior",
         "Start Minimized to System Tray",
-        "Launch Flux quietly in the system tray without opening the main window on startup.",
+        "Launch Radium quietly in the system tray without opening the main window on startup.",
         SettingControlType::kToggleSwitch,
         s.start_minimized ? "Enabled" : "Disabled", "Disabled",
         s.start_minimized, s.start_minimized != saved.start_minimized);
@@ -1866,11 +2021,11 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         s.close_to_tray ? "Enabled" : "Disabled", "Enabled",
         s.close_to_tray, s.close_to_tray != saved.close_to_tray);
     add_item(
-        "reduced_motion", SettingsCategory::kGeneral, "Cosmic Interface & Accessibility",
-        "Reduce Decorative Starfield Motion",
-        "Use the static cosmic starfield fallback with zero background movement.",
+        "reduced_motion", SettingsCategory::kGeneral, "Interface & Accessibility",
+        "Reduce UI Animations",
+        "Disable smooth interface transitions and progress animations for accessibility.",
         SettingControlType::kToggleSwitch,
-        s.reduced_motion ? "Static Fallback" : "Subtle Drift", "Subtle Drift",
+        s.reduced_motion ? "Reduced Motion" : "Standard Animations", "Standard Animations",
         s.reduced_motion, s.reduced_motion != saved.reduced_motion);
 
     // 2. Downloads & Queue
@@ -1878,7 +2033,7 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         "max_concurrent_tasks", SettingsCategory::kDownloads, "Queue Concurrency",
         "Maximum Simultaneous Downloads",
         "Active HTTP and stream transfers allowed to run concurrently in the main queue (1–16).",
-        SettingControlType::kNumericStepper,
+        SettingControlType::kDropdown,
         std::to_string(s.max_concurrent_tasks) + " tasks", "3 tasks",
         false, s.max_concurrent_tasks != saved.max_concurrent_tasks);
     add_item(
@@ -1899,14 +2054,14 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         "max_auto_retries", SettingsCategory::kDownloads, "Automation & Recovery",
         "Max Automatic Retries",
         "Number of automatic retries on transient network errors before marking failed (0–50).",
-        SettingControlType::kNumericStepper,
+        SettingControlType::kDropdown,
         std::to_string(s.max_auto_retries) + " retries", "5 retries",
         false, s.max_auto_retries != saved.max_auto_retries);
     add_item(
         "retry_interval_sec", SettingsCategory::kDownloads, "Automation & Recovery",
         "Base Retry Interval",
         "Initial wait interval in seconds before retry attempt (with exponential backoff).",
-        SettingControlType::kNumericStepper,
+        SettingControlType::kDropdown,
         std::to_string(s.retry_interval_sec) + " seconds", "15 seconds",
         false, s.retry_interval_sec != saved.retry_interval_sec);
     add_item(
@@ -1958,7 +2113,7 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         "default_connections_per_task", SettingsCategory::kConnectionsAndSpeed, "Segmented HTTP Engine",
         "Default Connections per Task",
         "Maximum dynamic work-stealing HTTP range connections spawned per file transfer (1–32).",
-        SettingControlType::kNumericStepper,
+        SettingControlType::kDropdown,
         std::to_string(s.default_connections_per_task) + " connections", "8 connections",
         false, s.default_connections_per_task != saved.default_connections_per_task);
     add_item(
@@ -1972,7 +2127,7 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
         "stall_timeout_ms", SettingsCategory::kConnectionsAndSpeed, "Advanced Transfer Tuning",
         "Segment Stall Timeout",
         "Inactivity threshold before resetting a stalled HTTP range connection (500–60,000 ms).",
-        SettingControlType::kNumericStepper,
+        SettingControlType::kDropdown,
         std::to_string(s.stall_timeout_ms) + " ms", "3000 ms",
         false, s.stall_timeout_ms != saved.stall_timeout_ms, true);
     add_item(
@@ -2015,7 +2170,7 @@ std::vector<SettingItemView> DesktopView::BuildAllSettingItems() const {
     add_item(
         "browser_capture_enabled", SettingsCategory::kBrowserIntegration, "Extension Capture & Interception",
         "Enable Browser Download & Media Capture",
-        "Accept file downloads and HLS/DASH streams from the Flux Browser Extension (hold Alt when clicking a link to bypass).",
+        "Accept file downloads and HLS/DASH streams from the Radium Browser Extension (hold Alt when clicking a link to bypass).",
         SettingControlType::kToggleSwitch,
         s.browser_capture_enabled ? "Enabled" : "Paused", "Enabled",
         s.browser_capture_enabled, s.browser_capture_enabled != saved.browser_capture_enabled);
@@ -2362,6 +2517,8 @@ Result<TaskModel> DesktopView::ConfirmStreamSelectionDialog(
 
 Result<void> DesktopView::TriggerToolbarAction(ToolbarActionId action_id) {
     switch (action_id) {
+        case ToolbarActionId::kStartAll:     return ActionStartAll();
+        case ToolbarActionId::kPauseAll:     return ActionPauseAll();
         case ToolbarActionId::kStart:        return ActionStartSelected();
         case ToolbarActionId::kPause:        return ActionPauseSelected();
         case ToolbarActionId::kResume:       return ActionResumeSelected();
@@ -2417,12 +2574,50 @@ Result<void> DesktopView::TriggerRowPrimaryAction(const std::string& task_id) {
     }
 }
 
+Result<void> DesktopView::ActionStartAll() {
+    auto all = m_controller.ListTasks();
+    size_t count = 0;
+    for (const auto& t : all) {
+        if ((t.state == TaskState::kPaused || t.state == TaskState::kFailed || t.state == TaskState::kQueued) && !t.scheduled) {
+            count++;
+            TriggerActionPulse(t.task_id, "start");
+        }
+    }
+    m_controller.StartAllTasks();
+    if (count > 0) {
+        m_last_feedback_message = "Started " + std::to_string(count) + " download(s)";
+    } else {
+        m_last_feedback_message = "No paused downloads to start";
+    }
+    return Result<void>::Ok();
+}
+
+Result<void> DesktopView::ActionPauseAll() {
+    auto all = m_controller.ListTasks();
+    size_t count = 0;
+    for (const auto& t : all) {
+        if (t.state == TaskState::kQueued || t.state == TaskState::kProbing ||
+            t.state == TaskState::kDownloading || t.state == TaskState::kMuxing) {
+            count++;
+            TriggerActionPulse(t.task_id, "pause");
+        }
+    }
+    m_controller.PauseAllTasks();
+    if (count > 0) {
+        m_last_feedback_message = "Paused " + std::to_string(count) + " download(s)";
+    } else {
+        m_last_feedback_message = "No active downloads to pause";
+    }
+    return Result<void>::Ok();
+}
+
 Result<void> DesktopView::ActionStartSelected() {
     if (m_checked_task_ids.empty() && m_selected_task_id.empty()) return Result<void>::Err("ERR_NO_SELECTION", "No task selected");
     std::set<std::string> ids = m_checked_task_ids;
     if (ids.empty()) ids.insert(m_selected_task_id);
     Result<void> last_res = Result<void>::Ok();
     for (const auto& id : ids) {
+        TriggerActionPulse(id, "start");
         auto r = m_controller.StartTask(id);
         if (!r.ok()) last_res = r;
     }
@@ -2436,6 +2631,7 @@ Result<void> DesktopView::ActionPauseSelected() {
     if (ids.empty()) ids.insert(m_selected_task_id);
     Result<void> last_res = Result<void>::Ok();
     for (const auto& id : ids) {
+        TriggerActionPulse(id, "pause");
         auto r = m_controller.PauseTask(id);
         if (!r.ok()) last_res = r;
     }
@@ -2449,6 +2645,7 @@ Result<void> DesktopView::ActionResumeSelected() {
     if (ids.empty()) ids.insert(m_selected_task_id);
     Result<void> last_res = Result<void>::Ok();
     for (const auto& id : ids) {
+        TriggerActionPulse(id, "resume");
         auto r = m_controller.ResumeTask(id);
         if (!r.ok()) last_res = r;
     }
@@ -2462,6 +2659,7 @@ Result<void> DesktopView::ActionRetrySelected() {
     if (ids.empty()) ids.insert(m_selected_task_id);
     Result<void> last_res = Result<void>::Ok();
     for (const auto& id : ids) {
+        TriggerActionPulse(id, "retry");
         auto r = m_controller.RetryTask(id);
         if (!r.ok()) last_res = r;
     }
@@ -2654,7 +2852,7 @@ Result<void> DesktopView::ActionSaveSettings(const AppSettings& settings) {
         m_settings_validation_key.clear();
         m_settings_validation_error.clear();
         SetTheme(settings.theme, false);
-        m_starfield.SetReducedMotion(settings.reduced_motion);
+        m_anim.reduced_motion = settings.reduced_motion;
         if (m_ipc_server) {
             m_ipc_server->SetCaptureEnabled(settings.browser_capture_enabled);
         }
@@ -2670,7 +2868,7 @@ Result<AppSettings> DesktopView::ActionRestoreDefaultSettings() {
         m_settings_validation_key.clear();
         m_settings_validation_error.clear();
         SetTheme(r.value->theme, false);
-        m_starfield.SetReducedMotion(r.value->reduced_motion);
+        m_anim.reduced_motion = r.value->reduced_motion;
         if (m_ipc_server) {
             m_ipc_server->SetCaptureEnabled(r.value->browser_capture_enabled);
         }
@@ -2824,7 +3022,7 @@ std::string DesktopView::RenderQueueTableText() const {
     auto rows = BuildVisibleTaskRows(0, 500);
     std::ostringstream oss;
     oss << "========================================================================================================================\n";
-    oss << " Flux Download Manager v" << FLUX_VERSION_STRING << " — Cosmic Dark Edition  |  Category: " << CategoryToLabel(m_selected_category)
+    oss << " Radium Download Manager v" << FLUX_VERSION_STRING << "  |  Category: " << CategoryToLabel(m_selected_category)
         << "  |  Theme: " << m_theme_name << "\n";
     oss << "========================================================================================================================\n";
     oss << std::left
@@ -2881,14 +3079,13 @@ std::string DesktopView::RenderFullDesktopSnapshotText() const {
 
 #ifdef _WIN32
 // -----------------------------------------------------------------------------
-// Native Windows 11 Win32 + GDI Double-Buffered Cosmic Dark Interface & Settings Center
+// Native Windows 11 Win32 + GDI Double-Buffered Dark Interface, Taskbar Progress & Settings Center
 // -----------------------------------------------------------------------------
 namespace {
 
 constexpr UINT WM_OPENIDM_TRAYICON = WM_APP + 101;
 constexpr UINT WM_OPENIDM_SHOW_NEW_DOWNLOAD = WM_APP + 102;
 constexpr UINT IDT_UI_REFRESH      = 1001;
-constexpr UINT IDT_COSMIC_DRIFT    = 1002;
 constexpr int  IDC_SEARCH_EDIT     = 1101;
 
 struct OfferNotificationData {
@@ -2940,7 +3137,35 @@ struct Win32WindowContext {
     int vscroll_drag_start_y{0};
     size_t vscroll_drag_start_offset{0};
     bool is_vscroll_hovered{false};
+    ITaskbarList3* pTaskbarList{nullptr};
+    bool com_initialized{false};
 };
+
+void SyncTaskbarProgress(HWND hwnd, ITaskbarList3* pTaskbar, const DesktopView& view) {
+    if (!hwnd || !pTaskbar) return;
+    auto info = view.ComputeTaskbarProgress();
+    switch (info.state) {
+        case TaskbarProgressState::kNoProgress:
+            pTaskbar->SetProgressState(hwnd, TBPF_NOPROGRESS);
+            break;
+        case TaskbarProgressState::kIndeterminate:
+            pTaskbar->SetProgressState(hwnd, TBPF_INDETERMINATE);
+            break;
+        case TaskbarProgressState::kNormal:
+            pTaskbar->SetProgressState(hwnd, TBPF_NORMAL);
+            pTaskbar->SetProgressValue(hwnd, info.completed_bytes, std::max<uint64_t>(1ULL, info.total_bytes));
+            break;
+        case TaskbarProgressState::kPaused:
+            pTaskbar->SetProgressState(hwnd, TBPF_PAUSED);
+            if (info.total_bytes > 0) {
+                pTaskbar->SetProgressValue(hwnd, info.completed_bytes, info.total_bytes);
+            }
+            break;
+        case TaskbarProgressState::kError:
+            pTaskbar->SetProgressState(hwnd, TBPF_ERROR);
+            break;
+    }
+}
 
 RECT ToWinRect(const RectI& r) {
     return RECT{r.left, r.top, r.right, r.bottom};
@@ -3079,7 +3304,7 @@ bool SelectFolderWithDialogWin32(HWND hwnd, std::string& io_folder) {
     BROWSEINFOW bi{};
     bi.hwndOwner = hwnd;
     bi.pszDisplayName = display_name;
-    bi.lpszTitle = L"Select Default Download Directory for Flux";
+    bi.lpszTitle = L"Select Default Download Directory for Radium";
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
     PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
     if (!pidl) return false;
@@ -3277,12 +3502,14 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     ctx->quality_choices.push_back({"144p", "144p Compact", "144p", 144, -1, false, "144p", "best", "", "", false, "mp4"});
                     ctx->quality_choices.push_back({"audio", "Audio Only (M4A)", "Audio", 0, -1, false, "audio", "best", "", "", true, "m4a"});
                 } else {
-                    ctx->quality_choices.push_back({"original", "Original / Direct File (Server Default)", "Original", 0, ctx->initial_file_size, false, "best", "best", "", "", false, "bin"});
+                    ctx->quality_choices.push_back({"original", "Original / Direct File (Server Default)", "", 0, ctx->initial_file_size, false, "best", "best", "", "", false, ""});
                 }
             }
 
             int sel_idx = 0;
             std::string initial_vfilter = existing_task.has_value() ? existing_task->stream_options.video_filter : "best";
+            std::string low_init = ToLowerStr(initial_vfilter);
+            bool matched_explicit = false;
             for (size_t i = 0; i < ctx->quality_choices.size(); ++i) {
                 const auto& qc = ctx->quality_choices[i];
                 std::wstring disp = Utf8ToW(qc.label);
@@ -3291,10 +3518,24 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     disp += qc.size_estimated ? (L" (~" + Utf8ToW(sz_str) + L" est.)") : (L" (" + Utf8ToW(sz_str) + L")");
                 }
                 SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(disp.c_str()));
-                if (!initial_vfilter.empty() && initial_vfilter != "best") {
-                    if (qc.id == initial_vfilter || qc.video_filter == initial_vfilter || qc.resolution == initial_vfilter ||
-                        (initial_vfilter.find(qc.id) != std::string::npos && !qc.id.empty())) {
+                if (!matched_explicit && !low_init.empty() && low_init != "best" && low_init != "auto") {
+                    std::string low_id = ToLowerStr(qc.id);
+                    std::string low_res = ToLowerStr(qc.resolution);
+                    std::string low_vf = ToLowerStr(qc.video_filter);
+                    if (low_id == low_init || low_res == low_init || low_vf == low_init ||
+                        (!low_id.empty() && low_init.find(low_id) != std::string::npos) ||
+                        (!low_init.empty() && low_id.find(low_init) != std::string::npos)) {
                         sel_idx = static_cast<int>(i);
+                        matched_explicit = true;
+                    }
+                }
+            }
+            if (!matched_explicit && !ctx->quality_choices.empty()) {
+                sel_idx = 0;
+                for (size_t i = 0; i < ctx->quality_choices.size(); ++i) {
+                    if (!ctx->quality_choices[i].is_audio_only) {
+                        sel_idx = static_cast<int>(i);
+                        break;
                     }
                 }
             }
@@ -3536,7 +3777,7 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 } else if (!is_stream_url && has_stream_items) {
                     SendMessageW(ctx->hQualityCombo, CB_RESETCONTENT, 0, 0);
                     ctx->quality_choices.clear();
-                    ctx->quality_choices.push_back({"original", "Original / Direct File (Server Default)", "Original", 0, -1, false, "best", "best", "", "", false});
+                    ctx->quality_choices.push_back({"original", "Original / Direct File (Server Default)", "", 0, -1, false, "best", "best", "", "", false, ""});
                     SendMessageW(ctx->hQualityCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Original / Direct File (Server Default)"));
                     SendMessageW(ctx->hQualityCombo, CB_SETCURSEL, 0, 0);
                 }
@@ -3683,6 +3924,9 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     auto t_opt = ctx->controller->GetTask(ctx->existing_task_id);
                     if (t_opt.has_value()) {
                         auto t = *t_opt;
+                        bool is_video_stream = (t.task_type == TaskType::kStreamHls || t.task_type == TaskType::kStreamDash || t.category == "Video" || is_yt);
+                        std::string old_fn = t.file_name;
+                        std::string old_sd = t.save_dir;
                         if (!fn.empty()) t.file_name = fn;
                         if (!sd.empty()) t.save_dir = sd;
                         t.scheduled = sched;
@@ -3702,8 +3946,19 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                             if (qc.is_audio_only) {
                                 t.stream_options.output_format = "m4a";
                                 t.category = "Audio";
-                            } else if (!qc.ext.empty()) {
+                            } else if (!qc.ext.empty() && is_video_stream) {
                                 t.stream_options.output_format = qc.ext;
+                            }
+                            // Clean up file name if it has an outdated resolution tag (e.g. [360p])
+                            // ONLY applies to video streams with a resolution tag! Never to direct files or "Original"!
+                            if (is_video_stream && !qc.resolution.empty() && qc.resolution != "Auto" && qc.resolution != "Original") {
+                                static const std::regex kResTagRe(R"(\s*\[\s*\d{3,4}p[_\w]*\s*\])", std::regex::icase);
+                                std::string base_fn = std::regex_replace(t.file_name, kResTagRe, "");
+                                auto dot_pos = base_fn.rfind('.');
+                                std::string stem = (dot_pos != std::string::npos) ? base_fn.substr(0, dot_pos) : base_fn;
+                                std::string ext = (dot_pos != std::string::npos) ? base_fn.substr(dot_pos + 1) : t.stream_options.output_format;
+                                if (!qc.is_audio_only && !qc.ext.empty()) ext = qc.ext;
+                                t.file_name = stem + " [" + qc.resolution + "]." + ext;
                             }
                             if (!qc.video_url.empty() || !qc.paired_audio_url.empty()) {
                                 if (!t.stream_options.cached_manifest_body.empty() &&
@@ -3715,9 +3970,29 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                             if (!qc.paired_audio_url.empty()) jroot["audioUrl"] = qc.paired_audio_url;
                                             jroot["requiresCipherExtraction"] = false;
                                             jroot["requiresAudioMux"] = !qc.paired_audio_url.empty();
+                                            jroot["resolution"] = qc.resolution;
+                                            jroot["videoFilter"] = qc.video_filter;
                                             t.stream_options.cached_manifest_body = jroot.dump();
                                         }
                                     } catch (...) {}
+                                }
+                            }
+                        }
+
+                        // If task was already completed (e.g. chunked transfer ingestion), ensure file on disk matches any rename
+                        if (t.state == TaskState::kCompleted) {
+                            std::filesystem::path old_p = std::filesystem::path(old_sd) / old_fn;
+                            std::filesystem::path new_p = std::filesystem::path(t.save_dir) / t.file_name;
+                            if (old_p != new_p) {
+                                std::error_code ren_ec;
+                                if (std::filesystem::exists(old_p, ren_ec)) {
+                                    std::filesystem::create_directories(new_p.parent_path(), ren_ec);
+                                    std::filesystem::rename(old_p, new_p, ren_ec);
+                                    if (ren_ec) {
+                                        ren_ec.clear();
+                                        std::filesystem::copy_file(old_p, new_p, std::filesystem::copy_options::overwrite_existing, ren_ec);
+                                        std::filesystem::remove(old_p, ren_ec);
+                                    }
                                 }
                             }
                         }
@@ -3730,7 +4005,7 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         }
 
                         ctx->controller->UpdateTask(t);
-                        if (start_now) {
+                        if (start_now && t.state != TaskState::kCompleted) {
                             ctx->controller->StartTask(ctx->existing_task_id);
                         }
                         ctx->submitted = true;
@@ -3792,6 +4067,18 @@ void ShowNewDownloadDialogWin32(
     int64_t file_size = -1,
     const std::string& existing_task_id = "") {
 
+    // Avoid duplicate windows and duplicate downloads: if a dialog is already open, bring it to front
+    HWND existing_dlg = FindWindowW(L"Radium_NewDownloadDlgClass", nullptr);
+    if (existing_dlg && IsWindow(existing_dlg)) {
+        if (!IsWindowVisible(existing_dlg) || IsIconic(existing_dlg)) {
+            ShowWindow(existing_dlg, SW_RESTORE);
+        }
+        BringWindowToTop(existing_dlg);
+        SetForegroundWindow(existing_dlg);
+        SetActiveWindow(existing_dlg);
+        return;
+    }
+
     HINSTANCE hInst = GetModuleHandleW(nullptr);
     static bool class_registered = false;
     if (!class_registered) {
@@ -3801,10 +4088,10 @@ void ShowNewDownloadDialogWin32(
         wc.lpfnWndProc = NewDownloadDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        HICON hAppIcon = CreateFluxAppIcon();
+        HICON hAppIcon = CreateRadiumAppIcon();
         wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
         wc.hIconSm = hAppIcon;
-        wc.lpszClassName = L"Flux_NewDownloadDlgClass";
+        wc.lpszClassName = L"Radium_NewDownloadDlgClass";
         RegisterClassExW(&wc);
         class_registered = true;
     }
@@ -3881,8 +4168,8 @@ void ShowNewDownloadDialogWin32(
     DWORD ex_style = WS_EX_DLGMODALFRAME | (owner_hwnd ? 0 : WS_EX_APPWINDOW);
     HWND hDlg = CreateWindowExW(
         ex_style,
-        L"Flux_NewDownloadDlgClass",
-        L"New Download \u2014 Flux",
+        L"Radium_NewDownloadDlgClass",
+        L"New Download \u2014 Radium",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         dlg_x, dlg_y, dlg_w, dlg_h,
         owner_hwnd, nullptr, hInst, &ctx);
@@ -3890,7 +4177,7 @@ void ShowNewDownloadDialogWin32(
     if (!hDlg) return;
     ctx.hDlg = hDlg;
 
-    HICON hDlgIcon = CreateFluxAppIcon();
+    HICON hDlgIcon = CreateRadiumAppIcon();
     if (hDlgIcon) {
         SendMessageW(hDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hDlgIcon));
         SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hDlgIcon));
@@ -4121,10 +4408,10 @@ bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, con
         wc.lpfnWndProc = SimpleInputDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        HICON hAppIcon = CreateFluxAppIcon();
+        HICON hAppIcon = CreateRadiumAppIcon();
         wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
         wc.hIconSm = hAppIcon;
-        wc.lpszClassName = L"Flux_SimpleInputDialogClass";
+        wc.lpszClassName = L"Radium_SimpleInputDialogClass";
         RegisterClassExW(&wc);
         registered = true;
     }
@@ -4143,7 +4430,7 @@ bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, con
 
     HWND hDlg = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
-        L"Flux_SimpleInputDialogClass",
+        L"Radium_SimpleInputDialogClass",
         title.c_str(),
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         dlg_x, dlg_y, dlg_w, dlg_h,
@@ -4151,7 +4438,7 @@ bool ShowSimpleInputDialogWin32(HWND hwnd_parent, const std::wstring& title, con
 
     if (!hDlg) return false;
 
-    HICON hDlgIcon = CreateFluxAppIcon();
+    HICON hDlgIcon = CreateRadiumAppIcon();
     if (hDlgIcon) {
         SendMessageW(hDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hDlgIcon));
         SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hDlgIcon));
@@ -4396,7 +4683,7 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 if (!res.ok()) {
                     std::string err = res.error.has_value() ? res.error->message : "Unknown error";
                     MessageBoxW(hwnd, Utf8ToW("Deletion failed: " + err).c_str(),
-                        L"Error \u2014 Flux", MB_ICONERROR | MB_OK);
+                        L"Error \u2014 Radium", MB_ICONERROR | MB_OK);
                 }
                 DestroyWindow(hwnd);
                 return 0;
@@ -4405,7 +4692,7 @@ LRESULT CALLBACK DeleteConfirmDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 if (!res.ok()) {
                     std::string err = res.error.has_value() ? res.error->message : "Unknown error";
                     MessageBoxW(hwnd, Utf8ToW("Recycle failed: " + err).c_str(),
-                        L"Error \u2014 Flux", MB_ICONERROR | MB_OK);
+                        L"Error \u2014 Radium", MB_ICONERROR | MB_OK);
                 }
                 DestroyWindow(hwnd);
                 return 0;
@@ -4448,10 +4735,10 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
         wc.lpfnWndProc = DeleteConfirmDlgProc;
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        HICON hAppIcon = CreateFluxAppIcon();
+        HICON hAppIcon = CreateRadiumAppIcon();
         wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
         wc.hIconSm = hAppIcon;
-        wc.lpszClassName = L"Flux_DeleteConfirmDlgClass";
+        wc.lpszClassName = L"Radium_DeleteConfirmDlgClass";
         RegisterClassExW(&wc);
         registered = true;
     }
@@ -4503,15 +4790,15 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
 
     HWND hDlg = CreateWindowExW(
         ex_style,
-        L"Flux_DeleteConfirmDlgClass",
-        L"Delete Download \u2014 Flux",
+        L"Radium_DeleteConfirmDlgClass",
+        L"Delete Download \u2014 Radium",
         WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
         dlg_x, dlg_y, dlg_w, dlg_h,
         owner_hwnd, nullptr, hInst, &ctx);
 
     if (!hDlg) return;
 
-    HICON hDlgIcon = CreateFluxAppIcon();
+    HICON hDlgIcon = CreateRadiumAppIcon();
     if (hDlgIcon) {
         SendMessageW(hDlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hDlgIcon));
         SendMessageW(hDlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hDlgIcon));
@@ -4570,18 +4857,6 @@ void ShowDeleteConfirmationDialogWin32(HWND hwnd_parent, DesktopView& view, Down
 
 namespace {
 
-void PaintCosmicBackgroundStars(HDC hdc, const DesktopView& view) {
-    auto stars = view.BuildCosmicBackgroundStars();
-    for (const auto& s : stars) {
-        if (s.size_px <= 1) {
-            SetPixelV(hdc, s.x, s.y, s.blended_color.ToWin32ColorRef());
-        } else {
-            RECT src{s.x, s.y, s.x + s.size_px, s.y + s.size_px};
-            FillRectSolid(hdc, src, s.blended_color);
-        }
-    }
-}
-
 void DrawCaretGlyphGdi(HDC hdc, int cx, int cy, ColorRgba col, bool up = false);
 void DrawRoundedBoxGdi(HDC hdc, const RECT& rc, int radius, ColorRgba bg, ColorRgba border, int border_w);
 
@@ -4590,11 +4865,16 @@ void PaintSettingsCenterOverlayWin32(HDC hdc, DesktopView& view, const RECT& cli
     const auto& m = view.GetMetrics();
     auto sv = view.BuildSettingsCenterView();
 
-    // 1. Dim the backdrop behind modal with subtle dark glass scrim
-    DrawGlassPanelGdi(hdc, client_rc, 0, ColorRgba{0x08, 0x08, 0x0A, 175}, ColorRgba{0, 0, 0, 0}, 0, false);
+    // 1. Smooth subtle entrance transition (150ms slide up + scrim fade)
+    float p = view.GetAnimationState().ComputeTransitionProgress(view.GetAnimationState().settings_open_start_ms, 150);
+    uint8_t scrim_alpha = static_cast<uint8_t>(175 * p);
+    DrawGlassPanelGdi(hdc, client_rc, 0, ColorRgba{0x08, 0x08, 0x0A, scrim_alpha}, ColorRgba{0, 0, 0, 0}, 0, false);
 
     // 2. Translucent glass modal card with specular highlight
+    int slide_offset_y = static_cast<int>((1.0f - p) * 12.0f);
     RECT modal_rc = ToWinRect(sv.modal_rect);
+    modal_rc.top += slide_offset_y;
+    modal_rc.bottom += slide_offset_y;
     DrawGlassPanelGdi(hdc, modal_rc, DesignSystem::ScaleForDpi(12, m.dpi), pal.glass_surface, pal.glass_border, 1, true /* add_top_specular */);
 
     int header_h = DesignSystem::ScaleForDpi(52, m.dpi);
@@ -4606,7 +4886,7 @@ void PaintSettingsCenterOverlayWin32(HDC hdc, DesktopView& view, const RECT& cli
     SetTextColor(hdc, pal.text_primary.ToWin32ColorRef());
     RECT title_rc = hdr_rc;
     title_rc.left += m.space_lg;
-    DrawTextW(hdc, L"Flux Settings & Configuration Center", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, L"Radium Settings & Configuration Center", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Sidebar categories
     RECT side_rc = ToWinRect(sv.sidebar_rect);
@@ -5079,9 +5359,14 @@ void DrawTimerClockGdi(HDC hdc, int x, int y, int radius, ColorRgba col) {
     DeleteObject(hPen);
 }
 
-HICON CreateFluxAppIcon() {
+HICON CreateRadiumAppIcon() {
     static HICON s_cached_icon = nullptr;
     if (s_cached_icon) return s_cached_icon;
+
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    s_cached_icon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
+    if (s_cached_icon) return s_cached_icon;
+
     int size = 32;
     HDC hdcScreen = GetDC(nullptr);
     HDC hdc = CreateCompatibleDC(hdcScreen);
@@ -5102,25 +5387,19 @@ HICON CreateFluxAppIcon() {
     DeleteObject(bgBr);
 
     RECT sqRc{2, 2, size - 2, size - 2};
-    DrawRoundedBoxGdi(hdc, sqRc, 10, {0xFF, 0x47, 0x57, 255}, {0xFF, 0x47, 0x57, 255}, 1);
+    DrawRoundedBoxGdi(hdc, sqRc, 8, {0xFF, 0x47, 0x57, 255}, {0xFF, 0x47, 0x57, 255}, 1);
 
-    POINT pts[6] = {
-        {18, 5},
-        {10, 16},
-        {16, 16},
-        {13, 26},
-        {23, 14},
-        {17, 14}
-    };
-    HPEN wPen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
-    HBRUSH wBr = CreateSolidBrush(RGB(255, 255, 255));
-    HGDIOBJ oldP = SelectObject(hdc, wPen);
-    HGDIOBJ oldB = SelectObject(hdc, wBr);
-    Polygon(hdc, pts, 6);
-    SelectObject(hdc, oldB);
-    SelectObject(hdc, oldP);
-    DeleteObject(wBr);
-    DeleteObject(wPen);
+    HFONT hFont = CreateFontW(
+        -20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    HGDIOBJ oldFont = SelectObject(hdc, hFont);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(255, 255, 255));
+    RECT textRc{2, 2, size - 2, size - 2};
+    DrawTextW(hdc, L"R", 1, &textRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, oldFont);
+    DeleteObject(hFont);
 
     SelectObject(hdc, oldBm);
     DeleteDC(hdc);
@@ -5135,6 +5414,10 @@ HICON CreateFluxAppIcon() {
     DeleteObject(hbmColor);
     DeleteObject(hbmMask);
     return s_cached_icon;
+}
+
+HICON CreateFluxAppIcon() {
+    return CreateRadiumAppIcon();
 }
 
 void PaintDetailsPanelWin32(HDC hdc, DesktopView& view, const RectI& rect, HFONT hFontBody, HFONT hFontBold, HFONT hFontSmall) {
@@ -5345,26 +5628,45 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
     DrawTextW(hdc, wcat.c_str(), -1, &filter_txt_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     DrawCaretGlyphGdi(hdc, filter_rc.right - 12, filter_rc.top + (filter_rc.bottom - filter_rc.top) / 2, pal.text_muted, false);
 
-    // 1.4 + Add download Pill Button
+    // 1.4 + Add download Pill Button (smooth hover and press)
     RECT add_rc = ToWinRect(geom.add_download_button_rect);
-    ColorRgba add_bg = (view.GetHoveredToolbarIndex() == 0) ? pal.accent_hover : pal.accent_primary;
+    bool add_hovered = (view.GetHoveredToolbarIndex() == 0);
+    bool add_pressed = (view.GetAnimationState().pressed_toolbar_idx == 0);
+    float add_hp = add_hovered ? view.GetAnimationState().ComputeTransitionProgress(view.GetAnimationState().toolbar_hover_start_ms, 140) : 0.0f;
+    ColorRgba add_bg = pal.accent_primary;
+    if (add_pressed) {
+        add_bg = pal.accent_primary.Interpolate(ColorRgba{0x00, 0x00, 0x00, 255}, 0.15f);
+    } else if (add_hp > 0.0f) {
+        add_bg = pal.accent_primary.Interpolate(pal.accent_hover, add_hp);
+    }
     DrawRoundedBoxGdi(hdc, add_rc, 20, add_bg, add_bg, 0);
     SelectObject(hdc, hFontBold);
     SetTextColor(hdc, RGB(255, 255, 255));
     DrawTextW(hdc, L"+ Add download", -1, &add_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // 1.5 Dynamic Context Action Buttons
+    // 1.5 Dynamic Context Action Buttons (smooth hover & press transitions)
     for (size_t btn_idx = 1; btn_idx < geom.toolbar_buttons.size() - 1; ++btn_idx) {
         const auto& btn = geom.toolbar_buttons[btn_idx];
         if (btn.rect.width() <= 0 || btn.rect.height() <= 0) continue;
         RECT brc = ToWinRect(btn.rect);
         bool hovered = (view.GetHoveredToolbarIndex() == static_cast<int>(btn_idx));
-        ColorRgba btn_bg = hovered ? pal.glass_elevated : pal.glass_surface;
-        ColorRgba btn_border = hovered ? pal.glass_highlight : pal.glass_border;
+        bool pressed = (view.GetAnimationState().pressed_toolbar_idx == static_cast<int>(btn_idx));
+        float hp = hovered ? view.GetAnimationState().ComputeTransitionProgress(view.GetAnimationState().toolbar_hover_start_ms, 140) : 0.0f;
+
+        ColorRgba btn_bg = pal.glass_surface;
+        ColorRgba btn_border = pal.glass_border;
+        if (pressed) {
+            btn_bg = pal.surface_pressed;
+            btn_border = pal.glass_highlight;
+        } else if (hp > 0.0f) {
+            btn_bg = pal.glass_surface.Interpolate(pal.glass_elevated, hp);
+            btn_border = pal.glass_border.Interpolate(pal.glass_highlight, hp);
+        }
         DrawGlassPanelGdi(hdc, brc, 16, btn_bg, btn_border, 1, false);
 
         SelectObject(hdc, hFontSmallBold);
-        SetTextColor(hdc, hovered ? pal.text_primary.ToWin32ColorRef() : pal.text_secondary.ToWin32ColorRef());
+        ColorRgba txt_col = hovered ? pal.text_primary : pal.text_secondary;
+        SetTextColor(hdc, txt_col.ToWin32ColorRef());
         std::wstring wlbl = Utf8ToW(btn.label);
         DrawTextW(hdc, wlbl.c_str(), -1, &brc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -5414,10 +5716,20 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             const auto& rl = geom.task_rows[i];
             RECT rrc = ToWinRect(rl.row_rect);
 
-            if (r.selected) {
-                FillRectSolid(hdc, rrc, pal.surface_selected);
-            } else if (view.GetHoveredRowIndex() == static_cast<int>(i)) {
-                FillRectSolid(hdc, rrc, pal.surface_hover);
+            // Smooth row hover/selection transitions
+            {
+                bool is_selected = r.selected;
+                bool is_hovered = (view.GetHoveredRowIndex() == static_cast<int>(i));
+                const auto& anim = view.GetAnimationState();
+                if (is_selected) {
+                    float sel_p = anim.ComputeTransitionProgress(anim.row_select_start_ms, 120);
+                    ColorRgba row_col = pal.surface_primary.Interpolate(pal.surface_selected, sel_p);
+                    FillRectSolid(hdc, rrc, row_col);
+                } else if (is_hovered) {
+                    float hov_p = anim.ComputeTransitionProgress(anim.row_hover_start_ms, 120);
+                    ColorRgba row_col = pal.surface_primary.Interpolate(pal.surface_hover, hov_p);
+                    FillRectSolid(hdc, rrc, row_col);
+                }
             }
 
             RECT row_div{0, rrc.bottom - 1, w, rrc.bottom};
@@ -5444,17 +5756,36 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             std::wstring wfn = Utf8ToW(r.display_filename);
             DrawTextW(hdc, wfn.c_str(), -1, &fn_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-            // Sleek horizontal linear progress bar (8px height) with explicit percentage display
+            // Sleek horizontal linear progress bar (8px height) with smoothly interpolated fill
             int bar_x = icon_x + icon_w + 10;
             int bar_y = rrc.top + 31;
             int bar_max_w = std::min(160, std::max(60, rl.filename_rect.right - bar_x - 70));
             int bar_h = DesignSystem::ScaleForDpi(8, m.dpi);
             RECT track_rc{bar_x, bar_y, bar_x + bar_max_w, bar_y + bar_h};
             FillRectSolid(hdc, track_rc, pal.progress_track);
-            int fill_w = static_cast<int>(static_cast<double>(bar_max_w) * std::clamp(r.progress_fraction, 0.0, 1.0));
-            if (fill_w > 0) {
-                RECT fill_rc{bar_x, bar_y, bar_x + fill_w, bar_y + bar_h};
-                FillRectSolid(hdc, fill_rc, r.progress_fill_color);
+            // Smooth interpolated progress: lerp cached value toward actual, capped at 99% unless complete
+            {
+                auto& interp_map = view.GetAnimationState().progress_interpolated;
+                float actual_frac = static_cast<float>(std::clamp(r.progress_fraction, 0.0, 1.0));
+                float disp_frac = actual_frac;
+                if (view.GetAnimationState().IsActive()) {
+                    auto it = interp_map.find(r.task_id);
+                    if (it == interp_map.end()) {
+                        interp_map[r.task_id] = actual_frac;
+                        disp_frac = actual_frac;
+                    } else {
+                        float prev = it->second;
+                        // Interpolate 15% per frame toward actual (smooth but fast catch-up)
+                        float next = prev + (actual_frac - prev) * 0.15f;
+                        it->second = next;
+                        disp_frac = next;
+                    }
+                }
+                int fill_w = static_cast<int>(static_cast<double>(bar_max_w) * disp_frac);
+                if (fill_w > 0) {
+                    RECT fill_rc{bar_x, bar_y, bar_x + fill_w, bar_y + bar_h};
+                    FillRectSolid(hdc, fill_rc, r.progress_fill_color);
+                }
             }
             RECT pct_rc{bar_x + bar_max_w + 8, bar_y - 4, bar_x + bar_max_w + 70, bar_y + bar_h + 4};
             SelectObject(hdc, hFontSmallBold);
@@ -5464,7 +5795,8 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             else if (r.state == TaskState::kQueued) wpct = L"0%";
             else {
                 char pbuf[32];
-                std::snprintf(pbuf, sizeof(pbuf), "%.1f%%", r.progress_fraction * 100.0);
+                double display_pct = std::min(99.0, r.progress_fraction * 100.0);
+                std::snprintf(pbuf, sizeof(pbuf), "%.1f%%", display_pct);
                 wpct = Utf8ToW(pbuf);
             }
             DrawTextW(hdc, wpct.c_str(), -1, &pct_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -5512,9 +5844,26 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
                 dl_rc.bottom = rrc.bottom;
 
                 RECT act_rc = ToWinRect(rl.action_icon_rect);
+
+                // Compute action icon pulse overlay (one-time 200ms brightness flare)
+                ColorRgba icon_tint_col = pal.accent_primary;
+                {
+                    const auto& anim = view.GetAnimationState();
+                    auto it = anim.icon_pulses.find(r.task_id);
+                    if (it != anim.icon_pulses.end()) {
+                        uint64_t now = GetTickCount64();
+                        uint64_t elapsed = (now >= it->second.start_ms) ? (now - it->second.start_ms) : 0;
+                        if (elapsed < 200) {
+                            float pulse_t = 1.0f - static_cast<float>(elapsed) / 200.0f;
+                            // Flare: brighten toward white then fade back
+                            icon_tint_col = pal.accent_primary.Interpolate(ColorRgba{255, 255, 255, 255}, pulse_t * 0.6f);
+                        }
+                    }
+                }
+
                 if (r.state == TaskState::kDownloading || r.state == TaskState::kProbing) {
                     DrawRoundedBoxGdi(hdc, act_rc, 6, pal.surface_primary, pal.border_subtle, 1);
-                    DrawPauseGlyphGdi(hdc, act_rc, pal.accent_primary);
+                    DrawPauseGlyphGdi(hdc, act_rc, icon_tint_col);
 
                     RECT spd_rc{act_rc.right + 8, dl_rc.top, dl_rc.right, dl_rc.bottom};
                     SelectObject(hdc, hFontBody);
@@ -5522,8 +5871,21 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
                     std::wstring wspd = Utf8ToW(r.speed_text);
                     DrawTextW(hdc, wspd.c_str(), -1, &spd_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 } else if (r.state == TaskState::kPaused || r.state == TaskState::kQueued) {
+                    ColorRgba play_tint = pal.text_secondary;
+                    {
+                        const auto& anim = view.GetAnimationState();
+                        auto it = anim.icon_pulses.find(r.task_id);
+                        if (it != anim.icon_pulses.end()) {
+                            uint64_t now = GetTickCount64();
+                            uint64_t elapsed = (now >= it->second.start_ms) ? (now - it->second.start_ms) : 0;
+                            if (elapsed < 200) {
+                                float pulse_t = 1.0f - static_cast<float>(elapsed) / 200.0f;
+                                play_tint = pal.text_secondary.Interpolate(pal.accent_primary, pulse_t);
+                            }
+                        }
+                    }
                     DrawRoundedBoxGdi(hdc, act_rc, 6, pal.surface_primary, pal.border_subtle, 1);
-                    DrawPlayGlyphGdi(hdc, act_rc, pal.text_secondary);
+                    DrawPlayGlyphGdi(hdc, act_rc, play_tint);
 
                     RECT spd_rc{act_rc.right + 8, dl_rc.top, dl_rc.right, dl_rc.bottom};
                     SelectObject(hdc, hFontBody);
@@ -5584,7 +5946,8 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
         PaintDetailsPanelWin32(hdc, view, geom.details_panel_rect, hFontBody, hFontBold, hFontSmall);
     }
 
-    // 4. Status Bar / Footer Glass Surface
+    // 4. Status Bar / Footer Glass Surface (Permanently removed)
+    if (geom.status_bar_rect.height() > 0) {
     RECT status_rc = ToWinRect(geom.status_bar_rect);
     DrawGlassPanelGdi(hdc, status_rc, 0, pal.glass_surface, pal.glass_border, 1, false);
 
@@ -5718,6 +6081,7 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
             DrawTextW(hdc, wrfn.c_str(), -1, &rfn_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     }
+    }
 
     // 5. Settings Center Overlay (when active)
     if (view.IsSettingsCenterOpen()) {
@@ -5782,10 +6146,26 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CREATE: {
             InitWin32DarkMode(hwnd);
             DragAcceptFiles(hwnd, TRUE);
-            HICON hAppIcon = CreateFluxAppIcon();
+            HICON hAppIcon = CreateRadiumAppIcon();
             if (hAppIcon) {
                 SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hAppIcon));
                 SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hAppIcon));
+            }
+            // Initialize COM for ITaskbarList3 (apartment-threaded, UI thread)
+            HRESULT hr_com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            ctx->com_initialized = SUCCEEDED(hr_com) || (hr_com == RPC_E_CHANGED_MODE);
+            if (ctx->com_initialized) {
+                ITaskbarList3* pTbl = nullptr;
+                HRESULT hr_tbl = CoCreateInstance(
+                    CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                    IID_ITaskbarList3, reinterpret_cast<void**>(&pTbl));
+                if (SUCCEEDED(hr_tbl) && pTbl) {
+                    if (SUCCEEDED(pTbl->HrInit())) {
+                        ctx->pTaskbarList = pTbl;
+                    } else {
+                        pTbl->Release();
+                    }
+                }
             }
             auto geom = ctx->view->ComputeLayoutGeometry(0);
             int edit_pad = DesignSystem::ScaleForDpi(32, ctx->view->GetMetrics().dpi);
@@ -5958,6 +6338,11 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            // Clear toolbar press state for button release animation
+            if (ctx->view->GetAnimationState().pressed_toolbar_idx >= 0) {
+                ctx->view->GetAnimationState().pressed_toolbar_idx = -1;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             break;
         }
         case WM_MOUSEWHEEL: {
@@ -6020,6 +6405,15 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
 
             auto hit = ctx->view->HitTestPoint(x, y, scroll_offset);
+
+            // Track pressed toolbar button for press animation feedback
+            if (msg == WM_LBUTTONDOWN) {
+                int new_pressed = -1;
+                if (hit.type == HitTargetType::kToolbarButton) new_pressed = hit.index;
+                else if (hit.type == HitTargetType::kAddDownloadButton) new_pressed = 0;
+                ctx->view->GetAnimationState().pressed_toolbar_idx = new_pressed;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
 
             if (ctx->view->IsSettingsCenterOpen()) {
                 if (hit.type == HitTargetType::kSettingsItemControl) {
@@ -6084,15 +6478,57 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                             return 0;
                         } else if (hit.task_id == "max_concurrent_tasks") {
                             auto mc = ctx->view->GetDraftSettings().max_concurrent_tasks;
-                            const uint32_t presets[] = {1, 2, 3, 5, 8, 10, 16};
-                            for (size_t i = 0; i < 7; ++i) {
-                                std::wstring lbl = std::to_wstring(presets[i]) + L" Tasks" + (presets[i] == 3 ? L" (Default)" : L"");
+                            const uint32_t presets[] = {1, 2, 3, 4, 5, 6, 8, 10, 12, 16};
+                            for (size_t i = 0; i < 10; ++i) {
+                                std::wstring lbl = std::to_wstring(presets[i]) + L" Tasks" + (presets[i] == 3 ? L" (Default)" : (presets[i] == 6 ? L" (Recommended)" : L""));
                                 AppendMenuW(hMenu, MF_STRING | (mc == presets[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(20 + i), lbl.c_str());
                             }
                             int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
                             DestroyMenu(hMenu);
-                            if (c >= 20 && c < 27) {
+                            if (c >= 20 && c < 30) {
                                 ctx->view->SetDraftSettingByKey("max_concurrent_tasks", std::to_string(presets[c - 20]));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "max_auto_retries") {
+                            auto retries = ctx->view->GetDraftSettings().max_auto_retries;
+                            const uint32_t presets[] = {0, 1, 2, 3, 5, 8, 10, 15, 20, 30, 50};
+                            for (size_t i = 0; i < 11; ++i) {
+                                std::wstring lbl = (presets[i] == 0) ? L"0 (No Retries)" : (std::to_wstring(presets[i]) + L" Retries" + (presets[i] == 5 ? L" (Default)" : L""));
+                                AppendMenuW(hMenu, MF_STRING | (retries == presets[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(80 + i), lbl.c_str());
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 80 && c < 91) {
+                                ctx->view->SetDraftSettingByKey("max_auto_retries", std::to_string(presets[c - 80]));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "retry_interval_sec") {
+                            auto sec = ctx->view->GetDraftSettings().retry_interval_sec;
+                            const uint32_t presets[] = {5, 10, 15, 30, 60, 120};
+                            for (size_t i = 0; i < 6; ++i) {
+                                std::wstring lbl = std::to_wstring(presets[i]) + L" Seconds" + (presets[i] == 15 ? L" (Default)" : L"");
+                                AppendMenuW(hMenu, MF_STRING | (sec == presets[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(100 + i), lbl.c_str());
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 100 && c < 106) {
+                                ctx->view->SetDraftSettingByKey("retry_interval_sec", std::to_string(presets[c - 100]));
+                            }
+                            InvalidateRect(hwnd, nullptr, FALSE);
+                            return 0;
+                        } else if (hit.task_id == "min_split_bytes") {
+                            auto msb = ctx->view->GetDraftSettings().min_split_bytes;
+                            const uint64_t presets[] = {65536ULL, 131072ULL, 262144ULL, 524288ULL, 1048576ULL, 2097152ULL, 5242880ULL};
+                            const wchar_t* lbls[] = {L"64 KiB", L"128 KiB (Default)", L"256 KiB", L"512 KiB", L"1 MiB", L"2 MiB", L"5 MiB"};
+                            for (size_t i = 0; i < 7; ++i) {
+                                AppendMenuW(hMenu, MF_STRING | (msb == presets[i] ? MF_CHECKED : 0), static_cast<UINT_PTR>(110 + i), lbls[i]);
+                            }
+                            int c = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
+                            DestroyMenu(hMenu);
+                            if (c >= 110 && c < 117) {
+                                ctx->view->SetDraftSettingByKey("min_split_bytes", std::to_string(presets[c - 110]));
                             }
                             InvalidateRect(hwnd, nullptr, FALSE);
                             return 0;
@@ -6149,7 +6585,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     }
                 }
                 if (hit.type == HitTargetType::kSettingsRestoreDefaultsButton) {
-                    if (MessageBoxW(hwnd, L"Restore all Flux settings to their factory defaults?", L"Confirm Restore Defaults", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    if (MessageBoxW(hwnd, L"Restore all Radium settings to their factory defaults?", L"Confirm Restore Defaults", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                         ctx->view->ActionRestoreDefaultSettings();
                     }
                     InvalidateRect(hwnd, nullptr, FALSE);
@@ -6297,7 +6733,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_SETTINGS, L"Settings & Configuration (Ctrl+,)...");
             AppendMenuW(hMenu, MF_STRING, IDM_CTX_BROWSER_STAT, L"Browser Integration Diagnostics...");
-            AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About Flux Download Manager...");
+            AppendMenuW(hMenu, MF_STRING, IDM_CTX_ABOUT, L"About Radium Download Manager...");
 
             int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
             DestroyMenu(hMenu);
@@ -6471,7 +6907,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             } else if (cmd == IDM_CTX_EXPORT_TASKS) {
                 auto exp_str = ctx->controller->ExportTasksData(storage::ExportFormat::kJson);
                 if (exp_str.ok()) {
-                    std::filesystem::path exp_path = PathSanitizer::GetDefaultDownloadDir() / "flux_tasks_export.json";
+                    std::filesystem::path exp_path = PathSanitizer::GetDefaultDownloadDir() / "radium_tasks_export.json";
                     std::ofstream ofs(exp_path);
                     if (ofs) {
                         ofs << exp_str.value.value();
@@ -6560,6 +6996,19 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto* offer = reinterpret_cast<OfferNotificationData*>(lParam);
             if (offer) {
                 OPENIDM_LOG_INFO("UI", "NEW_DOWNLOAD_DIALOG_REQUESTED: taskId=" + offer->task_id + " url=" + offer->url + " filename=" + offer->file_name);
+
+                // Immediately bring the full Radium application to the foreground
+                if (!IsWindowVisible(hwnd)) {
+                    ShowWindow(hwnd, SW_SHOW);
+                }
+                if (IsIconic(hwnd)) {
+                    ShowWindow(hwnd, SW_RESTORE);
+                }
+                ctx->view->SetWindowVisibility(true, false);
+                SetForegroundWindow(hwnd);
+                BringWindowToTop(hwnd);
+                PostMessageW(hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
+
                 ShowNewDownloadDialogWin32(
                     hwnd,
                     *ctx->view,
@@ -6575,10 +7024,10 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_TIMER: {
             if (wParam == IDT_UI_REFRESH) {
-                auto sb = ctx->view->BuildStatusBar();
-                if (sb.active_downloads > 0) {
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+                // Sync Windows taskbar progress indicator
+                SyncTaskbarProgress(hwnd, ctx->pTaskbarList, *ctx->view);
+                // Always repaint: active downloads, smooth animations, icon pulses
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
@@ -6623,13 +7072,13 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 POINT pt{};
                 GetCursorPos(&pt);
                 HMENU hMenu = CreatePopupMenu();
-                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW, L"Show Flux");
+                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_SHOW, L"Show Radium");
                 AppendMenuW(hMenu, MF_STRING, IDM_TRAY_HIDE, L"Hide to Tray");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
                 AppendMenuW(hMenu, MF_STRING, IDM_TRAY_PAUSE_ALL, L"Pause All Downloads");
                 AppendMenuW(hMenu, MF_STRING, IDM_TRAY_RESUME_ALL, L"Resume All Downloads");
                 AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit Flux");
+                AppendMenuW(hMenu, MF_STRING, IDM_TRAY_EXIT, L"Exit Radium");
                 SetForegroundWindow(hwnd);
                 int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, nullptr);
                 DestroyMenu(hMenu);
@@ -6678,6 +7127,16 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_DESTROY: {
             KillTimer(hwnd, IDT_UI_REFRESH);
+            // Clear taskbar progress and release COM
+            if (ctx->pTaskbarList) {
+                ctx->pTaskbarList->SetProgressState(hwnd, TBPF_NOPROGRESS);
+                ctx->pTaskbarList->Release();
+                ctx->pTaskbarList = nullptr;
+            }
+            if (ctx->com_initialized) {
+                CoUninitialize();
+                ctx->com_initialized = false;
+            }
             if (ctx->tray_added) {
                 Shell_NotifyIconW(NIM_DELETE, &ctx->nid);
                 ctx->tray_added = false;
@@ -6697,7 +7156,7 @@ int DesktopView::RunWin32MessageLoop() {
     InitCommonControlsEx(&icex);
 
     HINSTANCE hInst = GetModuleHandleW(nullptr);
-    HICON hAppIcon = CreateFluxAppIcon();
+    HICON hAppIcon = CreateRadiumAppIcon();
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(WNDCLASSEXW);
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
@@ -6706,14 +7165,14 @@ int DesktopView::RunWin32MessageLoop() {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hIcon = hAppIcon ? hAppIcon : LoadIconW(nullptr, IDI_APPLICATION);
     wc.hIconSm = hAppIcon;
-    wc.lpszClassName = L"Flux_MainWindowClass";
+    wc.lpszClassName = L"Radium_MainWindowClass";
     RegisterClassExW(&wc);
 
     Win32WindowContext ctx{this, &m_controller, nullptr, nullptr, {}, false};
     HWND hwnd = CreateWindowExW(
         0,
         wc.lpszClassName,
-        L"Flux Download Manager",
+        L"Radium Download Manager",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT,
         m_window_width, m_window_height,
@@ -6734,21 +7193,21 @@ int DesktopView::RunWin32MessageLoop() {
     ctx.nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     ctx.nid.uCallbackMessage = WM_OPENIDM_TRAYICON;
     ctx.nid.hIcon = wc.hIcon;
-    wcsncpy_s(ctx.nid.szTip, L"Flux Download Manager", _TRUNCATE);
+    wcsncpy_s(ctx.nid.szTip, L"Radium Download Manager", _TRUNCATE);
     ctx.tray_added = (Shell_NotifyIconW(NIM_ADD, &ctx.nid) != FALSE);
 
     SetWindowHwnd(hwnd);
     if (m_ipc_server) {
         m_ipc_server->SetOfferNotificationCallback(
             [hwnd, this](const TaskModel& task) {
-                // Every browser intercepted download MUST display the Flux New Download window
+                // Every browser intercepted download MUST display the Radium New Download window
                 // before the actual download begins, regardless of whether the global auto_start_downloads setting is enabled.
                 auto* offer = new OfferNotificationData{task.task_id, task.url, task.file_name, task.save_dir, task.total_bytes};
                 PostMessageW(hwnd, WM_OPENIDM_SHOW_NEW_DOWNLOAD, 0, reinterpret_cast<LPARAM>(offer));
             });
     }
 
-    SetTimer(hwnd, IDT_UI_REFRESH, 100, nullptr);
+    SetTimer(hwnd, IDT_UI_REFRESH, 200, nullptr);
     bool start_min = !m_start_visible;
     SetWindowVisibility(!start_min, start_min);
     ShowWindow(hwnd, start_min ? SW_HIDE : SW_SHOWNORMAL);

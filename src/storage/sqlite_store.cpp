@@ -647,7 +647,8 @@ Result<int> SqliteStore::RecoverInterruptedTasks(uint64_t rollback_margin_bytes)
     int recovered_count = 0;
     for (auto& t : *list.value) {
         if (t.state == TaskState::kProbing || t.state == TaskState::kDownloading ||
-            t.state == TaskState::kMuxing || t.state == TaskState::kVerifying) {
+            t.state == TaskState::kMuxing || t.state == TaskState::kVerifying ||
+            t.state == TaskState::kFinalizing) {
             t.state = TaskState::kPaused;
             t.speed_bps = 0;
             t.status_detail = "Paused (Recovered after restart)";

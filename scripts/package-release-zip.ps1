@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Windows x64 Release Packaging Script (v0.3.0)
+# Radium Download Manager -- Windows x64 Release Packaging Script (v0.3.0)
 # Assembles standalone portable zip packages (Full and Core editions),
 # performs strict pre-flight binary validation, stages clean extension assets,
 # writes PACKAGE_INFO.json metadata, and updates SHA256SUMS.txt.
@@ -21,7 +21,9 @@ $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 
 # 1. Resolve and Validate Release Version
 if (-not $Version) {
-    if ($env:FLUX_VERSION) {
+    if ($env:RADIUM_VERSION) {
+        $Version = $env:RADIUM_VERSION
+    } elseif ($env:FLUX_VERSION) {
         $Version = $env:FLUX_VERSION
     } else {
         try {
@@ -48,23 +50,32 @@ if (-not $OutputDir) {
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   Flux Download Manager -- Windows x64 Release Packager         " -ForegroundColor Cyan
+Write-Host "   Radium Download Manager -- Windows x64 Release Packager         " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  Version      : $Version" -ForegroundColor White
 Write-Host "  Package Type : $PackageType" -ForegroundColor White
 Write-Host "  Output Dir   : $OutputDir" -ForegroundColor White
 
-# 2. Locate Flux Core Executables
+# 2. Locate Core Executables
 $FluxExe = $null
 $FluxNmhExe = $null
 
 $fluxCandidates = @()
 if ($BuildDir) {
+    $fluxCandidates += (Join-Path $BuildDir "radium.exe")
+    $fluxCandidates += (Join-Path $BuildDir "Release\radium.exe")
+    $fluxCandidates += (Join-Path $BuildDir "Radium.exe")
     $fluxCandidates += (Join-Path $BuildDir "flux.exe")
     $fluxCandidates += (Join-Path $BuildDir "Release\flux.exe")
     $fluxCandidates += (Join-Path $BuildDir "Flux.exe")
 }
 $fluxCandidates += @(
+    (Join-Path $RepoRoot "build\win-x64\Release\radium.exe"),
+    (Join-Path $RepoRoot "build\Release\radium.exe"),
+    (Join-Path $RepoRoot "build\win-x64\radium.exe"),
+    (Join-Path $RepoRoot "dist\Radium.exe"),
+    (Join-Path $RepoRoot "dist\radium.exe"),
+    (Join-Path $RepoRoot "radium.exe"),
     (Join-Path $RepoRoot "build\win-x64\Release\flux.exe"),
     (Join-Path $RepoRoot "build\Release\flux.exe"),
     (Join-Path $RepoRoot "build\win-x64\flux.exe"),
@@ -82,10 +93,17 @@ foreach ($c in $fluxCandidates) {
 
 $nmhCandidates = @()
 if ($BuildDir) {
+    $nmhCandidates += (Join-Path $BuildDir "radium-nmh.exe")
+    $nmhCandidates += (Join-Path $BuildDir "Release\radium-nmh.exe")
     $nmhCandidates += (Join-Path $BuildDir "flux-nmh.exe")
     $nmhCandidates += (Join-Path $BuildDir "Release\flux-nmh.exe")
 }
 $nmhCandidates += @(
+    (Join-Path $RepoRoot "build\win-x64\Release\radium-nmh.exe"),
+    (Join-Path $RepoRoot "build\Release\radium-nmh.exe"),
+    (Join-Path $RepoRoot "build\win-x64\radium-nmh.exe"),
+    (Join-Path $RepoRoot "dist\radium-nmh.exe"),
+    (Join-Path $RepoRoot "radium-nmh.exe"),
     (Join-Path $RepoRoot "build\win-x64\Release\flux-nmh.exe"),
     (Join-Path $RepoRoot "build\Release\flux-nmh.exe"),
     (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe"),
@@ -102,11 +120,11 @@ foreach ($c in $nmhCandidates) {
 
 # Pre-flight binary existence validation
 $missing = @()
-if (-not $FluxExe) { $missing += "flux.exe (searched: $($fluxCandidates -join ', '))" }
-if (-not $FluxNmhExe) { $missing += "flux-nmh.exe (searched: $($nmhCandidates -join ', '))" }
+if (-not $FluxExe) { $missing += "radium.exe / flux.exe (searched: $($fluxCandidates -join ', '))" }
+if (-not $FluxNmhExe) { $missing += "radium-nmh.exe / flux-nmh.exe (searched: $($nmhCandidates -join ', '))" }
 
 if ($missing.Count -gt 0) {
-    Write-Error "Pre-flight validation failed! The following required core binaries were not found:`n - $($missing -join "`n - ")`nPlease build Flux before running packaging:`n  cmake --build build --config Release`nor`n  .\scripts\build-windows-msvc.ps1"
+    Write-Error "Pre-flight validation failed! The following required core binaries were not found:`n - $($missing -join "`n - ")`nPlease build Radium before running packaging:`n  cmake --build build --config Release`nor`n  .\scripts\build-windows-msvc.ps1"
     exit 1
 }
 
@@ -216,13 +234,14 @@ if ($PackageType -in @("Full", "Both")) {
 function Build-PackageArchive([string]$Type, [string]$ZipFileName) {
     Write-Host "`n==> Assembling $Type package..." -ForegroundColor Cyan
 
-    $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Flux_pkg_" + $Type + "_" + [Guid]::NewGuid().ToString("N"))
+    $stageDir = Join-Path ([System.IO.Path]::GetTempPath()) ("Radium_pkg_" + $Type + "_" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
     try {
-        # Core binaries
-        Copy-Item -Path $FluxExe -Destination (Join-Path $stageDir "flux.exe") -Force
-        Copy-Item -Path $FluxNmhExe -Destination (Join-Path $stageDir "flux-nmh.exe") -Force
+        # Core binaries (Radium primary)
+        Copy-Item -Path $FluxExe -Destination (Join-Path $stageDir "radium.exe") -Force
+        Copy-Item -Path $FluxExe -Destination (Join-Path $stageDir "Radium.exe") -Force
+        Copy-Item -Path $FluxNmhExe -Destination (Join-Path $stageDir "radium-nmh.exe") -Force
 
         # License and Documentation
         $docFiles = @("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
@@ -283,7 +302,7 @@ function Build-PackageArchive([string]$Type, [string]$ZipFileName) {
         $toolsDest = Join-Path $stageDir "tools\win-x64"
         New-Item -ItemType Directory -Force -Path $toolsDest | Out-Null
 
-        $components = @("flux.exe", "flux-nmh.exe", "extension", "manifests")
+        $components = @("radium.exe", "radium-nmh.exe", "extension", "manifests")
 
         if ($Type -eq "Full") {
             if ($Nm3u8dlExe -and (Test-Path $Nm3u8dlExe)) {
@@ -301,7 +320,7 @@ function Build-PackageArchive([string]$Type, [string]$ZipFileName) {
         } else {
             # Core Package: Write helpful instructions for stream workers
             $coreReadme = @"
-Flux Download Manager -- Core Edition
+Radium Download Manager -- Core Edition
 ======================================
 This lightweight package contains the core HTTP/HTTPS download engine, desktop UI,
 and browser Native Messaging Host.
@@ -310,7 +329,7 @@ Stream Extraction Notice:
 To enable HLS, DASH, and video stream downloading:
 1. Place 'N_m3u8DL-RE.exe' and 'ffmpeg.exe' inside this 'tools\win-x64\' folder, OR
 2. Ensure FFmpeg is accessible in your system PATH environment variable, OR
-3. Download the full offline release (Flux-v$Version-Windows-x64-Full.zip).
+3. Download the full offline release (Radium-v$Version-Windows-x64-Full.zip).
 
 Official Upstream Projects:
 - N_m3u8DL-RE : https://github.com/nilaoda/N_m3u8DL-RE
@@ -333,14 +352,14 @@ Official Upstream Projects:
         } catch { $gitCommit = "release" }
 
         $pkgInfo = [ordered]@{
-            name = "Flux Download Manager"
+            name = "Radium Download Manager"
             version = $Version
             edition = $Type
             platform = "Windows 11 / Windows 10 x64"
             architecture = "x64"
             buildDate = [DateTime]::UtcNow.ToString("o")
             gitCommit = $gitCommit
-            repository = "https://github.com/sayedalve/Flux-Download-Manager"
+            repository = "https://github.com/sayedalve/Radium-Download-Manager"
             license = "GPL-3.0-or-later"
             installedDiskFootprintBytes = $uncompressedBytes
             installedDiskFootprintMB = $uncompressedMb
@@ -377,17 +396,17 @@ Official Upstream Projects:
 $createdZips = @()
 
 if ($PackageType -in @("Full", "Both") -and $Nm3u8dlExe -and $FfmpegExe) {
-    $fullZip = Build-PackageArchive -Type "Full" -ZipFileName "Flux-v$Version-Windows-x64-Full.zip"
+    $fullZip = Build-PackageArchive -Type "Full" -ZipFileName "Radium-v$Version-Windows-x64-Full.zip"
     $createdZips += $fullZip
 
-    # Also stage legacy alias Flux-v$Version-Windows-x64.zip for backward compatibility
-    $compatZip = Join-Path $OutputDir "Flux-v$Version-Windows-x64.zip"
+    # Also stage legacy alias Radium-v$Version-Windows-x64.zip for backward compatibility
+    $compatZip = Join-Path $OutputDir "Radium-v$Version-Windows-x64.zip"
     Copy-Item -Force $fullZip $compatZip
     $createdZips += $compatZip
 }
 
 if ($PackageType -in @("Core", "Both")) {
-    $coreZip = Build-PackageArchive -Type "Core" -ZipFileName "Flux-v$Version-Windows-x64-Core.zip"
+    $coreZip = Build-PackageArchive -Type "Core" -ZipFileName "Radium-v$Version-Windows-x64-Core.zip"
     $createdZips += $coreZip
 }
 
@@ -406,8 +425,8 @@ if (-not $SkipHash -and $createdZips.Count -gt 0) {
         $filesToHash += $z
     }
     $setupCandidates = @(
-        (Join-Path $OutputDir "Flux-Setup-x64-$Version.exe"),
-        (Join-Path $OutputDir "Flux-Setup-x64-Core-$Version.exe")
+        (Join-Path $OutputDir "Radium-Setup-x64-$Version.exe"),
+        (Join-Path $OutputDir "Radium-Setup-x64-Core-$Version.exe")
     )
     foreach ($sc in $setupCandidates) {
         if (Test-Path $sc) {

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Reproducible Windows 11 x64 Portable Build, PE32+ Verification & Test Pipeline
+# Radium Download Manager -- Reproducible Windows 11 x64 Portable Build, PE32+ Verification & Test Pipeline
 # Detects MSVC / Windows SDK / CMake, compiles flux.exe (WIN32 GUI subsystem),
 # flux-nmh.exe (CUI subsystem), and flux_unit_tests.exe, validates PE32+ x64 headers,
 # provisions stream workers, runs automated unit/extension/integration tests, and stages
-# the portable application at dist/Flux.exe with the loadable browser extension in extension/.
+# the portable application at dist/Radium.exe with the loadable browser extension in extension/.
 # Note: Does NOT create an installer, setup executable, or MSI by default (Release Requirement 6).
 
 param(
@@ -28,7 +28,7 @@ if ($Clean) {
 }
 
 Write-Host "================================================================="
-Write-Host "   Flux Download Manager v0.3.0 Windows 11 x64 Portable Pipeline "
+Write-Host "   Radium Download Manager v0.3.0 Windows 11 x64 Portable Pipeline "
 Write-Host "================================================================="
 
 # -----------------------------------------------------------------------------
@@ -83,24 +83,35 @@ if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed with exit code $LAS
 # -----------------------------------------------------------------------------
 # 3. Compile Windows x64 Targets
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [3/7] Compiling Windows x64 targets (flux, flux-nmh, flux_unit_tests, N_m3u8DL-RE)..."
-& $CMakeCmd --build $BuildDir --config Release --target flux flux-nmh flux_unit_tests N_m3u8DL-RE sqlite3
-if ($LASTEXITCODE -ne 0) { throw "CMake compilation failed with exit code $LASTEXITCODE" }
+Write-Host "`n==> [3/7] Compiling Windows x64 targets (radium, radium-nmh, radium_unit_tests, N_m3u8DL-RE)..."
+$BuildTargets = @("sqlite3", "radium", "radium-nmh", "N_m3u8DL-RE", "radium_unit_tests")
+foreach ($bt in $BuildTargets) {
+    & $CMakeCmd --build $BuildDir --config Release --target $bt
+    if ($LASTEXITCODE -ne 0) { throw "CMake compilation of target $bt failed with exit code $LASTEXITCODE" }
+}
 
 $BuiltDir = $BuildDir
-if (Test-Path (Join-Path $BuildDir "Release\flux.exe")) {
+if (Test-Path (Join-Path $BuildDir "Release\radium.exe")) {
     $BuiltDir = Join-Path $BuildDir "Release"
 }
 
-$Targets = @("flux.exe", "flux-nmh.exe", "flux_unit_tests.exe", "N_m3u8DL-RE.exe")
+# Create compatibility aliases from primary Radium binaries
+Copy-Item -Force (Join-Path $BuiltDir "radium.exe") (Join-Path $BuiltDir "flux.exe")
+Copy-Item -Force (Join-Path $BuiltDir "radium.exe") (Join-Path $BuiltDir "openidm.exe")
+Copy-Item -Force (Join-Path $BuiltDir "radium-nmh.exe") (Join-Path $BuiltDir "flux-nmh.exe")
+Copy-Item -Force (Join-Path $BuiltDir "radium-nmh.exe") (Join-Path $BuiltDir "openidm-nmh.exe")
+Copy-Item -Force (Join-Path $BuiltDir "radium_unit_tests.exe") (Join-Path $BuiltDir "flux_unit_tests.exe")
+Copy-Item -Force (Join-Path $BuiltDir "radium_unit_tests.exe") (Join-Path $BuiltDir "openidm_unit_tests.exe")
+
+$Targets = @("radium.exe", "radium-nmh.exe", "radium_unit_tests.exe", "flux.exe", "flux-nmh.exe", "flux_unit_tests.exe", "N_m3u8DL-RE.exe")
 foreach ($t in $Targets) {
     $srcPath = Join-Path $BuiltDir $t
     Copy-Item -Force $srcPath (Join-Path $BuildDir $t)
     Copy-Item -Force $srcPath (Join-Path $RepoRoot "build\$t")
 }
-Copy-Item -Force (Join-Path $BuiltDir "flux.exe") (Join-Path $BuildDir "openidm.exe")
-Copy-Item -Force (Join-Path $BuiltDir "flux-nmh.exe") (Join-Path $BuildDir "openidm-nmh.exe")
-Copy-Item -Force (Join-Path $BuiltDir "flux_unit_tests.exe") (Join-Path $BuildDir "openidm_unit_tests.exe")
+Copy-Item -Force (Join-Path $BuiltDir "openidm.exe") (Join-Path $BuildDir "openidm.exe")
+Copy-Item -Force (Join-Path $BuiltDir "openidm-nmh.exe") (Join-Path $BuildDir "openidm-nmh.exe")
+Copy-Item -Force (Join-Path $BuiltDir "openidm_unit_tests.exe") (Join-Path $BuildDir "openidm_unit_tests.exe")
 
 # -----------------------------------------------------------------------------
 # 4. Verify PE32+ Headers and Subsystems
@@ -137,9 +148,9 @@ function Verify-PeBinary([string]$FilePath, [int]$ExpectedSubsystem, [string]$Su
     Write-Host "  [+] Verified $FilePath -> AMD64 PE32+ Subsystem=$subsystem ($SubsystemName), Size=${sizeKb} KB"
 }
 
-Verify-PeBinary (Join-Path $BuildDir "flux.exe") 2 "IMAGE_SUBSYSTEM_WINDOWS_GUI"
-Verify-PeBinary (Join-Path $BuildDir "flux-nmh.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
-Verify-PeBinary (Join-Path $BuildDir "flux_unit_tests.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+Verify-PeBinary (Join-Path $BuildDir "radium.exe") 2 "IMAGE_SUBSYSTEM_WINDOWS_GUI"
+Verify-PeBinary (Join-Path $BuildDir "radium-nmh.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
+Verify-PeBinary (Join-Path $BuildDir "radium_unit_tests.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 Verify-PeBinary (Join-Path $BuildDir "N_m3u8DL-RE.exe") 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 
 # -----------------------------------------------------------------------------
@@ -173,9 +184,9 @@ Verify-PeBinary $YtExe 3 "IMAGE_SUBSYSTEM_WINDOWS_CUI"
 # Note: Redundant copying to repo tools\ root is eliminated to prevent duplicate disk footprint.
 
 # -----------------------------------------------------------------------------
-# 6. Stage Portable Distribution at dist/Flux.exe (No Installer / No MSI)
+# 6. Stage Portable Distribution at dist/Radium.exe (No Installer / No MSI)
 # -----------------------------------------------------------------------------
-Write-Host "`n==> [6/7] Staging Portable Distribution at dist/Flux.exe..."
+Write-Host "`n==> [6/7] Staging Portable Distribution at dist/Radium.exe..."
 Get-Process | Where-Object {
     try { $_.Path -and $_.Path.StartsWith($DistDir, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
 } | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -199,9 +210,27 @@ foreach ($dup in $legacyDupFiles) {
     }
 }
 
-Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "Flux.exe")
-Copy-Item -Force (Join-Path $BuildDir "flux.exe") (Join-Path $DistDir "flux.exe")
-Copy-Item -Force (Join-Path $BuildDir "flux-nmh.exe") (Join-Path $DistDir "flux-nmh.exe")
+Copy-Item -Force (Join-Path $BuildDir "radium.exe") (Join-Path $DistDir "Radium.exe")
+Copy-Item -Force (Join-Path $BuildDir "radium.exe") (Join-Path $DistDir "radium.exe")
+Copy-Item -Force (Join-Path $BuildDir "radium-nmh.exe") (Join-Path $DistDir "radium-nmh.exe")
+
+# Ensure legacy Flux binaries and packages are removed from dist
+$legacyDistFiles = @(
+    (Join-Path $DistDir "Flux.exe"),
+    (Join-Path $DistDir "flux.exe"),
+    (Join-Path $DistDir "flux-nmh.exe"),
+    (Join-Path $DistDir "openidm.exe"),
+    (Join-Path $DistDir "openidm-nmh.exe"),
+    (Join-Path $DistDir "Flux-Setup-x64-0.3.0.exe"),
+    (Join-Path $DistDir "Flux-Setup-x64-Core-0.3.0.exe"),
+    (Join-Path $DistDir "Flux-v0.3.0-win-x64-portable.zip"),
+    (Join-Path $DistDir "Flux-v0.3.0-Windows-x64-Core.zip"),
+    (Join-Path $DistDir "Flux-v0.3.0-Windows-x64-Full.zip"),
+    (Join-Path $DistDir "Flux-v0.3.0-Windows-x64.zip")
+)
+foreach ($f in $legacyDistFiles) {
+    if (Test-Path $f) { Remove-Item -Force $f -ErrorAction SilentlyContinue }
+}
 # Prioritize native C++ stream worker (< 5MB) from build output if available
 $builtWorker = Join-Path $BuildDir "N_m3u8DL-RE.exe"
 if (-not (Test-Path $builtWorker)) {
@@ -244,8 +273,8 @@ Get-ChildItem -Path $extSrc -Recurse | Where-Object {
 }
 
 $CheckFiles = @(
-    (Join-Path $DistDir "Flux.exe"),
-    (Join-Path $DistDir "flux-nmh.exe"),
+    (Join-Path $DistDir "Radium.exe"),
+    (Join-Path $DistDir "radium-nmh.exe"),
     (Join-Path $DistDir "tools\win-x64\N_m3u8DL-RE.exe"),
     (Join-Path $DistDir "tools\win-x64\ffmpeg.exe"),
     (Join-Path $DistDir "tools\win-x64\yt-dlp.exe")
@@ -274,7 +303,7 @@ if (-not $SkipTests) {
     Write-Host "`n==> [7/7] Executing Test Suites..."
 
     Write-Host "  --> [A] C++20 Unit and Regression Tests..."
-    & (Join-Path $BuildDir "flux_unit_tests.exe")
+    & (Join-Path $BuildDir "radium_unit_tests.exe")
     if ($LASTEXITCODE -ne 0) { throw "C++20 unit test suite failed!" }
 
     if (Get-Command "node" -ErrorAction SilentlyContinue) {
@@ -298,8 +327,8 @@ if (-not $SkipTests) {
 
 Write-Host "`n================================================================="
 Write-Host "   Windows 11 x64 Portable Build & Verification Completed        "
-Write-Host "   Portable App : $DistDir\Flux.exe                              "
-Write-Host "   Native Host  : $DistDir\flux-nmh.exe                          "
+Write-Host "   Portable App : $DistDir\Radium.exe                              "
+Write-Host "   Native Host  : $DistDir\radium-nmh.exe                          "
 Write-Host "   Extension Dir: $RepoRoot\extension                            "
 Write-Host "   Register NMH : .\scripts\register-native-messaging.ps1        "
 Write-Host "=================================================================`n"

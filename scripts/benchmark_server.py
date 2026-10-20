@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager — Controlled HTTP Benchmark Server
+# Radium Download Manager — Controlled HTTP Benchmark Server
 # Serves deterministic datasets with RFC 7233 byte-range support,
 # per-connection bandwidth throttling, connection instrumentation,
 # non-range fallback endpoints, and strict localhost isolation.
@@ -418,7 +418,7 @@ def run_benchmark_server(host: str = "127.0.0.1", port: int = 0, data_dir: Path 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Flux Controlled HTTP Benchmark Server")
+    parser = argparse.ArgumentParser(description="Radium Controlled HTTP Benchmark Server")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host address (default: 127.0.0.1 loopback only)")
     parser.add_argument("--port", type=int, default=0, help="Port to listen on (0 for dynamic)")
     parser.add_argument("--data-dir", type=str, default=None, help="Directory for deterministic datasets")

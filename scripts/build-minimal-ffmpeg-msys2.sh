@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Minimal Windows x64 FFmpeg Build (MSYS2/MinGW-w64)
+# Radium Download Manager -- Minimal Windows x64 FFmpeg Build (MSYS2/MinGW-w64)
 #
 # Run inside MSYS2 MINGW64 shell:
 #   bash scripts/build-minimal-ffmpeg-msys2.sh

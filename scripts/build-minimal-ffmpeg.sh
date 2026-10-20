@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Minimal Windows x64 FFmpeg Cross-Compilation Script
+# Radium Download Manager -- Minimal Windows x64 FFmpeg Cross-Compilation Script
 #
 # Builds a deterministic minimal Windows x64 FFmpeg executable (ffmpeg.exe)
 # from pinned sources and configurations on Linux / POSIX cross-compilation environments.

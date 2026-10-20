@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/function.js) for Flux Download Manager.
+// Adapted from xifangczy/cat-catch (js/function.js) for Radium Download Manager.
 // Implements explicit typed resource classification (HLS_MANIFEST, DASH_MANIFEST,
 // DIRECT_PROGRESSIVE, YOUTUBE_EXTRACTION, UNSUPPORTED), webpage watch URL filtering,
 // Content-Range & Content-Disposition parsing, googlevideo.com adaptive vs. progressive
@@ -42,7 +42,7 @@ function logPipelineStage(correlationId, stage, details = {}) {
   }
 
   try {
-    console.log(`[Flux Trace] [${stage}] [${entry.correlationId}]`, details);
+    console.log(`[Radium Trace] [${stage}] [${entry.correlationId}]`, details);
   } catch (_) {}
 
   return entry;
@@ -79,6 +79,24 @@ function setSiteDisabled(tabUrl, disabled) {
   return true;
 }
 
+function extractFilenameFromUrlQuery(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string" || !rawUrl.includes("?")) return "";
+  try {
+    const u = new URL(rawUrl, "https://example.invalid");
+    for (const [key, val] of u.searchParams.entries()) {
+      const kLower = key.toLowerCase();
+      if (kLower === "rscd" || kLower === "response-content-disposition") {
+        const fromCd = extractFilenameFromContentDisposition(val);
+        if (fromCd) return fromCd;
+      }
+      if (kLower === "filename" || kLower === "file" || kLower === "fn") {
+        if (val && val.includes(".")) return sanitizeFilename(val, "");
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
 function extractUrlExtension(url) {
   if (!url || typeof url !== "string") return "";
   try {
@@ -88,6 +106,18 @@ function extractUrlExtension(url) {
     const lastSlash = pathname.lastIndexOf("/");
     if (lastDot > lastSlash && lastDot !== -1) {
       return pathname.slice(lastDot + 1).toLowerCase();
+    }
+    // Also check query parameter if pathname has no extension (e.g. files.oaiusercontent.com, S3 presigned URLs)
+    for (const [key, val] of u.searchParams.entries()) {
+      const kLower = key.toLowerCase();
+      if (kLower === "rscd" || kLower === "response-content-disposition" || kLower === "filename" || kLower === "file") {
+        const fn = extractFilenameFromContentDisposition(val) || val;
+        const fnDot = fn.lastIndexOf(".");
+        if (fnDot !== -1) {
+          const fnExt = fn.slice(fnDot + 1).toLowerCase().replace(/[^a-z0-9]/g, "");
+          if (fnExt) return fnExt;
+        }
+      }
     }
   } catch (_) {
     const clean = url.split("?")[0].split("#")[0];
@@ -159,8 +189,18 @@ function isDownloadEligible(params = {}) {
   const isWebBlob = targetUrl.startsWith("blob:http://") || targetUrl.startsWith("blob:https://");
   if (!targetUrl) return { eligible: false, reason: "EMPTY_URL" };
 
+  const isAiWebBlob = isWebBlob && (
+    targetUrl.includes("chatgpt.com") ||
+    targetUrl.includes("oaistatic.com") ||
+    targetUrl.includes("oaiusercontent.com") ||
+    targetUrl.includes("claude.ai") ||
+    targetUrl.includes("anthropic.com") ||
+    (tabUrl && (tabUrl.includes("chatgpt.com") || tabUrl.includes("claude.ai") || tabUrl.includes("oaiusercontent.com")))
+  );
+
   // 1. Exclude blob:, data:, and browser extension/internal schemes
-  if ((targetUrl.startsWith("blob:") && (!isWebBlob || (!wasExplicitLinkClick && !hasDownloadAttr))) || targetUrl.startsWith("data:") ||
+  // Web-origin blobs (e.g. ChatGPT artifacts) proceed to Step 2b below
+  if ((targetUrl.startsWith("blob:") && (!isWebBlob || (!isAiWebBlob && !wasExplicitLinkClick && !hasDownloadAttr))) || targetUrl.startsWith("data:") ||
       targetUrl.startsWith("chrome:") || targetUrl.startsWith("chrome-extension:") ||
       targetUrl.startsWith("brave:") || targetUrl.startsWith("about:") || targetUrl.startsWith("javascript:")) {
     return { eligible: false, reason: "BROWSER_INTERNAL_OR_BLOB" };
@@ -171,13 +211,14 @@ function isDownloadEligible(params = {}) {
     return { eligible: false, reason: "SITE_EXCLUDED" };
   }
 
+  const queryFilename = extractFilenameFromUrlQuery(targetUrl);
   const cleanMime = (mime || "").split(";")[0].trim().toLowerCase();
-  const cleanFilename = sanitizeFilename(filename, "");
+  const cleanFilename = sanitizeFilename(filename || queryFilename, "");
   const ext = (extractUrlExtension(cleanFilename) || extractUrlExtension(targetUrl) || extractUrlExtension(url)).toLowerCase();
   const webCodeExts = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "jsx", "ts", "tsx"]);
   const webDocExts = new Set(["html", "htm", "xhtml"]);
   const hasDownloadExt = Boolean(ext && (!webDocExts.has(ext) || hasDownloadAttr || isAttachment));
-  if (isWebBlob && (ext || hasDownloadAttr || wasExplicitLinkClick || cleanFilename || phase === "determine")) {
+  if (isWebBlob && (ext || hasDownloadAttr || wasExplicitLinkClick || cleanFilename || phase === "determine" || isAiWebBlob || !phase)) {
     return { eligible: true, reason: "WEB_BLOB_ARTIFACT", ext, mime: cleanMime, filename: cleanFilename, isBlob: true };
   }
 
@@ -1027,8 +1068,12 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
     if (candidate.requiresCipherExtraction !== undefined) {
       existing.requiresCipherExtraction = Boolean(candidate.requiresCipherExtraction);
     }
-    if (candidate.resolution && (!existing.resolution || existing.resolution === "Auto")) {
-      existing.resolution = candidate.resolution;
+    if (candidate.resolution) {
+      const incH = heightFromResolutionLabel(candidate.resolution);
+      const curH = heightFromResolutionLabel(existing.resolution);
+      if (incH > curH || !existing.resolution || existing.resolution === "Auto") {
+        existing.resolution = candidate.resolution;
+      }
     }
     if (candidate.size && (!existing.size || existing.size === 0 || candidate.size > existing.size)) {
       existing.size = candidate.size;
@@ -1042,11 +1087,15 @@ function addOrDeduplicateMediaCandidate(tabId, candidate) {
     if (Array.isArray(candidate.qualities) && candidate.qualities.length > 0) {
       existing.qualities = mergeQualityLists(existing.qualities || [], candidate.qualities);
       const topVid = existing.qualities.find(q => !q.isAudioOnly) || existing.qualities[0];
-      if (topVid && topVid.resolution && (!existing.resolution || existing.resolution === "Auto")) {
-        existing.resolution = topVid.resolution;
-      }
-      if (topVid && topVid.size && (!existing.size || existing.size === 0)) {
-        existing.size = topVid.size;
+      if (topVid && topVid.resolution) {
+        const topH = heightFromResolutionLabel(topVid.resolution);
+        const curH = heightFromResolutionLabel(existing.resolution);
+        if (topH > curH || !existing.resolution || existing.resolution === "Auto") {
+          existing.resolution = topVid.resolution;
+        }
+        if (topVid.size && (!existing.size || existing.size === 0 || topH > curH)) {
+          existing.size = topVid.size;
+        }
       }
     }
     return { added: false, candidate: existing };
@@ -1393,6 +1442,7 @@ var exportedFns = {
   isSiteDisabled,
   setSiteDisabled,
   extractUrlExtension,
+  extractFilenameFromUrlQuery,
   extractFilenameFromContentDisposition,
   isAttachmentContentDisposition,
   isYouTubeWatchOrShortsUrl,

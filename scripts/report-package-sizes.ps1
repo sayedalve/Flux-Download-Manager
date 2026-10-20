@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Package Size Reporting & Budget Audit Script (v0.3.0)
+# Radium Download Manager -- Package Size Reporting & Budget Audit Script (v0.3.0)
 # Measures each packaged component, distinguishes installed disk footprint from
 # compressed ZIP and Inno Setup installer download sizes, and verifies compliance
 # with docs/PERFORMANCE_AND_SIZE_BUDGET.md.
@@ -27,7 +27,9 @@ if (-not $DistDir) {
 
 # Resolve and Normalize Version
 if (-not $Version) {
-    if ($env:FLUX_VERSION) {
+    if ($env:RADIUM_VERSION) {
+        $Version = $env:RADIUM_VERSION
+    } elseif ($env:FLUX_VERSION) {
         $Version = $env:FLUX_VERSION
     } else {
         try {
@@ -58,7 +60,7 @@ function Format-Bytes([int64]$Bytes) {
 }
 
 Write-Host "`n=================================================================" -ForegroundColor Cyan
-Write-Host "   Flux Download Manager -- Packaging Size Budget Audit Report   " -ForegroundColor Cyan
+Write-Host "   Radium Download Manager -- Packaging Size Budget Audit Report   " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  Product Version : $Version" -ForegroundColor White
 Write-Host "  Repository Root : $RepoRoot" -ForegroundColor White
@@ -66,6 +68,8 @@ Write-Host "  Dist Directory  : $DistDir" -ForegroundColor White
 
 # 1. Locate and Measure Core Binaries
 $fluxCandidates = @(
+    (Join-Path $DistDir "Radium.exe"),
+    (Join-Path $DistDir "radium.exe"),
     (Join-Path $DistDir "Flux.exe"),
     (Join-Path $DistDir "flux.exe"),
     (Join-Path $RepoRoot "build\win-x64\Release\flux.exe"),
@@ -78,6 +82,7 @@ foreach ($c in $fluxCandidates) {
 $fluxExeSize = if ($fluxExePath) { (Get-Item $fluxExePath).Length } else { 0 }
 
 $nmhCandidates = @(
+    (Join-Path $DistDir "radium-nmh.exe"),
     (Join-Path $DistDir "flux-nmh.exe"),
     (Join-Path $RepoRoot "build\win-x64\Release\flux-nmh.exe"),
     (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe")
@@ -150,7 +155,7 @@ $footprintSavingsPercent = if ($legacyDuplicatedFootprint -gt 0) { [Math]::Round
 
 # 5. Measure Staged Distribution Archives and Installers (if built)
 $coreZipCandidates = @(
-    (Join-Path $DistDir "Flux-v$Version-Windows-x64-Core.zip")
+    (Join-Path $DistDir "Radium-v$Version-Windows-x64-Core.zip")
 )
 $coreZipSize = $null
 foreach ($z in $coreZipCandidates) {
@@ -158,9 +163,8 @@ foreach ($z in $coreZipCandidates) {
 }
 
 $fullZipCandidates = @(
-    (Join-Path $DistDir "Flux-v$Version-Windows-x64-Full.zip"),
-    (Join-Path $DistDir "Flux-v$Version-win-x64-portable.zip"),
-    (Join-Path $DistDir "Flux-v$Version-Windows-x64.zip")
+    (Join-Path $DistDir "Radium-v$Version-Windows-x64-Full.zip"),
+    (Join-Path $DistDir "Radium-v$Version-Windows-x64.zip")
 )
 $fullZipSize = $null
 foreach ($z in $fullZipCandidates) {
@@ -168,8 +172,7 @@ foreach ($z in $fullZipCandidates) {
 }
 
 $coreInstallerCandidates = @(
-    (Join-Path $DistDir "Flux-Setup-x64-Core-$Version.exe"),
-    (Join-Path $DistDir "OpenIDM-Setup-x64-Core.exe")
+    (Join-Path $DistDir "Radium-Setup-x64-Core-$Version.exe")
 )
 $coreInstallerSize = $null
 foreach ($ins in $coreInstallerCandidates) {
@@ -177,9 +180,7 @@ foreach ($ins in $coreInstallerCandidates) {
 }
 
 $fullInstallerCandidates = @(
-    (Join-Path $DistDir "Flux-Setup-x64-$Version.exe"),
-    (Join-Path $DistDir "Flux-Setup-x64-Full-$Version.exe"),
-    (Join-Path $DistDir "OpenIDM-Setup-x64-$Version.exe")
+    (Join-Path $DistDir "Radium-Setup-x64-$Version.exe")
 )
 $fullInstallerSize = $null
 foreach ($ins in $fullInstallerCandidates) {
@@ -212,8 +213,8 @@ $fullInstallerEstBytes = $coreInstallerEstBytes + $nmCompressedEst + $ffCompress
 
 Write-Host "`n--- [1] PACKAGED COMPONENT BREAKDOWN ---" -ForegroundColor Yellow
 $compTable = @(
-    [PSCustomObject]@{ Component = "flux.exe (Desktop GUI)"; Flavor = "Native C++20 / Win32"; Location = "dist\Flux.exe"; DiskFootprint = Format-Bytes $fluxExeSize; CompressedEst = Format-Bytes $fluxCompressedEst; PctOfFull = "$([Math]::Round(($fluxCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
-    [PSCustomObject]@{ Component = "flux-nmh.exe (Native Host)"; Flavor = "Native C++20 / Stdio"; Location = "dist\flux-nmh.exe"; DiskFootprint = Format-Bytes $nmhExeSize; CompressedEst = Format-Bytes $nmhCompressedEst; PctOfFull = "$([Math]::Round(($nmhCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
+    [PSCustomObject]@{ Component = "radium.exe (Desktop GUI)"; Flavor = "Native C++20 / Win32"; Location = "dist\Radium.exe"; DiskFootprint = Format-Bytes $fluxExeSize; CompressedEst = Format-Bytes $fluxCompressedEst; PctOfFull = "$([Math]::Round(($fluxCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
+    [PSCustomObject]@{ Component = "radium-nmh.exe (Native Host)"; Flavor = "Native C++20 / Stdio"; Location = "dist\radium-nmh.exe"; DiskFootprint = Format-Bytes $nmhExeSize; CompressedEst = Format-Bytes $nmhCompressedEst; PctOfFull = "$([Math]::Round(($nmhCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
     [PSCustomObject]@{ Component = "Browser Extension (clean)"; Flavor = "Vanilla TS / Manifest V3"; Location = "extension\"; DiskFootprint = Format-Bytes $extTotalBytes; CompressedEst = Format-Bytes $extCompressedEst; PctOfFull = "$([Math]::Round(($extCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
     [PSCustomObject]@{ Component = "Docs, Scripts & Manifests"; Flavor = "Licenses, Readme, Reg"; Location = "README, LICENSE, manifests"; DiskFootprint = Format-Bytes $docsAndManifestsTotal; CompressedEst = Format-Bytes $docsCompressedEst; PctOfFull = "$([Math]::Round(($docsCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
     [PSCustomObject]@{ Component = "N_m3u8DL-RE.exe"; Flavor = $nmFlavor; Location = "tools\win-x64\N_m3u8DL-RE.exe"; DiskFootprint = Format-Bytes $nm3u8dlSize; CompressedEst = Format-Bytes $nmCompressedEst; PctOfFull = "$([Math]::Round(($nmCompressedEst / $fullInstallerEstBytes) * 100, 1))% [EST]" },
@@ -238,7 +239,7 @@ Write-Host "`n--- [3] DISTRIBUTION PACKAGE SIZES (Compressed Downloads) ---" -Fo
 $pkgTable = @(
     [PSCustomObject]@{
         PackageType = "Portable ZIP (Core)"
-        FileName = "Flux-v$Version-Windows-x64-Core.zip"
+        FileName = "Radium-v$Version-Windows-x64-Core.zip"
         CompressedSize = if ($coreZipSize) { Format-Bytes $coreZipSize } else { "~1.2 MB [ESTIMATE]" }
         ActualBytes = if ($coreZipSize) { $coreZipSize } else { 1250000 }
         UncompressedFootprint = Format-Bytes $coreInstalledFootprint
@@ -246,7 +247,7 @@ $pkgTable = @(
     },
     [PSCustomObject]@{
         PackageType = "Portable ZIP (Full)"
-        FileName = "Flux-v$Version-Windows-x64-Full.zip"
+        FileName = "Radium-v$Version-Windows-x64-Full.zip"
         CompressedSize = if ($fullZipSize) { Format-Bytes $fullZipSize } else { "$(Format-Bytes $fullInstallerEstBytes) [ESTIMATE]" }
         ActualBytes = if ($fullZipSize) { $fullZipSize } else { $fullInstallerEstBytes }
         UncompressedFootprint = Format-Bytes $fullInstalledFootprint
@@ -254,7 +255,7 @@ $pkgTable = @(
     },
     [PSCustomObject]@{
         PackageType = "Inno Setup Installer (Core)"
-        FileName = "Flux-Setup-x64-Core-$Version.exe"
+        FileName = "Radium-Setup-x64-Core-$Version.exe"
         CompressedSize = if ($coreInstallerSize) { Format-Bytes $coreInstallerSize } else { "$(Format-Bytes $coreInstallerEstBytes) [ESTIMATE]" }
         ActualBytes = if ($coreInstallerSize) { $coreInstallerSize } else { $coreInstallerEstBytes }
         UncompressedFootprint = Format-Bytes $coreInstalledFootprint
@@ -262,7 +263,7 @@ $pkgTable = @(
     },
     [PSCustomObject]@{
         PackageType = "Inno Setup Installer (Full)"
-        FileName = "Flux-Setup-x64-$Version.exe"
+        FileName = "Radium-Setup-x64-$Version.exe"
         CompressedSize = if ($fullInstallerSize) { Format-Bytes $fullInstallerSize } else { "$(Format-Bytes $fullInstallerEstBytes) [ESTIMATE]" }
         ActualBytes = if ($fullInstallerSize) { $fullInstallerSize } else { $fullInstallerEstBytes }
         UncompressedFootprint = Format-Bytes $fullInstalledFootprint
@@ -345,7 +346,7 @@ Write-Host "=================================================================`n"
 # 5. JSON Export and latest_metrics.json Synchronization
 $budgetData = [ordered]@{
     version = $Version
-    product_name = "Flux Download Manager"
+    product_name = "Radium Download Manager"
     standard_stream_workers_location = "tools/win-x64"
     single_location_enforced = $true
     installed_disk_footprint = [ordered]@{

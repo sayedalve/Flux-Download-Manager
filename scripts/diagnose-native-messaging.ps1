@@ -16,7 +16,7 @@ $ErrorActionPreference = "Continue"
 
 Write-Host ""
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "  Flux Download Manager - Native Messaging Diagnostic Utility   " -ForegroundColor Cyan
+Write-Host "  Radium Download Manager - Native Messaging Diagnostic Utility " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -127,7 +127,7 @@ foreach ($bp in $browserProfiles) {
                     $extObj = $_.Value
                     $extPath = $extObj.path
                     $extName = $extObj.manifest.name
-                    if ($extPath -match "openidm|flux" -or $extName -match "Flux|OpenIDM") {
+                    if ($extPath -match "radium|openidm|flux" -or $extName -match "Radium|Flux|OpenIDM") {
                         $foundForBrowser = $true
                         $instId = $_.Name
                         if (-not $detectedBrowserExtIds.Contains($instId)) {
@@ -138,7 +138,7 @@ foreach ($bp in $browserProfiles) {
                 }
             }
             if (-not $foundForBrowser) {
-                Add-Finding -Category "Browser ($($bp.Name))" -Check "Installed Extension" -Status "WARN" -Details "No Flux/OpenIDM extension found in $($bp.Name) profile"
+                Add-Finding -Category "Browser ($($bp.Name))" -Check "Installed Extension" -Status "WARN" -Details "No Radium/Flux/OpenIDM extension found in $($bp.Name) profile"
             }
         } catch {
             Add-Finding -Category "Browser ($($bp.Name))" -Check "Secure Preferences" -Status "WARN" -Details "Could not parse Secure Preferences: $_"
@@ -160,7 +160,7 @@ Add-Finding -Category "IPC" -Check "Current User SID" -Status "PASS" -Details "S
 $expectedPipeName = "Flux_IPC_$userSid"
 $pipePath = "\\.\pipe\$expectedPipeName"
 
-$activePipes = [System.IO.Directory]::GetFiles("\\.\\pipe\\") | Where-Object { $_ -match "Flux_IPC|openidm" }
+$activePipes = [System.IO.Directory]::GetFiles("\\.\\pipe\\") | Where-Object { $_ -match "Radium|Flux_IPC|openidm" }
 if ($activePipes) {
     $matchedPipe = $activePipes | Where-Object { $_ -match [regex]::Escape($expectedPipeName) }
     if ($matchedPipe) {
@@ -169,15 +169,15 @@ if ($activePipes) {
         Add-Finding -Category "IPC" -Check "Named Pipe Active" -Status "WARN" -Details "Found pipes ($($activePipes -join ', ')), but not user-specific $expectedPipeName"
     }
 } else {
-    Add-Finding -Category "IPC" -Check "Named Pipe Active" -Status "FAIL" -Details "No Flux/OpenIDM named pipe is currently listening! Is Flux.exe running?"
+    Add-Finding -Category "IPC" -Check "Named Pipe Active" -Status "FAIL" -Details "No Radium/Flux named pipe is currently listening! Is Radium running?"
 }
 
-$fluxProcs = Get-Process -Name "*flux*", "*openidm*" -ErrorAction SilentlyContinue
+$fluxProcs = Get-Process -Name "*radium*", "*flux*", "*openidm*" -ErrorAction SilentlyContinue
 if ($fluxProcs) {
     $procSummary = ($fluxProcs | ForEach-Object { "$($_.ProcessName) (PID $($_.Id), Path: $($_.Path))" }) -join "; "
-    Add-Finding -Category "Desktop" -Check "Flux Process Running" -Status "PASS" -Details $procSummary
+    Add-Finding -Category "Desktop" -Check "Radium Process Running" -Status "PASS" -Details $procSummary
 } else {
-    Add-Finding -Category "Desktop" -Check "Flux Process Running" -Status "FAIL" -Details "No Flux desktop process running. Downloads cannot be accepted while Flux is closed."
+    Add-Finding -Category "Desktop" -Check "Radium Process Running" -Status "FAIL" -Details "No Radium desktop process running. Downloads cannot be accepted while Radium is closed."
 }
 
 # -----------------------------------------------------------------------------

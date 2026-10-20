@@ -412,7 +412,7 @@ Result<TaskModel> DownloadController::AddTask(TaskModel task, bool start_immedia
             return Result<TaskModel>::Err(
                 "ERR_URL_IS_WEBPAGE",
                 "The specified URL is an HTML webpage, not a direct media file or stream. "
-                "To download video from this site, play it in your web browser with the Flux extension enabled."
+                "To download video from this site, play it in your web browser with the Radium extension enabled."
             );
         }
         auto parsed_u = brisk::HttpClient::ParseUrl(task.url);
@@ -1302,6 +1302,15 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
             std::filesystem::path final_p = std::filesystem::path(local_task.save_dir) / local_task.file_name;
             std::error_code ec;
             if (std::filesystem::exists(final_p, ec)) {
+                // Update state to kFinalizing during scan so UI and IPC reflect that post-processing is running
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    auto it = m_tasks.find(task_id);
+                    if (it != m_tasks.end() && !m_deleted_tasks.count(task_id)) {
+                        it->second.state = TaskState::kFinalizing;
+                        it->second.status_detail = "Finalizing output (Antivirus scan in progress)...";
+                    }
+                }
                 auto scan_res = security::AntivirusScanner::ScanWithDefender(final_p);
                 if (scan_res.ok()) {
                     if (scan_res.value->status == security::ScanStatus::kThreatDetected) {
@@ -1313,13 +1322,17 @@ void DownloadController::RunTaskWorker(std::string task_id, std::shared_ptr<Acti
                         std::error_code rm_ec;
                         std::filesystem::remove(final_p, rm_ec);
                     } else if (scan_res.value->status == security::ScanStatus::kClean) {
+                        local_task.state = TaskState::kCompleted;
                         local_task.status_detail = "Completed (Antivirus Clean)";
                     } else if (scan_res.value->status == security::ScanStatus::kScannerError) {
+                        local_task.state = TaskState::kCompleted;
                         local_task.status_detail = "Completed (Antivirus Scan Failed)";
                     } else {
+                        local_task.state = TaskState::kCompleted;
                         local_task.status_detail = "Completed (Antivirus Skipped)";
                     }
                 } else {
+                    local_task.state = TaskState::kCompleted;
                     local_task.status_detail = "Completed (Antivirus Scan Error: " + scan_res.error->message + ")";
                 }
             }
@@ -1647,6 +1660,10 @@ void DownloadController::PauseAllTasks() {
             if (t.state == TaskState::kQueued || t.state == TaskState::kProbing ||
                 t.state == TaskState::kDownloading || t.state == TaskState::kMuxing) {
                 ids.push_back(id);
+                auto ait = m_active.find(id);
+                if (ait != m_active.end()) {
+                    ait->second->pause_requested.store(true);
+                }
             }
         }
     }
@@ -1662,6 +1679,24 @@ void DownloadController::ResumeAllTasks() {
             t.state = TaskState::kQueued;
             t.pause_reason = PauseReason::kNone;
             t.status_detail = "Queued";
+            m_store.UpsertTask(t);
+        }
+    }
+    m_cv.notify_all();
+}
+
+void DownloadController::StartAllTasks() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& [id, t] : m_tasks) {
+        if ((t.state == TaskState::kPaused || t.state == TaskState::kFailed || t.state == TaskState::kQueued) && !t.scheduled) {
+            t.scheduled = false;
+            t.schedule_time_local.clear();
+            t.schedule_stop_time_local.clear();
+            t.pause_reason = PauseReason::kNone;
+            t.state = TaskState::kQueued;
+            t.status_detail = "Queued";
+            t.error_code.clear();
+            t.error_message.clear();
             m_store.UpsertTask(t);
         }
     }

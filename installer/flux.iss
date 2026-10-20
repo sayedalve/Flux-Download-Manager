@@ -1,33 +1,39 @@
 ; SPDX-License-Identifier: GPL-3.0-or-later
-; Flux Download Manager -- Inno Setup 6 Windows 11 x64 Installer Script (v0.3.0)
-; Installs flux.exe (WIN32 GUI), flux-nmh.exe (CUI Native Messaging Host),
+; Radium Download Manager -- Inno Setup 6 Windows 11 x64 Installer Script (v0.3.0)
+; Installs radium.exe (WIN32 GUI), radium-nmh.exe (CUI Native Messaging Host),
 ; optional stream workers (N_m3u8DL-RE & FFmpeg), browser extension assets, and
 ; registers Native Messaging manifests for Chrome, Edge, Brave, and Firefox.
 ;
 ; Safety Invariants:
 ; - Lowest privilege execution by default (per-user {autopf} without UAC elevation required).
-; - Clean upgrade preservation of SQLite WAL databases and task state in %LOCALAPPDATA%\Flux.
-; - Clean uninstallation of application binaries and Flux HKCU registry keys, preserving
+; - Clean upgrade preservation of SQLite WAL databases and task state in %LOCALAPPDATA%\Radium.
+; - Clean uninstallation of application binaries and Radium HKCU registry keys, preserving
 ;   user download directories and application configuration databases.
 
-#define MyAppName "Flux Download Manager"
-#define MyAppShortName "Flux"
+#define MyAppName "Radium Download Manager"
+#define MyAppShortName "Radium"
 #ifndef MyAppVersion
   #define MyAppVersion "0.3.1"
 #endif
-#define MyAppPublisher "Flux Contributors"
-#define MyAppURL "https://github.com/sayedalve/Flux-Download-Manager"
-#define MyAppExeName "flux.exe"
-#define MyAppNmhName "flux-nmh.exe"
+#define MyAppPublisher "Radium Contributors"
+#define MyAppURL "https://github.com/sayedalve/Radium-Download-Manager"
+#define MyAppExeName "radium.exe"
+#define MyAppNmhName "radium-nmh.exe"
 
 ; Resolve executable source directory dynamically across build configurations
 #ifndef SourceDir
-  #if FileExists("..\build\win-x64\Release\flux.exe")
+  #if FileExists("..\build\win-x64\Release\radium.exe")
     #define SourceDir "..\build\win-x64\Release"
-  #elif FileExists("..\build\Release\flux.exe")
+  #elif FileExists("..\dist\radium.exe")
+    #define SourceDir "..\dist"
+  #elif FileExists("..\dist\Radium.exe")
+    #define SourceDir "..\dist"
+  #elif FileExists("..\build\Release\radium.exe")
     #define SourceDir "..\build\Release"
-  #elif FileExists("..\build\win-x64\flux.exe")
+  #elif FileExists("..\build\win-x64\radium.exe")
     #define SourceDir "..\build\win-x64"
+  #elif FileExists("..\build\win-x64\Release\flux.exe")
+    #define SourceDir "..\build\win-x64\Release"
   #elif FileExists("..\dist\Flux.exe")
     #define SourceDir "..\dist"
   #else
@@ -65,9 +71,9 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 #ifdef CoreOnly
-  #define BaseFilename "Flux-Setup-x64-Core-" + MyAppVersion
+  #define BaseFilename "Radium-Setup-x64-Core-" + MyAppVersion
 #else
-  #define BaseFilename "Flux-Setup-x64-" + MyAppVersion
+  #define BaseFilename "Radium-Setup-x64-" + MyAppVersion
 #endif
 OutputDir=..\dist
 OutputBaseFilename={#BaseFilename}
@@ -76,8 +82,9 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
-AppMutex=Local\Flux_SingleInstance,Local\OpenIDM_SingleInstance
+AppMutex=Local\Radium_SingleInstance,Local\Flux_SingleInstance,Local\OpenIDM_SingleInstance
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=radium.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -88,12 +95,12 @@ Name: "compact"; Description: "Core Installation (HTTP/HTTPS Segment Engine Only
 Name: "custom"; Description: "Custom Installation"; Flags: iscustom
 
 [Components]
-Name: "core"; Description: "Flux Core Application & Browser Native Messaging Host"; Types: full compact custom; Flags: fixed
+Name: "core"; Description: "Radium Core Application & Browser Native Messaging Host"; Types: full compact custom; Flags: fixed
 Name: "stream_workers"; Description: "HLS / DASH Stream Extraction Workers (N_m3u8DL-RE & FFmpeg)"; Types: full
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "autostart"; Description: "Start Flux minimized in system tray on Windows startup"; GroupDescription: "Startup:"
+Name: "autostart"; Description: "Start Radium minimized in system tray on Windows startup"; GroupDescription: "Startup:"
 
 [Files]
 ; Core application binaries
@@ -150,13 +157,13 @@ Root: HKCU; Subkey: "Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\o
 Root: HKCU; Subkey: "Software\Mozilla\NativeMessagingHosts\org.openidm.native"; ValueType: string; ValueName: ""; ValueData: "{app}\manifests\org.openidm.native.firefox.json"; Flags: uninsdeletekey
 
 ; Optional Startup Registration
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Flux"; ValueData: """{app}\{#MyAppExeName}"" --daemon"; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Radium"; ValueData: """{app}\{#MyAppExeName}"" --daemon"; Tasks: autostart; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
-// Dynamically generate manifests with the exact installed path of flux-nmh.exe
+// Dynamically generate manifests with the exact installed path of radium-nmh.exe
 procedure WriteNativeMessagingManifests();
 var
   NmhPathEscaped: String;
@@ -174,7 +181,7 @@ begin
   FluxChromiumJson :=
     '{' + #13#10 +
     '  "name": "com.flux.downloadmanager",' + #13#10 +
-    '  "description": "Flux Download Manager Native Messaging Host",' + #13#10 +
+    '  "description": "Radium Download Manager Native Messaging Host",' + #13#10 +
     '  "path": "' + NmhPathEscaped + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
     '  "allowed_origins": [' + #13#10 +
@@ -187,7 +194,7 @@ begin
   FluxFirefoxJson :=
     '{' + #13#10 +
     '  "name": "com.flux.downloadmanager",' + #13#10 +
-    '  "description": "Flux Download Manager Native Messaging Host",' + #13#10 +
+    '  "description": "Radium Download Manager Native Messaging Host",' + #13#10 +
     '  "path": "' + NmhPathEscaped + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
     '  "allowed_extensions": [' + #13#10 +
@@ -200,7 +207,7 @@ begin
   LegacyChromiumJson :=
     '{' + #13#10 +
     '  "name": "org.openidm.native",' + #13#10 +
-    '  "description": "Flux Download Manager Legacy Bridge",' + #13#10 +
+    '  "description": "Radium Download Manager Legacy Bridge",' + #13#10 +
     '  "path": "' + NmhPathEscaped + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
     '  "allowed_origins": [' + #13#10 +
@@ -213,7 +220,7 @@ begin
   LegacyFirefoxJson :=
     '{' + #13#10 +
     '  "name": "org.openidm.native",' + #13#10 +
-    '  "description": "Flux Download Manager Legacy Bridge",' + #13#10 +
+    '  "description": "Radium Download Manager Legacy Bridge",' + #13#10 +
     '  "path": "' + NmhPathEscaped + '",' + #13#10 +
     '  "type": "stdio",' + #13#10 +
     '  "allowed_extensions": [' + #13#10 +
@@ -237,7 +244,7 @@ begin
   if CurUninstallStep = usUninstall then
   begin
     // Note: Inno Setup uninstalls only files listed in [Files] or explicitly registered.
-    // User task state in %LOCALAPPDATA%\Flux\state.db and %USERPROFILE%\Downloads\Flux
+    // user task state in %LOCALAPPDATA%\Radium\state.db and %USERPROFILE%\Downloads\Radium
     // are strictly preserved by design so uninstalling does not cause data loss.
   end;
 end;

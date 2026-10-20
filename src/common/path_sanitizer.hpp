@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — Path Sanitization, Content-Disposition Parsing, Worker Discovery & Disk Space Checks
+// Radium -- Path Sanitization, Content-Disposition Parsing, Worker Discovery & Disk Space Checks
 // Implements NFR-006, FR-001, FR-026, THREAT-003, BUG-005, BUG-009.
 #pragma once
 
@@ -38,23 +38,23 @@ public:
         ConflictPolicy policy = ConflictPolicy::kAutoRename,
         uint64_t expected_bytes = 0);
 
-    // Resolves the directory containing the running Flux executable (GetModuleFileNameW / /proc/self/exe)
+    // Resolves the directory containing the running Radium executable (GetModuleFileNameW / /proc/self/exe)
     static std::filesystem::path GetExecutableDir(const char* argv0 = nullptr);
 
-    // Safely migrates legacy OpenIDM state database and settings to Flux Download Manager
-    static bool MigrateLegacyDataIfNeeded(const std::filesystem::path& target_flux_dir);
+    // Safely migrates legacy OpenIDM/Flux state database and settings to Radium Download Manager
+    static bool MigrateLegacyDataIfNeeded(const std::filesystem::path& target_radium_dir);
 
-    // Resolves platform-appropriate application data directory (%LOCALAPPDATA%\Flux Download Manager on Windows 11)
+    // Resolves platform-appropriate application data directory (%LOCALAPPDATA%\Radium Download Manager on Windows 11)
     static std::filesystem::path GetDefaultAppDataDir();
 
-    // Resolves platform-appropriate default downloads directory (%USERPROFILE%\Downloads\Flux on Windows 11)
+    // Resolves platform-appropriate default downloads directory (%USERPROFILE%\Downloads\Radium on Windows 11)
     static std::filesystem::path GetDefaultDownloadsDir(const std::filesystem::path& exe_dir);
     static std::filesystem::path GetDefaultDownloadDir() { return GetDefaultDownloadsDir(GetExecutableDir()); }
 
     // Dynamically discovers a worker executable (e.g., "N_m3u8DL-RE", "ffmpeg", or "yt-dlp") across:
     //   1. <exe_dir>/tools/win-x64/<name>(.exe) [standard packaged location]
     //   2. <exe_dir>/tools/<name>(.exe) [backward compatibility for existing installations]
-    //   3. %LOCALAPPDATA%/Flux Download Manager/tools/win-x64/ and tools/
+    //   3. %LOCALAPPDATA%/Radium Download Manager/tools/win-x64/ and tools/
     //   4. Parent directories up to 3 levels (development/test builds)
     //   5. System PATH environment variable (; on Windows, : on POSIX)
     //   6. Fallback: <exe_dir>/tools/win-x64/<name>(.exe)

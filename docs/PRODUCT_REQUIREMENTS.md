@@ -2,7 +2,7 @@
 
 **Document Status:** Proposed Requirements Baseline  
 **Last Reviewed:** 2026-10-16  
-**Scope:** Functional (`FR-001`–`FR-028`) and Non-Functional (`NFR-001`–`NFR-016`) requirements for OpenIDM.  
+**Scope:** Functional (`FR-001`–`FR-028`) and Non-Functional (`NFR-001`–`NFR-016`) requirements for Radium Download Manager.  
 **Related Documents:** [PROJECT_BRIEF.md](PROJECT_BRIEF.md), [FEATURE_MATRIX.md](FEATURE_MATRIX.md), [TEST_MATRIX.md](TEST_MATRIX.md)
 
 ---

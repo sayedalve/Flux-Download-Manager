@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-# OpenIDM — Benchmark Runner & Metrics Collector
+# Radium Download Manager — Benchmark Runner & Metrics Collector
 # Executes integration benchmarks, validates resource budgets,
 # and persists results to benchmarks/latest_metrics.json.
 
@@ -27,7 +27,7 @@ def run_benchmarks(output_path: Path = None, verbose: bool = True) -> dict:
     if not test_script.exists():
         raise FileNotFoundError(f"Integration benchmark runner missing: {test_script}")
 
-    print(f"[Flux Benchmark] Running test benchmarks on {platform.system()} {platform.release()} ({platform.machine()})...")
+    print(f"[Radium Benchmark] Running test benchmarks on {platform.system()} {platform.release()} ({platform.machine()})...")
     t0 = datetime.datetime.now(datetime.timezone.utc)
 
     cmd = [sys.executable, str(test_script)]

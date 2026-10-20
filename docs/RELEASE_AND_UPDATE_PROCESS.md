@@ -9,8 +9,8 @@
 
 ## 1. Versioning Scheme
 
-Flux Download Manager follows **Semantic Versioning 2.0.0 (`MAJOR.MINOR.PATCH`)**:
-- **`0.y.z` (Current Milestones):** Production-ready release baseline (`v0.3.0`).
+Radium Download Manager follows **Semantic Versioning 2.0.0 (`MAJOR.MINOR.PATCH`)**:
+- **`0.y.z` (Current Milestones):** Production-ready release baseline (`v0.3.1`).
 - **`MAJOR`:** Incremented on breaking changes to the Native Messaging IPC protocol (`protocolVersion` major bump) or incompatible SQLite schema changes that cannot be migrated automatically.
 - **`MINOR`:** Backwards-compatible new features (e.g., adding dynamic rate limiting, queue scheduling, or pinned upgrades of `N_m3u8DL-RE` / `FFmpeg`).
 - **`PATCH`:** Bug fixes, security patches, and media detection rule updates.
@@ -23,13 +23,13 @@ Both the desktop application (`CMakeLists.txt` `VERSION 0.3.0`) and browser exte
 
 1. **`main` Branch:** Protected trunk; all merges require passing unit tests (`UT-*`), integration tests (`IT-*`), security tests (`SEC-*`), and binary size budget gates.
 2. **Release Tags (`vX.Y.Z`):** Pushing an annotated Git tag `vX.Y.Z` triggers the reproducible release workflow (`.github/workflows/windows-release.yml`):
-   - Compiles `flux.exe` (WIN32 GUI subsystem) and `flux-nmh.exe` (CUI console subsystem) in `Release` mode (`/O2 /GL /LTCG /MT /guard:cf`).
+   - Compiles `radium.exe` (WIN32 GUI subsystem) and `radium-nmh.exe` (CUI console subsystem) in `Release` mode (`/O2 /GL /LTCG /MT /guard:cf`).
    - Fetches and verifies the exact SHA-256-pinned upstream `N_m3u8DL-RE.exe` and `ffmpeg.exe` binaries via `scripts/fetch-workers.ps1`.
-   - Runs automated C++20 unit tests (`flux_unit_tests.exe`), browser extension tests (`test_extension_detection.js`), and integration tests (`run_all_integration_tests.py`).
-   - Builds `Flux-Setup-x64-vX.Y.Z.exe` via Inno Setup 6 (`installer/flux.iss`), configured with lowest privilege execution (`{autopf}`) and component selection.
-   - Packages standalone portable archives (`Flux-vX.Y.Z-Windows-x64-Full.zip` and `Flux-vX.Y.Z-Windows-x64-Core.zip`) via `scripts/package-release-zip.ps1`.
+   - Runs automated C++20 unit tests (`radium_unit_tests.exe`), browser extension tests (`test_extension_detection.js`), and integration tests (`run_all_integration_tests.py`).
+   - Builds `Radium-Setup-x64-vX.Y.Z.exe` via Inno Setup 6 (`installer/radium.iss` / `installer/flux.iss`), configured with lowest privilege execution (`{autopf}`) and component selection.
+   - Packages standalone portable archives (`Radium-vX.Y.Z-Windows-x64-Full.zip` and `Radium-vX.Y.Z-Windows-x64-Core.zip`) via `scripts/package-release-zip.ps1`.
    - Computes SHA-256 digests for all generated packages in `dist/SHA256SUMS.txt`.
-   - Drafts a GitHub Release on `https://github.com/sayedalve/Flux-Download-Manager/releases` with attached distribution packages and licenses.
+   - Drafts a GitHub Release on `https://github.com/sayedalve/Radium-Download-Manager/releases` with attached distribution packages and licenses.
 
 ---
 

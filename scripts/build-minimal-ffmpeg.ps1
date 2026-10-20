@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Minimal Windows x64 FFmpeg Build Pipeline
+# Radium Download Manager -- Minimal Windows x64 FFmpeg Build Pipeline
 #
 # Builds a deterministic, minimal Windows x64 FFmpeg executable (ffmpeg.exe)
 # containing only the demuxers, muxers, parsers, decoders, bitstream filters,
-# and encoders required by Flux's stream download and muxing workflows.
+# and encoders required by Radium's stream download and muxing workflows.
 #
 # Pinned Source: FFmpeg 7.1 (Tag: n7.1, Commit: 04706f3, Tarball: ffmpeg-7.1.tar.xz)
 # Pinned Source SHA-256: 40973d44d00a8999824ff4ec27549efdbdc7667a488e14603954625b5a79667

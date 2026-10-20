@@ -1,8 +1,8 @@
-# OpenIDM Engineering Documentation Index
+# Radium Download Manager Engineering Documentation Index
 
-**Document Status:** Active Navigation Map (`v0.2.0`)  
-**Last Reviewed:** 2026-10-16  
-**Scope:** Complete guide to the 47-document OpenIDM engineering knowledge base for AI coding agents and human developers.
+**Document Status:** Active Navigation Map (`v0.3.1`)  
+**Last Reviewed:** 2026-10-20  
+**Scope:** Complete guide to the Radium Download Manager engineering knowledge base for AI coding agents and human developers.
 
 ---
 
@@ -27,6 +27,7 @@
 - [../LICENSE_REVIEW.md](../LICENSE_REVIEW.md) — Upstream license audit and `GPL-3.0-or-later` compliance strategy.
 
 ### 2.2 Product Completion, UI & Release Verification (`docs/`)
+- [RADIUM_BRANDING.md](RADIUM_BRANDING.md) — Product identity, brand hierarchy, color palette, design tokens, and iconography.
 - [PRODUCT_COMPLETION_AUDIT.md](PRODUCT_COMPLETION_AUDIT.md) — Phase 1 source code audit and prioritized defect catalog.
 - [UI_DESIGN_SYSTEM.md](UI_DESIGN_SYSTEM.md) — Desktop UI design system, palettes, typography, DPI math, and dialogs.
 - [BUG_FIX_LOG.md](BUG_FIX_LOG.md) — Detailed bug fix and regression test log (`BUG-001`–`BUG-014`).

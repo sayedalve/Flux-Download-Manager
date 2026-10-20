@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — Browser Native Messaging Host (openidm-nmh)
+// Radium -- Browser Native Messaging Host (radium-nmh)
 // Bridges 32-bit length-prefixed JSON messages on stdin/stdout from Chrome/Edge/Brave/Firefox
-// to the OpenIDM IPC Server (Named Pipe on Windows 11, UNIX Domain Socket on POSIX),
-// auto-launching openidm --daemon if the server is not yet running.
+// to the Radium IPC Server (Named Pipe on Windows 11, UNIX Domain Socket on POSIX),
+// auto-launching radium --daemon if the server is not yet running.
 // Implements NATIVE_MESSAGING_AND_IPC.md & BUG-004 Fix.
 
 #include "common/ipc_path.hpp"
@@ -144,7 +144,7 @@ HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem:
     if (!daemon_bin_path.empty() && std::filesystem::exists(daemon_bin_path)) {
         // Prevent launch storms across concurrent NMH processes:
         // Use an interprocess named mutex so only one NMH process attempts to launch the background daemon.
-        HANDLE hLaunchMutex = CreateMutexW(nullptr, FALSE, L"Local\\Flux_NMH_Launch_Mutex");
+        HANDLE hLaunchMutex = CreateMutexW(nullptr, FALSE, L"Local\\Radium_NMH_Launch_Mutex");
         DWORD wait_res = WAIT_TIMEOUT;
         if (hLaunchMutex != nullptr && hLaunchMutex != INVALID_HANDLE_VALUE) {
             wait_res = WaitForSingleObject(hLaunchMutex, 3000);
@@ -170,6 +170,7 @@ HANDLE ConnectToDesktopPipe(const std::string& pipe_path, const std::filesystem:
         DWORD creation_flags = DETACHED_PROCESS;
         PROCESS_INFORMATION pi{};
         if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, creation_flags, nullptr, nullptr, &si, &pi)) {
+            AllowSetForegroundWindow(pi.dwProcessId);
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
         }
@@ -244,7 +245,13 @@ int main(int argc, char* argv[]) {
     if (argc > 0 && argv[0]) {
         std::filesystem::path self_path = std::filesystem::path(argv[0]);
 #ifdef _WIN32
-        std::filesystem::path candidate = self_path.parent_path() / "Flux.exe";
+        std::filesystem::path candidate = self_path.parent_path() / "Radium.exe";
+        if (!std::filesystem::exists(candidate)) {
+            candidate = self_path.parent_path() / "radium.exe";
+        }
+        if (!std::filesystem::exists(candidate)) {
+            candidate = self_path.parent_path() / "Flux.exe";
+        }
         if (!std::filesystem::exists(candidate)) {
             candidate = self_path.parent_path() / "flux.exe";
         }
@@ -252,7 +259,10 @@ int main(int argc, char* argv[]) {
             candidate = self_path.parent_path() / "openidm.exe";
         }
 #else
-        std::filesystem::path candidate = self_path.parent_path() / "flux";
+        std::filesystem::path candidate = self_path.parent_path() / "radium";
+        if (!std::filesystem::exists(candidate)) {
+            candidate = self_path.parent_path() / "flux";
+        }
         if (!std::filesystem::exists(candidate)) {
             candidate = self_path.parent_path() / "openidm";
         }
@@ -297,6 +307,10 @@ int main(int argc, char* argv[]) {
             WriteStdoutFrame(err);
             continue;
         }
+
+#ifdef _WIN32
+        AllowSetForegroundWindow(ASFW_ANY);
+#endif
 
         if (!WritePipeExact(hPipe, &in_len, sizeof(in_len)) ||
             !WritePipeExact(hPipe, payload.data(), in_len)) {

@@ -24,7 +24,7 @@ struct StreamProbeResult {
 
 struct StreamProgress {
     std::string task_id;
-    TaskState phase{TaskState::kDownloading}; // kDownloading vs kMuxing reported separately!
+    TaskState phase{TaskState::kDownloading}; // kDownloading vs kMuxing vs kVerifying vs kFinalizing
     double percent{0.0};
     uint64_t downloaded_bytes{0};
     uint64_t total_bytes{0};
@@ -34,12 +34,36 @@ struct StreamProgress {
     std::string status_line;
 };
 
+struct MediaQualityExpectations {
+    int expected_height{0};             // e.g. 1080 for 1080p, 720 for 720p, etc.
+    std::string expected_container;     // "mp4", "mkv", "webm", "m4a"
+    std::string expected_video_codec;   // e.g. "av01", "vp9", "h264", "avc1" (optional substring)
+    std::string expected_audio_codec;   // e.g. "aac", "opus", "mp4a" (optional substring)
+    double expected_duration_sec{0.0};  // from video details (if known)
+    uint64_t expected_min_bytes{0};     // min size expectation (if known)
+    bool expect_video{true};            // false for audio-only
+    bool expect_audio{true};            // false for video-only
+};
+
+struct MediaQualityResult {
+    bool ok{false};
+    std::string error_code;
+    std::string error_message;
+    int probed_width{0};
+    int probed_height{0};
+    std::string probed_video_codec;
+    std::string probed_audio_codec;
+    double probed_duration_sec{0.0};
+    uint64_t probed_file_size{0};
+};
+
 struct StreamAdapterConfig {
     std::filesystem::path nm3u8dl_binary_path;
     std::filesystem::path ffmpeg_binary_path;
     std::filesystem::path temp_root_dir;
     bool allow_loopback_manifests{false};
     std::filesystem::path fallback_worker_path{};
+    std::filesystem::path ffprobe_binary_path{};
 };
 
 class Nm3u8dlReAdapter {
@@ -73,6 +97,20 @@ public:
     // Validates that output stream file is non-empty and contains valid container magic bytes
     // (MP4/M4A/MOV, MKV/WebM, MP3, AAC, FLAC, Ogg/Opus, TS).
     static bool VerifyContainerMagicBytes(const std::filesystem::path& file_path, const std::string& fmt);
+
+    // Verifies downloaded media file using ffprobe (or container magic/header fallback)
+    // against expected quality (resolution, codecs, duration, min size).
+    static Result<MediaQualityResult> VerifyMediaQuality(
+        const std::filesystem::path& file_path,
+        const MediaQualityExpectations& expectations,
+        const std::filesystem::path& ffprobe_path = {});
+
+    // Constructs strongly typed yt-dlp format selector without silent downgrade to 360p
+    static std::string BuildYtDlpFormatSelector(
+        std::string_view requested_filter,
+        int target_height,
+        bool wants_audio_only,
+        std::string_view preferred_container);
 
     // Phase 1: Probes a detected HLS/DASH manifest using the actual N_m3u8DL-RE worker (--skip-download --write-meta-json)
     Result<StreamProbeResult> ProbeManifest(

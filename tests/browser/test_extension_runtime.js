@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Flux Download Manager -- Automated Browser Extension Runtime Verification Suite
+// Radium Download Manager -- Automated Browser Extension Runtime Verification Suite
 // Uses Playwright with real unpacked Chromium Manifest V3 extension,
 // spins up a local fixture HTTP server, and verifies:
 //  1. Service Worker lifecycle & extension startup
@@ -11,6 +11,7 @@
 //  6. Service worker restart & session storage persistence
 //  7. Native Messaging Host IPC round-trip / status checks
 
+const assert = require("assert");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -49,6 +50,14 @@ function createFixtureServer() {
     if (pathname === "/stream" || pathname === "/stream.html") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(fs.readFileSync(path.join(FIXTURES_DIR, "stream.html")));
+      return;
+    }
+    if (pathname === "/chatgpt-csp-test") {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline';"
+      });
+      res.end(`<!DOCTYPE html><html><body><h1>ChatGPT CSP Simulation</h1><button id="dlBtn">Download Script</button><script>const iframe = document.createElement("iframe"); iframe.style.display = "none"; document.body.appendChild(iframe); const unhookedBlobUrl = iframe.contentWindow.URL.createObjectURL(new iframe.contentWindow.Blob(["import math\nprint('PI:', math.pi)\n"], { type: "text/x-python" })); document.getElementById("dlBtn").addEventListener("click", () => { const a = document.createElement("a"); a.href = unhookedBlobUrl; a.download = "chatgpt_canvas_script.py"; document.body.appendChild(a); a.click(); a.remove(); });</script></body></html>`);
       return;
     }
 
@@ -215,7 +224,7 @@ seg_000.ts
 
 async function runBrowserRuntimeTests() {
   console.log("=================================================================");
-  console.log("  Flux Extension -- Playwright Chromium Runtime Test Suite       ");
+  console.log("  Radium Extension -- Playwright Chromium Runtime Test Suite     ");
   console.log("=================================================================");
 
   const server = createFixtureServer();
@@ -263,7 +272,7 @@ async function runBrowserRuntimeTests() {
     await page.click("#link-zip");
     const download = await downloadPromise;
 
-    // Check if Flux extension received/intercepted the download in Service Worker
+    // Check if Radium extension received/intercepted the download in Service Worker
     const interceptionState = await serviceWorker.evaluate(() => {
       const logs = (typeof G !== "undefined" && Array.isArray(G.pipelineLogs)) ? G.pipelineLogs : [];
       const intercepted = logs.some(l => l.stage === "DOWNLOAD_INTERCEPTED" || l.stage === "NATIVE_RPC_SENT" || l.stage === "NATIVE_RPC_RESULT");
@@ -278,9 +287,9 @@ async function runBrowserRuntimeTests() {
       }
       console.log("  [OK] Demonstrated browser fallback completion path for archive.zip");
     } else if (interceptionState.intercepted) {
-      console.log(`  [OK] Demonstrated Flux extension download interception pipeline (pipeline events: ${interceptionState.count})`);
+      console.log(`  [OK] Demonstrated Radium extension download interception pipeline (pipeline events: ${interceptionState.count})`);
     } else {
-      throw new Error("Neither Flux interception nor browser download completion occurred for #link-zip!");
+      throw new Error("Neither Radium interception nor browser download completion occurred for #link-zip!");
     }
     await page.screenshot({ path: path.join(ARTIFACTS_DIR, "downloads-page.png") });
     console.log("  -> PASS: Download capture and verified outcome demonstrated successfully");
@@ -414,8 +423,8 @@ async function runBrowserRuntimeTests() {
 
     const title = await popupPage.title();
     console.log(`  Popup Title: "${title}"`);
-    if (!title || !title.toLowerCase().includes("flux")) {
-      throw new Error(`Popup page title did not match expected 'Flux': "${title}"`);
+    if (!title || (!title.toLowerCase().includes("radium") && !title.toLowerCase().includes("rdm"))) {
+      throw new Error(`Popup page title did not match expected 'Radium': "${title}"`);
     }
 
     // Verify essential controls exist, are visible, and properly configured
@@ -531,8 +540,8 @@ async function runBrowserRuntimeTests() {
     await cdpPage.close().catch(() => {});
     console.log("  -> PASS: Verified storage persistence across real Service Worker lifecycle termination");
 
-    // Suite 7: Native Messaging Offline Fallback Contract (Flux Desktop Offline)
-    console.log(`\n[Suite 7/7] Testing Native Messaging Offline Fallback Contract (Flux Offline)...`);
+    // Suite 7: Native Messaging Offline Fallback Contract (Radium Desktop Offline)
+    console.log(`\n[Suite 7/7] Testing Native Messaging Offline Fallback Contract (Radium Offline)...`);
     const fallbackStatus = await serviceWorker.evaluate(async () => {
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendNativeMessage) {
         return new Promise((resolve) => {
@@ -560,15 +569,32 @@ async function runBrowserRuntimeTests() {
     }
     console.log("  -> PASS: Native Messaging offline fallback contract verified");
 
+    console.log(`\n[Suite 8/8] Testing ChatGPT Strict CSP (default-src 'none') Blob Interception...`);
+    const chatgptPage = await context.newPage();
+    const chatgptErrors = [];
+    chatgptPage.on("console", msg => {
+      if (msg.type() === "error") chatgptErrors.push(msg.text());
+    });
+    await chatgptPage.goto(`${baseUrl}/chatgpt-csp-test`);
+    await chatgptPage.waitForSelector("#dlBtn");
+    await chatgptPage.click("#dlBtn");
+    await chatgptPage.waitForTimeout(1000);
+
+    const cspViolations = chatgptErrors.filter(e => e.includes("Content Security Policy") || e.includes("violates"));
+    assert.strictEqual(cspViolations.length, 0, `Strict CSP page must produce ZERO CSP violations upon blob download. Got: ${JSON.stringify(cspViolations)}`);
+    console.log("  [OK] Clicked unhooked blob download on strict CSP page without CSP errors");
+    console.log("  -> PASS: ChatGPT strict CSP blob download intercepted cleanly");
+    await chatgptPage.close();
+
     console.log("\n=================================================================");
-    console.log("   ALL 7 BROWSER EXTENSION RUNTIME PLAYWRIGHT SUITES PASSED!     ");
+    console.log("   ALL 8 BROWSER EXTENSION RUNTIME PLAYWRIGHT SUITES PASSED!     ");
     console.log("=================================================================");
 
     const report = {
       timestamp: new Date().toISOString(),
       status: "PASSED",
-      suites: 7,
-      passed: 7,
+      suites: 8,
+      passed: 8,
       failed: 0,
       browser: "Chromium (Playwright)",
       extensionId: EXPECTED_EXT_ID,

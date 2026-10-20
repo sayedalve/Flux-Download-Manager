@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Adapted from xifangczy/cat-catch (js/background.js) & Brisk Browser Extension for Flux Download Manager.
+// Adapted from xifangczy/cat-catch (js/background.js) & Brisk Browser Extension for Radium Download Manager.
 // Handles Service Worker module initialization, webRequest header & redirect correlation,
 // explicit typed media detection (HLS_MANIFEST, DASH_MANIFEST, DIRECT_PROGRESSIVE, YOUTUBE_EXTRACTION, UNSUPPORTED),
 // ordinary download interception with per-tab/per-URL click tracking and attachment support,
@@ -591,9 +591,17 @@ function onHeadersReceivedHandler(details) {
       correlationId: generateCorrelationId("netdl")
     };
     if (G.recentDownloadResponses) {
-      G.recentDownloadResponses.set(normalizeCorrelationUrl(details.url), respMeta);
+      const normCur = normalizeCorrelationUrl(details.url);
+      G.recentDownloadResponses.set(normCur, respMeta);
+      if (normCur.includes("?")) {
+        G.recentDownloadResponses.set(normCur.split("?")[0], respMeta);
+      }
       if (originalUrl !== details.url) {
-        G.recentDownloadResponses.set(normalizeCorrelationUrl(originalUrl), respMeta);
+        const normOrig = normalizeCorrelationUrl(originalUrl);
+        G.recentDownloadResponses.set(normOrig, respMeta);
+        if (normOrig.includes("?")) {
+          G.recentDownloadResponses.set(normOrig.split("?")[0], respMeta);
+        }
       }
       if (G.recentDownloadResponses.size > 500) {
         G.recentDownloadResponses.delete(G.recentDownloadResponses.keys().next().value);
@@ -663,6 +671,11 @@ function findCorrelatedNetworkResponse(downloadItem) {
     const meta = G.recentDownloadResponses.get(u);
     if (meta && (now - meta.timestamp) < 60000) {
       return meta;
+    }
+    const uNoQuery = u.split("?")[0];
+    const metaNoQuery = G.recentDownloadResponses.get(uNoQuery);
+    if (metaNoQuery && (now - metaNoQuery.timestamp) < 60000) {
+      return metaNoQuery;
     }
   }
   return null;
@@ -738,14 +751,101 @@ const downloadStateMachine = new DownloadStateMachine();
 
 
 async function transferBlobToFlux(tabId, blobUrl, filename, mime, correlationId, customTransport = null) {
+  let directDataB64 = "";
+  let directTotalBytes = 0;
+  let directMime = mime || "application/octet-stream";
+
+  // 1. Direct Background Service Worker fetch (immune to webpage CSP)
+  if (blobUrl && blobUrl.startsWith("blob:") && typeof fetch === "function") {
+    try {
+      const resp = await fetch(blobUrl);
+      if (resp && resp.ok) {
+        const b = await resp.blob();
+        directTotalBytes = b.size;
+        if (b.type) directMime = b.type;
+        const arrayBuf = await b.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuf);
+        let binary = "";
+        const chunk = 32768;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+        }
+        directDataB64 = btoa(binary);
+      }
+    } catch (_) {}
+  }
+
+  if (directDataB64) {
+    const transferId = "blob-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+    const startRes = await sendNativeRpc("download.startChunkedTransfer", {
+      taskId: transferId,
+      filename: filename || "artifact_download",
+      totalBytes: directTotalBytes || Math.round(directDataB64.length * 0.75),
+      mimeType: directMime,
+      correlationId
+    }, customTransport);
+
+    if (!startRes || !startRes.accepted) {
+      throw new Error((startRes && startRes.reason) || "Chunked transfer rejected by Radium");
+    }
+
+    const effectiveTaskId = startRes.taskId || transferId;
+    const chunkSize = 262144; // 256 KiB base64 chunk
+    let chunkIndex = 0;
+    for (let offset = 0; offset < directDataB64.length; offset += chunkSize) {
+      const chunkStr = directDataB64.slice(offset, offset + chunkSize);
+      await sendNativeRpc("download.transferChunk", {
+        taskId: effectiveTaskId,
+        chunkIndex,
+        dataBase64: chunkStr
+      }, customTransport);
+      chunkIndex++;
+    }
+
+    const completeRes = await sendNativeRpc("download.completeChunkedTransfer", {
+      taskId: effectiveTaskId,
+      totalBytes: directTotalBytes || Math.round(directDataB64.length * 0.75)
+    }, customTransport);
+
+    if (!completeRes || !completeRes.success) {
+      throw new Error((completeRes && completeRes.error) || "Complete chunked transfer failed");
+    }
+
+    return { success: true, taskId: effectiveTaskId, filename: completeRes.fileName || filename };
+  }
+
+  let resolvedTabId = Number(tabId) || 0;
+  if (resolvedTabId <= 0 && typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.query === "function") {
+    try {
+      if (blobUrl && (blobUrl.startsWith("blob:http://") || blobUrl.startsWith("blob:https://"))) {
+        const origin = new URL(blobUrl.replace(/^blob:/i, "")).origin;
+        if (origin && origin !== "null") {
+          const originTabs = await new Promise(r => chrome.tabs.query({ url: origin + "/*" }, r));
+          if (Array.isArray(originTabs) && originTabs.length > 0) {
+            const activeOriginTab = originTabs.find(t => t.active) || originTabs[0];
+            if (activeOriginTab && activeOriginTab.id > 0) {
+              resolvedTabId = activeOriginTab.id;
+            }
+          }
+        }
+      }
+      if (resolvedTabId <= 0) {
+        const activeTabs = await new Promise(r => chrome.tabs.query({ active: true, lastFocusedWindow: true }, r));
+        if (Array.isArray(activeTabs) && activeTabs[0] && activeTabs[0].id > 0) {
+          resolvedTabId = activeTabs[0].id;
+        }
+      }
+    } catch (_) {}
+  }
+
   return new Promise((resolve, reject) => {
-    if (!tabId || tabId <= 0) {
+    if (!resolvedTabId || resolvedTabId <= 0) {
       return reject(new Error("No tab available for blob data retrieval"));
     }
     if (typeof chrome === "undefined" || !chrome.tabs || typeof chrome.tabs.sendMessage !== "function") {
       return reject(new Error("chrome.tabs.sendMessage not available in environment"));
     }
-    chrome.tabs.sendMessage(tabId, {
+    chrome.tabs.sendMessage(resolvedTabId, {
       action: "fluxFetchBlobData",
       blobUrl,
       filename,
@@ -769,7 +869,7 @@ async function transferBlobToFlux(tabId, blobUrl, filename, mime, correlationId,
         }, customTransport);
 
         if (!startRes || !startRes.accepted) {
-          return reject(new Error((startRes && startRes.reason) || "Chunked transfer rejected by Flux"));
+          return reject(new Error((startRes && startRes.reason) || "Chunked transfer rejected by Radium"));
         }
 
         const effectiveTaskId = startRes.taskId || transferId;
@@ -879,7 +979,7 @@ async function onDownloadCreatedHandler(
   // 4. In Chromium/Brave/Edge, onCreated fires first. Pause the download immediately so no bytes transfer
   // before filename determination and Flux eligibility check!
   if (phase === "created") {
-    if (G.enableCapture && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
+    if (!isBlob && G.enableCapture && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.pause === "function" && downloadItem.id !== undefined) {
       try { chrome.downloads.pause(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
     }
     if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.onDeterminingFilename) {
@@ -912,10 +1012,43 @@ async function onDownloadCreatedHandler(
 
   // 6. Gather all correlation metadata across click, network response headers, and redirect chains
   const netMeta = findCorrelatedNetworkResponse(downloadItem);
-  const effectiveTabId = downloadItem.tabId || (netMeta && netMeta.tabId) || rec.tabId || 0;
-  rec.tabId = effectiveTabId;
+  let effectiveTabId = downloadItem.tabId || (netMeta && netMeta.tabId) || rec.tabId || 0;
 
   const clickedInfo = findCorrelatedClick(effectiveTabId, downloadItem);
+  if (effectiveTabId <= 0 && clickedInfo && clickedInfo.tabId > 0) {
+    effectiveTabId = clickedInfo.tabId;
+  }
+
+  // If effectiveTabId is still unknown, attempt async resolution from matching web origin or active tab
+  if (effectiveTabId <= 0 && typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.query === "function") {
+    try {
+      let originPattern = "";
+      if (isWebBlob) {
+        try {
+          const stripped = targetUrl.replace(/^blob:/i, "");
+          const origin = new URL(stripped).origin;
+          if (origin && origin !== "null") originPattern = origin + "/*";
+        } catch (_) {}
+      }
+      if (originPattern) {
+        const originTabs = await new Promise(r => chrome.tabs.query({ url: originPattern }, r));
+        if (Array.isArray(originTabs) && originTabs.length > 0) {
+          const activeOriginTab = originTabs.find(t => t.active) || originTabs[0];
+          if (activeOriginTab && activeOriginTab.id > 0) {
+            effectiveTabId = activeOriginTab.id;
+          }
+        }
+      }
+      if (effectiveTabId <= 0) {
+        const activeTabs = await new Promise(r => chrome.tabs.query({ active: true, lastFocusedWindow: true }, r));
+        if (Array.isArray(activeTabs) && activeTabs[0] && activeTabs[0].id > 0) {
+          effectiveTabId = activeTabs[0].id;
+        }
+      }
+    } catch (_) {}
+  }
+  rec.tabId = effectiveTabId;
+
   rec.originalUrl = (clickedInfo && clickedInfo.url) ||
                     (netMeta && netMeta.originalUrl) ||
                     resolveInitialUrlFromRedirects(downloadItem.url || targetUrl) ||
@@ -923,7 +1056,8 @@ async function onDownloadCreatedHandler(
 
   const pageReferrer = downloadItem.referrer ||
                        (clickedInfo ? clickedInfo.referrer : "") ||
-                       (netMeta ? netMeta.tabUrl : "") || "";
+                       (netMeta ? netMeta.tabUrl : "") ||
+                       (rec.tabId && G.tabUrlMap && G.tabUrlMap.get(rec.tabId)) || "";
 
   rec.correlationId = (clickedInfo && clickedInfo.correlationId) ||
                       (netMeta && netMeta.correlationId) ||
@@ -944,7 +1078,8 @@ async function onDownloadCreatedHandler(
 
   const rawFilename = downloadItem.filename ||
                       (netMeta && netMeta.filename) ||
-                      (clickedInfo && clickedInfo.filename) || "";
+                      (clickedInfo && clickedInfo.filename) ||
+                      (typeof extractFilenameFromUrlQuery === "function" ? extractFilenameFromUrlQuery(targetUrl) : "") || "";
   const cleanFilename = sanitizeFilename(rawFilename ? rawFilename.split(/[/\\]/).pop() : "");
   rec.suggestedFilename = cleanFilename;
 
@@ -1375,8 +1510,21 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   }
 
   let baseTitle = options.pageTitle || candidate.pageTitle || candidate.fileName || "";
-  if (options.qualityId && effectiveResolution && qualitiesList.length > 1 && !baseTitle.includes(`[${effectiveResolution}]`)) {
+  // Strip any old bracketed resolution tag (e.g. [360p], [480p], [720p]) so quality upgrades are clean
+  baseTitle = baseTitle.replace(/\s*\[\s*\d{3,4}p[_\w]*\s*\]/gi, "").trim();
+  if (effectiveResolution && effectiveResolution !== "Auto" && qualitiesList.length > 1) {
     baseTitle = `${baseTitle} [${effectiveResolution}]`.trim();
+  }
+
+  let effectiveFileName = candidate.fileName || "";
+  if (effectiveFileName) {
+    effectiveFileName = effectiveFileName.replace(/\s*\[\s*\d{3,4}p[_\w]*\s*\]/gi, "").trim();
+    if (effectiveResolution && effectiveResolution !== "Auto") {
+      const extM = effectiveFileName.match(/\.([a-zA-Z0-9]+)$/);
+      const curExt = extM ? extM[1] : defaultExt;
+      const fStem = extM ? effectiveFileName.slice(0, -extM[0].length) : effectiveFileName;
+      effectiveFileName = `${fStem} [${effectiveResolution}].${curExt}`;
+    }
   }
 
   const headers = Object.assign({}, candidate.headers || {});
@@ -1410,9 +1558,11 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
     pairedAudioUrl: effectiveAudioUrl,
     videoId: candidate.videoId || "",
     resolution: effectiveResolution,
+    qualityId: (chosenQuality && chosenQuality.id) ? chosenQuality.id : (options.qualityId || ""),
     requiresCipherExtraction: effectiveRequiresCipher,
     extractorJson,
     pageTitle: baseTitle,
+    fileName: effectiveFileName,
     tabUrl: candidate.tabUrl || "",
     outputFormat: (options.audioOnly || (chosenQuality && chosenQuality.isAudioOnly))
       ? (options.outputFormat || (defaultExt === "mp3" || defaultExt === "m4a" ? defaultExt : "m4a"))
@@ -1436,7 +1586,7 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
 
   try {
     const res = await sendNativeRpc("stream.add", params, customTransport);
-    candidate.handoffStatus = "Queued in Flux";
+    candidate.handoffStatus = "Queued in Radium";
     if (res && typeof res === "object") {
       res.taskType = res.taskType || sourceType;
     }
@@ -1458,6 +1608,7 @@ async function submitMediaCandidateToFlux(candidate, options = {}, customTranspo
   }
 }
 
+var submitMediaCandidateToRadium = submitMediaCandidateToFlux;
 var submitMediaCandidateToOpenIDM = submitMediaCandidateToFlux;
 
 function resolveCandidateForDownloadRequest(tabId, msg, sender) {
@@ -1482,6 +1633,18 @@ function resolveCandidateForDownloadRequest(tabId, msg, sender) {
   // 2. Direct non-blob URL match
   if (msg.url && !msg.url.startsWith("blob:") && !isWebpageWatchUrl(msg.url)) {
     const normUrl = normalizeMediaUrl(msg.url);
+
+    // If downloading on a YouTube watch page or via googlevideo URL, prefer the rich YouTube extraction candidate
+    if (isYouTubeWatchOrShortsUrl(effectiveTabUrl) || normUrl.includes("googlevideo.com") || normUrl.includes("videoplayback")) {
+      const ytCand = tabList.find(c => (c.streamType === "YOUTUBE" || c.sourceType === SourceType.YOUTUBE_EXTRACTION) && Array.isArray(c.qualities) && c.qualities.length > 0);
+      if (ytCand) {
+        if (effectiveTitle && (!ytCand.pageTitle || ytCand.pageTitle === "video" || ytCand.pageTitle === "youtube_video")) {
+          ytCand.pageTitle = effectiveTitle;
+        }
+        return { candidate: ytCand };
+      }
+    }
+
     const existing = tabList.find(c => c.url === normUrl || c.url === msg.url);
     if (existing) {
       if (effectiveTitle && (!existing.pageTitle || existing.pageTitle === "video")) {
@@ -1839,7 +2002,7 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
           const prevResult = await G.inFlightMediaDownloads.get(inFlightKey);
           sendResponse({ success: true, result: prevResult, correlationId, deduplicated: true });
         } catch (err) {
-          sendResponse({ success: false, error: err.message || "Failed to submit download to Flux", correlationId });
+          sendResponse({ success: false, error: err.message || "Failed to submit download to Radium", correlationId });
         }
         return;
       }
@@ -1867,7 +2030,7 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
         notifyPopupMediaUpdated(tabId);
         sendResponse({ success: true, result, correlationId });
       } catch (err) {
-        sendResponse({ success: false, error: err.message || "Failed to submit download to Flux", correlationId });
+        sendResponse({ success: false, error: err.message || "Failed to submit download to Radium", correlationId });
       }
     });
     return true;
@@ -1901,6 +2064,105 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
   if (msg.action === "linkClicked") {
     const rec = recordClickedLink(tabId, msg);
     sendResponse({ success: true, correlationId: rec ? rec.correlationId : "" });
+    return true;
+  }
+
+  if (msg.action === "interceptBlobDownload") {
+    const correlationId = msg.correlationId || generateCorrelationId("blob");
+    const filename = sanitizeFilename(msg.filename || "artifact_download");
+    let mime = msg.mimeType || "application/octet-stream";
+    let dataB64 = msg.dataBase64 || "";
+    let totalBytes = msg.size || 0;
+
+    if (!G.enableCapture || isSiteDisabled(msg.pageUrl || "")) {
+      sendResponse({ success: false, fallbackToBrowser: true, reason: "CAPTURE_DISABLED" });
+      return true;
+    }
+
+    logPipelineStage(correlationId, "BLOB_DIRECT_INTERCEPTION_STARTED", {
+      url: msg.url,
+      filename,
+      fileSize: totalBytes,
+      mime
+    });
+
+    (async () => {
+      try {
+        // If dataBase64 was not supplied by page context (e.g. blob generated in Web Worker under strict CSP),
+        // fetch it directly here in the Background Service Worker where page CSP does not apply.
+        if (!dataB64 && msg.url && msg.url.startsWith("blob:") && typeof fetch === "function") {
+          const resp = await fetch(msg.url);
+          if (!resp.ok) {
+            throw new Error(`Failed to fetch blob in background: ${resp.status}`);
+          }
+          const blob = await resp.blob();
+          totalBytes = blob.size;
+          if (blob.type) mime = blob.type;
+          const arrayBuf = await blob.arrayBuffer();
+          const bytes = new Uint8Array(arrayBuf);
+          let binary = "";
+          const chunk = 32768;
+          for (let i = 0; i < bytes.length; i += chunk) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+          }
+          dataB64 = btoa(binary);
+        }
+
+        if (!totalBytes && dataB64) {
+          totalBytes = Math.round(dataB64.length * 0.75);
+        }
+
+        const transferId = "blob-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+        const startRes = await sendNativeRpc("download.startChunkedTransfer", {
+          taskId: transferId,
+          filename,
+          totalBytes,
+          mimeType: mime,
+          pageUrl: msg.pageUrl || "",
+          correlationId
+        });
+
+        if (!startRes || !startRes.accepted) {
+          throw new Error((startRes && startRes.reason) || "Chunked transfer rejected by Radium");
+        }
+
+        const effectiveTaskId = startRes.taskId || transferId;
+        const chunkSize = 262144; // 256 KiB base64 chunk
+        let chunkIndex = 0;
+        for (let offset = 0; offset < dataB64.length; offset += chunkSize) {
+          const chunkStr = dataB64.slice(offset, offset + chunkSize);
+          await sendNativeRpc("download.transferChunk", {
+            taskId: effectiveTaskId,
+            chunkIndex,
+            dataBase64: chunkStr
+          });
+          chunkIndex++;
+        }
+
+        const completeRes = await sendNativeRpc("download.completeChunkedTransfer", {
+          taskId: effectiveTaskId,
+          totalBytes
+        });
+
+        if (!completeRes || !completeRes.success) {
+          throw new Error((completeRes && completeRes.error) || "Complete chunked transfer failed");
+        }
+
+        logPipelineStage(correlationId, "BLOB_DIRECT_INTERCEPTION_COMPLETED", {
+          taskId: effectiveTaskId,
+          filename: completeRes.fileName || filename,
+          totalBytes
+        });
+
+        sendResponse({ success: true, taskId: effectiveTaskId, filename: completeRes.fileName || filename });
+      } catch (err) {
+        logPipelineStage(correlationId, "BLOB_DIRECT_INTERCEPTION_FAILED", {
+          error: err ? err.message : String(err),
+          fallbackToBrowser: true
+        });
+        sendResponse({ success: false, fallbackToBrowser: true, error: err ? err.message : String(err) });
+      }
+    })();
     return true;
   }
 
@@ -2350,6 +2612,7 @@ if (typeof module !== "undefined" && module.exports) {
     submitMediaCandidateToOpenIDM,
     resolveCandidateForDownloadRequest,
     handleRuntimeMessage,
-    downloadStateMachine
+    downloadStateMachine,
+    transferBlobToFlux
   };
 }

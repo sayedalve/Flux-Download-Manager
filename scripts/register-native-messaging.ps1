@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Flux Download Manager -- Native Messaging Host Per-User Registration Script (v0.3.0)
+# Radium Download Manager -- Native Messaging Host Per-User Registration Script (v0.3.0)
 # Configures HKCU registry keys for Chrome, Edge, Brave, and Firefox without requiring admin rights.
-# Supports portable mode by pointing directly to the local flux-nmh.exe executable.
+# Supports portable mode by pointing directly to the local radium-nmh.exe executable.
 
 [CmdletBinding()]
 param(
@@ -18,7 +18,7 @@ $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..")).Path
 $doUnregister = $Unregister -or $Uninstall -or $Clean
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   Flux Download Manager -- Native Messaging Host Setup (HKCU)   " -ForegroundColor Cyan
+Write-Host "   Radium Download Manager -- Native Messaging Host Setup (HKCU)   " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
 # 1. Handle Unregistration / Clean
@@ -45,7 +45,7 @@ if ($doUnregister) {
         }
     }
 
-    $manifestDir = Join-Path $env:LOCALAPPDATA "Flux Download Manager\manifests"
+    $manifestDir = Join-Path $env:LOCALAPPDATA "Radium Download Manager\manifests"
     if (Test-Path $manifestDir) {
         Remove-Item -Recurse -Force $manifestDir -ErrorAction SilentlyContinue
         Write-Host "  [-] Cleaned manifest cache: $manifestDir" -ForegroundColor Gray
@@ -55,9 +55,13 @@ if ($doUnregister) {
     exit 0
 }
 
-# 2. Locate flux-nmh.exe
+# 2. Locate radium-nmh.exe
 if (-not $HostExePath) {
     $candidates = @(
+        (Join-Path $RepoRoot "build\win-x64\Release\radium-nmh.exe"),
+        (Join-Path $RepoRoot "build\Release\radium-nmh.exe"),
+        (Join-Path $RepoRoot "dist\radium-nmh.exe"),
+        (Join-Path $RepoRoot "radium-nmh.exe"),
         (Join-Path $RepoRoot "build\win-x64\Release\flux-nmh.exe"),
         (Join-Path $RepoRoot "build\Release\flux-nmh.exe"),
         (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe"),
@@ -73,7 +77,7 @@ if (-not $HostExePath) {
 }
 
 if (-not $HostExePath -or -not (Test-Path $HostExePath)) {
-    Write-Error "flux-nmh.exe could not be found! Please build the solution first or specify -HostExePath.`nSearched candidates:`n - $($candidates -join "`n - ")"
+    Write-Error "radium-nmh.exe could not be found! Please build the solution first or specify -HostExePath.`nSearched candidates:`n - $($candidates -join "`n - ")"
     exit 1
 }
 Write-Host "[+] Found Native Host executable: $HostExePath" -ForegroundColor Green
@@ -150,7 +154,7 @@ foreach ($bp in $browserProfiles) {
                     $extObj = $_.Value
                     $ePath = $extObj.path
                     $eName = $extObj.manifest.name
-                    if ($ePath -match "openidm|flux" -or $eName -match "Flux|OpenIDM") {
+                    if ($ePath -match "openidm|flux|radium" -or $eName -match "Flux|OpenIDM|Radium") {
                         $bOrigin = "chrome-extension://$($_.Name)/"
                         if (-not $allowedOrigins.Contains($bOrigin)) {
                             $allowedOrigins.Add($bOrigin)
@@ -178,8 +182,8 @@ if ($ExtensionId) {
     Write-Host "[+] Total authorized Chromium origins: $($allowedOrigins -join ', ')" -ForegroundColor Cyan
 }
 
-# 4. Create Manifest Directory in %LOCALAPPDATA%\Flux Download Manager\manifests
-$manifestDir = Join-Path $env:LOCALAPPDATA "Flux Download Manager\manifests"
+# 4. Create Manifest Directory in %LOCALAPPDATA%\Radium Download Manager\manifests
+$manifestDir = Join-Path $env:LOCALAPPDATA "Radium Download Manager\manifests"
 if (-not (Test-Path $manifestDir)) {
     New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
 }
@@ -195,7 +199,7 @@ function Write-Utf8NoBom([string]$FilePath, [string]$Content) {
 # 5. Generate Chromium Manifest
 $chromiumManifest = [ordered]@{
     name = "com.flux.downloadmanager"
-    description = "Flux Download Manager Native Messaging Host"
+    description = "Radium Download Manager Native Messaging Host"
     path = $HostExePath
     type = "stdio"
     allowed_origins = $allowedOrigins
@@ -211,7 +215,7 @@ foreach ($alias in @("org.flux.native", "org.openidm.native")) {
     $aliasPath = Join-Path $manifestDir "$alias.chromium.json"
     $aliasManifest = [ordered]@{
         name = $alias
-        description = "Flux Download Manager Native Messaging Host ($alias)"
+        description = "Radium Download Manager Native Messaging Host ($alias)"
         path = $HostExePath
         type = "stdio"
         allowed_origins = $allowedOrigins
@@ -224,10 +228,11 @@ foreach ($alias in @("org.flux.native", "org.openidm.native")) {
 # 6. Generate Firefox Manifest
 $firefoxManifest = [ordered]@{
     name = "com.flux.downloadmanager"
-    description = "Flux Download Manager Native Messaging Host"
+    description = "Radium Download Manager Native Messaging Host"
     path = $HostExePath
     type = "stdio"
     allowed_extensions = @(
+        "radium-extension@radiumdownloadmanager.org",
         "flux-extension@fluxdownloadmanager.org",
         "flux@downloadmanager.org",
         "flux@openidm.org",
@@ -276,4 +281,4 @@ Write-Host "2. Enable the 'Developer mode' toggle in the top-right corner." -For
 Write-Host "3. Click 'Load unpacked' and select the folder: $RepoRoot\extension" -ForegroundColor Gray
 Write-Host "4. Notice the extension ID is now fixed and stable: $authoritativeFluxId" -ForegroundColor Gray
 Write-Host "   (If you reload an existing unpacked extension, click the reload icon on the extension card)" -ForegroundColor Gray
-Write-Host "5. Open Flux Download Manager (flux.exe) and verify that the extension popup displays 'Desktop Connected'." -ForegroundColor White
+Write-Host "5. Open Radium Download Manager (radium.exe) and verify that the extension popup displays 'Desktop Connected'." -ForegroundColor White

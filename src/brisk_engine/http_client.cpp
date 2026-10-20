@@ -759,6 +759,10 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         DWORD disable_redirects = WINHTTP_DISABLE_REDIRECTS;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_DISABLE_FEATURE, &disable_redirects, sizeof(disable_redirects));
 
+        // Optimize TCP read buffer for high-speed segmented downloading
+        DWORD read_buf_size = 262144; // 256 KiB socket read buffer
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_READ_BUFFER_SIZE, &read_buf_size, sizeof(read_buf_size));
+
         // Windows Integrated Authentication (Negotiate / NTLM autologon for domain/intranet)
         if (net_opts.enable_integrated_auth) {
             DWORD autologon = WINHTTP_AUTOLOGON_SECURITY_LEVEL_MEDIUM;
@@ -889,7 +893,7 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         }
 
         uint64_t bytes_delivered = 0;
-        std::vector<uint8_t> rbuf(65536);
+        std::vector<uint8_t> rbuf(262144);
         while (!meta.has_content_length || bytes_delivered < meta.content_length) {
             if (cancel_flag.load()) {
                 cleanup_winhttp();

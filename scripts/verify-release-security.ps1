@@ -19,7 +19,7 @@ if (-not $DistDir) { $DistDir = Join-Path $RepoRoot "dist" }
 if (-not $ToolsDir) { $ToolsDir = Join-Path $RepoRoot "tools\win-x64" }
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "   Flux Download Manager -- Security & Distribution Audit        " -ForegroundColor Cyan
+Write-Host "   Radium Download Manager -- Security & Distribution Audit      " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "  Dist Directory  : $DistDir" -ForegroundColor White
 Write-Host "  Tools Directory : $ToolsDir" -ForegroundColor White
@@ -154,7 +154,10 @@ Write-Host "  -> PASS: Credential redaction filters verified against threat mode
 # 5. Verify Path Traversal and Non-Elevated Execution Invariants
 # -----------------------------------------------------------------------------
 Write-Host "`n[Check 5/5] Auditing Installation & Path Security Invariants..." -ForegroundColor Yellow
-$issPath = Join-Path $RepoRoot "installer\flux.iss"
+$issPath = Join-Path $RepoRoot "installer\radium.iss"
+if (-not (Test-Path $issPath)) {
+    $issPath = Join-Path $RepoRoot "installer\flux.iss"
+}
 if (Test-Path $issPath) {
     $issContent = Get-Content $issPath -Raw
     if ($issContent -notmatch 'PrivilegesRequired\s*=\s*lowest') {

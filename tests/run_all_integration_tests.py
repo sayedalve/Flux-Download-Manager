@@ -44,6 +44,7 @@ EXE_EXT = ".exe" if IS_WINDOWS else ""
 tools_dir = ROOT / "tools" / ("win-x64" if IS_WINDOWS else "")
 if tools_dir.is_dir():
     os.environ["PATH"] = str(tools_dir.resolve()) + os.pathsep + os.environ.get("PATH", "")
+os.environ["RADIUM_ALLOW_LOOPBACK"] = "1"
 os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
 os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
@@ -67,12 +68,16 @@ def find_binary(name: str) -> Path:
     return candidates[0]
 
 
-FLUX_BIN = find_binary("flux")
+FLUX_BIN = find_binary("radium")
+if not FLUX_BIN.is_file():
+    FLUX_BIN = find_binary("flux")
 if not FLUX_BIN.is_file():
     FLUX_BIN = find_binary("openidm")
 OPENIDM_BIN = FLUX_BIN
 
-FLUX_NMH_BIN = find_binary("flux-nmh")
+FLUX_NMH_BIN = find_binary("radium-nmh")
+if not FLUX_NMH_BIN.is_file():
+    FLUX_NMH_BIN = find_binary("flux-nmh")
 if not FLUX_NMH_BIN.is_file():
     FLUX_NMH_BIN = find_binary("openidm-nmh")
 NMH_BIN = FLUX_NMH_BIN
@@ -111,7 +116,7 @@ class FaultInjectionHttpHandler(http.server.BaseHTTPRequestHandler):
                 PAYLOAD_4MB,
                 support_range=True,
                 etag='"v1-4mb"',
-                content_disposition="attachment; filename*=UTF-8''Flux_Test_Archive.bin",
+                content_disposition="attachment; filename*=UTF-8''Radium_Test_Archive.bin",
             )
             return
 
@@ -500,7 +505,7 @@ def main():
         # ---------------------------------------------------------------------
         # Test 1: Platform-Aware Native Binary Verification
         # ---------------------------------------------------------------------
-        print("[1/8] IT-BIN-01: Verifying Platform-Aware Compiled Executables (flux, flux-nmh, N_m3u8DL-RE)...")
+        print(f"[1/8] IT-BIN-01: Verifying Platform-Aware Compiled Executables ({FLUX_BIN.stem}, {FLUX_NMH_BIN.stem}, N_m3u8DL-RE)...")
         verify_platform_binary_format(OPENIDM_BIN)
         verify_platform_binary_format(NMH_BIN)
         verify_platform_binary_format(STREAM_WORKER)
@@ -525,7 +530,9 @@ def main():
             text=True,
             check=True,
         )
-        out_file1 = dl_dir / "Flux_Test_Archive.bin"
+        out_file1 = dl_dir / "Radium_Test_Archive.bin"
+        if not out_file1.exists():
+            out_file1 = dl_dir / "Flux_Test_Archive.bin"
         if not out_file1.exists():
             out_file1 = dl_dir / "OpenIDM_Test_Archive.bin"
         assert out_file1.exists(), f"Expected {out_file1} to exist"
@@ -668,6 +675,7 @@ def main():
                         break
 
         env = os.environ.copy()
+        env["RADIUM_IPC_SOCKET"] = sock_path
         env["FLUX_IPC_SOCKET"] = sock_path
         env["OPENIDM_IPC_SOCKET"] = sock_path
         nmh_proc = subprocess.Popen(
@@ -722,7 +730,9 @@ def main():
         a_streams, a_dur = ffprobe_verify(aes_mp4)
         assert "video" in a_streams and a_dur >= 3.5
 
-        log_file = db_path.parent / "flux.log"
+        log_file = db_path.parent / "radium.log"
+        if not log_file.exists():
+            log_file = db_path.parent / "flux.log"
         if not log_file.exists():
             log_file = db_path.parent / "openidm.log"
         if log_file.exists():
@@ -846,6 +856,7 @@ def main():
 
         # Metric 8: Verify zero leftover .flux.part / .openidm.part temporary files in dl_dir and bench_dir
         leftover_parts = (
+            list(dl_dir.rglob("*.radium.part")) + list(bench_dir.rglob("*.radium.part")) +
             list(dl_dir.rglob("*.flux.part")) + list(bench_dir.rglob("*.flux.part")) +
             list(dl_dir.rglob("*.openidm.part")) + list(bench_dir.rglob("*.openidm.part"))
         )
@@ -864,8 +875,8 @@ def main():
 
         metrics = {
             "version": "0.3.1",
-            "product_name": "Flux Download Manager",
-            "short_name": "Flux",
+            "product_name": "Radium Download Manager",
+            "short_name": "Radium",
             "host_platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
             "flux_binary_bytes": openidm_size,
             "flux_nmh_binary_bytes": nmh_size,

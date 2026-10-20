@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// OpenIDM — Main Desktop GUI, CLI & Daemon Application Entry Point (openidm)
+// Radium -- Main Desktop GUI, CLI & Daemon Application Entry Point (radium)
 // Default launch (no arguments):
-//   Starts the background IPC server and launches the OpenIDM Desktop GUI application window.
+//   Starts the background IPC server and launches the Radium Desktop GUI application window.
 // CLI flags:
 //   --version                    Print version info
 //   --gui-snapshot               Render full desktop UI snapshot (sidebar counts, table, details, status bar) and exit
@@ -81,7 +81,7 @@ int main(int argc, char* argv[]) {
     cfg.nm3u8dl_binary_path = openidm::PathSanitizer::FindWorkerBinary("N_m3u8DL-RE", exe_dir);
     cfg.ffmpeg_binary_path = openidm::PathSanitizer::FindWorkerBinary("ffmpeg", exe_dir);
     // SEC-04: Block public-to-loopback/private redirects by default unless explicitly configured
-    cfg.allow_loopback = (std::getenv("FLUX_ALLOW_LOOPBACK") != nullptr || std::getenv("OPENIDM_ALLOW_LOOPBACK") != nullptr);
+    cfg.allow_loopback = (std::getenv("RADIUM_ALLOW_LOOPBACK") != nullptr || std::getenv("FLUX_ALLOW_LOOPBACK") != nullptr || std::getenv("OPENIDM_ALLOW_LOOPBACK") != nullptr);
 
     std::string mode;
     std::string target_url;
@@ -127,14 +127,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    openidm::Logger::Instance().SetLogFile(cfg.state_db_path.parent_path() / "flux.log");
+    openidm::Logger::Instance().SetLogFile(cfg.state_db_path.parent_path() / "radium.log");
 
 #ifdef _WIN32
     std::wstring wpipe(ipc_socket_path.begin(), ipc_socket_path.end());
 
     // 1. Single-instance check for GUI mode (mode.empty() || mode == "minimized")
     if (mode.empty() || mode == "minimized") {
-        HWND existing_hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
+        HWND existing_hwnd = FindWindowW(L"Radium_MainWindowClass", nullptr);
         if (existing_hwnd) {
             if (mode.empty()) {
                 ShowWindow(existing_hwnd, SW_SHOW);
@@ -146,7 +146,7 @@ int main(int argc, char* argv[]) {
         }
 
         // If a background daemon is running, signal it to exit so the user's interactive GUI can take over the pipe & database
-        HANDLE hDaemonShutdown = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, L"Local\\Flux_Daemon_Shutdown_Event");
+        HANDLE hDaemonShutdown = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, L"Local\\Radium_Daemon_Shutdown_Event");
         if (hDaemonShutdown) {
             SetEvent(hDaemonShutdown);
             CloseHandle(hDaemonShutdown);
@@ -163,7 +163,7 @@ int main(int argc, char* argv[]) {
 
     // 2. Single-instance check for background daemon mode
     if (mode == "daemon") {
-        HWND existing_hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
+        HWND existing_hwnd = FindWindowW(L"Radium_MainWindowClass", nullptr);
         if (existing_hwnd) {
             // Desktop GUI is already running and providing the IPC server on this pipe
             return 0;
@@ -180,7 +180,7 @@ int main(int argc, char* argv[]) {
     openidm::DownloadController controller(cfg);
     auto init_res = controller.Initialize();
     if (!init_res.ok()) {
-        WriteConsoleOutput("ERROR: Failed to initialize Flux controller: " + init_res.error->message + "\n", true);
+        WriteConsoleOutput("ERROR: Failed to initialize Radium controller: " + init_res.error->message + "\n", true);
         return 1;
     }
 
@@ -271,7 +271,7 @@ int main(int argc, char* argv[]) {
         std::signal(SIGINT, SignalHandler);
         std::signal(SIGTERM, SignalHandler);
 #ifdef _WIN32
-        HANDLE hShutdownEvent = CreateEventW(nullptr, FALSE, FALSE, L"Local\\Flux_Daemon_Shutdown_Event");
+        HANDLE hShutdownEvent = CreateEventW(nullptr, FALSE, FALSE, L"Local\\Radium_Daemon_Shutdown_Event");
 #endif
         openidm::ipc::IpcServer server(controller, ipc_socket_path);
         server.SetHeadlessDaemonMode(true);

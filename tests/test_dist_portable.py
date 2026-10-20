@@ -12,12 +12,14 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DIST_FLUX = ROOT / "dist" / "Flux.exe"
-DIST_NMH = ROOT / "dist" / "flux-nmh.exe"
+DIST_RADIUM = (ROOT / "dist" / "Radium.exe") if (ROOT / "dist" / "Radium.exe").is_file() else ((ROOT / "dist" / "radium.exe") if (ROOT / "dist" / "radium.exe").is_file() else (ROOT / "dist" / "Flux.exe"))
+DIST_FLUX = DIST_RADIUM
+DIST_NMH = (ROOT / "dist" / "radium-nmh.exe") if (ROOT / "dist" / "radium-nmh.exe").is_file() else (ROOT / "dist" / "flux-nmh.exe")
 
 assert DIST_FLUX.is_file(), f"Missing {DIST_FLUX}"
 assert DIST_NMH.is_file(), f"Missing {DIST_NMH}"
 
+os.environ["RADIUM_ALLOW_LOOPBACK"] = "1"
 os.environ["FLUX_ALLOW_LOOPBACK"] = "1"
 os.environ["OPENIDM_ALLOW_LOOPBACK"] = "1"
 
@@ -99,19 +101,19 @@ class MockMediaHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404)
 
 def main():
-    print("Testing dist/Flux.exe Portable Executable...")
+    print(f"Testing {DIST_FLUX.name} Portable Executable...")
     httpd = socketserver.TCPServer(("127.0.0.1", 16890), MockMediaHandler)
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     base_url = "http://127.0.0.1:16890"
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="flux_dist_test_"))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="radium_dist_test_"))
     try:
         # 1. Ordinary File Download
-        print("  [1/3] Testing Ordinary File Download via dist/Flux.exe...")
+        print(f"  [1/3] Testing Ordinary File Download via {DIST_FLUX.name}...")
         dl_dir = tmp_dir / "downloads"
         dl_dir.mkdir(parents=True, exist_ok=True)
-        db_file = tmp_dir / "flux_test.db"
+        db_file = tmp_dir / "radium_test.db"
         res = subprocess.run(
             [str(DIST_FLUX), "--db", str(db_file), "--out", str(dl_dir), "--download", f"{base_url}/files/ordinary_2mb.bin"],
             capture_output=True,
@@ -126,7 +128,7 @@ def main():
         print("    -> PASS (Ordinary 2 MiB file downloaded and verified via SHA-256)")
 
         # 2. HLS Stream Probe & Download
-        print("  [2/3] Testing HLS Manifest Probe via dist/Flux.exe...")
+        print(f"  [2/3] Testing HLS Manifest Probe via {DIST_FLUX.name}...")
         probe = subprocess.run(
             [str(DIST_FLUX), "--db", str(db_file), "--probe-stream", f"{base_url}/hls/master.m3u8"],
             capture_output=True,
@@ -137,7 +139,7 @@ def main():
         print("    -> PASS (HLS Video track detected)")
 
         # 3. DASH Stream Probe
-        print("  [3/3] Testing DASH Manifest Probe via dist/Flux.exe...")
+        print(f"  [3/3] Testing DASH Manifest Probe via {DIST_FLUX.name}...")
         dash_probe = subprocess.run(
             [str(DIST_FLUX), "--db", str(db_file), "--probe-stream", f"{base_url}/dash/manifest.mpd"],
             capture_output=True,
@@ -147,7 +149,7 @@ def main():
         assert "[VIDEO]" in dash_probe.stdout, "DASH probe failed to detect video track"
         print("    -> PASS (DASH Video track detected)")
 
-        print("dist/Flux.exe Portable Verification SUCCEEDED!")
+        print(f"{DIST_FLUX.name} Portable Verification SUCCEEDED!")
     finally:
         httpd.shutdown()
         shutil.rmtree(tmp_dir, ignore_errors=True)

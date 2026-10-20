@@ -132,16 +132,16 @@ def verify_pe_header(file_path: Path, expected_subsystem: int = 2):
 
 
 def find_installer(dist_dir: Path) -> Path:
-    candidates = list(dist_dir.glob("Flux-Setup-x64-*.exe"))
+    candidates = list(dist_dir.glob("Radium-Setup-x64-*.exe")) + list(dist_dir.glob("Flux-Setup-x64-*.exe"))
     if not candidates:
-        candidates = list(dist_dir.rglob("Flux-Setup-x64-*.exe"))
+        candidates = list(dist_dir.rglob("Radium-Setup-x64-*.exe")) + list(dist_dir.rglob("Flux-Setup-x64-*.exe"))
     # Filter out Core-only if Full installer exists
     full_candidates = [c for c in candidates if "Core" not in c.name]
     if full_candidates:
         return sorted(full_candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
     if candidates:
         return sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)[0]
-    raise FileNotFoundError(f"No Flux setup installer found in {dist_dir}")
+    raise FileNotFoundError(f"No Radium setup installer found in {dist_dir}")
 
 
 def main():
@@ -153,7 +153,7 @@ def main():
     args = parser.parse_args()
 
     print("=================================================================")
-    print("   Flux Download Manager -- Clean Installation Smoke Test Suite   ")
+    print("   Radium Download Manager -- Clean Installation Smoke Test Suite ")
     print("=================================================================")
 
     if not IS_WINDOWS:
@@ -194,8 +194,8 @@ def main():
         # Step 2: Verify Installed Binaries and Assets
         print("\n[Step 2/8] Auditing Installed Files and Worker Binaries...")
         required_files = [
-            install_dir / "flux.exe",
-            install_dir / "flux-nmh.exe",
+            install_dir / "radium.exe" if (install_dir / "radium.exe").exists() else install_dir / "flux.exe",
+            install_dir / "radium-nmh.exe" if (install_dir / "radium-nmh.exe").exists() else install_dir / "flux-nmh.exe",
             install_dir / "tools" / "win-x64" / "N_m3u8DL-RE.exe",
             install_dir / "tools" / "win-x64" / "ffmpeg.exe",
             install_dir / "tools" / "win-x64" / "yt-dlp.exe",
@@ -217,15 +217,15 @@ def main():
             print(f"  [OK] {rf.relative_to(install_dir)} ({rf.stat().st_size:,} bytes)")
 
         # Verify PE headers
-        verify_pe_header(install_dir / "flux.exe", expected_subsystem=2)  # GUI
-        verify_pe_header(install_dir / "flux-nmh.exe", expected_subsystem=3)  # CUI
+        verify_pe_header(install_dir / "radium.exe" if (install_dir / "radium.exe").exists() else install_dir / "flux.exe", expected_subsystem=2)  # GUI
+        verify_pe_header(install_dir / "radium-nmh.exe" if (install_dir / "radium-nmh.exe").exists() else install_dir / "flux-nmh.exe", expected_subsystem=3)  # CUI
         print("  -> PASS: All required binaries, workers, manifests, and PE headers verified")
 
         # Step 3: Verify Native Messaging Manifest Content and Registry Keys
         print("\n[Step 3/8] Verifying Native Messaging Manifest Paths and Registry Keys...")
         manifest_file = install_dir / "manifests" / "com.flux.downloadmanager.chromium.json"
         manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
-        expected_nmh = (install_dir / "flux-nmh.exe").resolve()
+        expected_nmh = (install_dir / "radium-nmh.exe" if (install_dir / "radium-nmh.exe").exists() else install_dir / "flux-nmh.exe").resolve()
         manifest_nmh = Path(manifest_data.get("path", "")).resolve()
         assert manifest_nmh == expected_nmh, f"Manifest path '{manifest_nmh}' does not match installed '{expected_nmh}'"
         assert "chrome-extension://mdgmlcnpodoehidlplplfegngnjnilap/" in manifest_data.get("allowed_origins", [])
@@ -246,10 +246,10 @@ def main():
 
         # Step 4: Verify Executable Launch & Version Command
         print("\n[Step 4/8] Launching Installed Executable (--version & --list)...")
-        flux_exe = install_dir / "flux.exe"
+        flux_exe = install_dir / "radium.exe" if (install_dir / "radium.exe").exists() else install_dir / "flux.exe"
         ver_proc = subprocess.run([str(flux_exe), "--version"], capture_output=True, text=True, check=True)
         ver_output = (ver_proc.stdout + "\n" + ver_proc.stderr).strip()
-        assert ("Flux Download Manager" in ver_output or "Flux" in ver_output) and ("0.3" in ver_output), (
+        assert ("Radium Download Manager" in ver_output or "Radium" in ver_output or "Flux" in ver_output) and ("0.3" in ver_output), (
             f"Unexpected version output: stdout='{ver_proc.stdout}', stderr='{ver_proc.stderr}'"
         )
         first_line = ver_output.splitlines()[0] if ver_output else ""
@@ -363,8 +363,8 @@ def main():
             unins_time_s = time.perf_counter() - t0
 
             # Verify installed binaries are gone
-            assert not (install_dir / "flux.exe").is_file(), "flux.exe still exists after uninstall!"
-            assert not (install_dir / "flux-nmh.exe").is_file(), "flux-nmh.exe still exists after uninstall!"
+            assert not (install_dir / "radium.exe" if (install_dir / "radium.exe").exists() else install_dir / "flux.exe").is_file(), "flux.exe still exists after uninstall!"
+            assert not (install_dir / "radium-nmh.exe" if (install_dir / "radium-nmh.exe").exists() else install_dir / "flux-nmh.exe").is_file(), "flux-nmh.exe still exists after uninstall!"
             print(f"  [OK] Application binaries removed in {unins_time_s:.2f}s")
 
             # Verify user sentinel in %LOCALAPPDATA%\Flux is strictly preserved!

@@ -235,7 +235,7 @@ def generate_report(results_dir: Path, output_md: Path, output_json: Path, os_la
         f"- ⚠️ Per-Monitor v2 DPI multi-screen drag-and-drop scaling (100% -> 150% -> 200%)",
         f"- ⚠️ Windows Notification Area (System Tray) minimize-to-tray & single-click restore",
         f"- ⚠️ Windows Defender SmartScreen file download reputation prompts"
-    ]
+    ])
 
     output_md.write_text("\n".join(md_lines), encoding="utf-8")
     output_json.write_text(json.dumps(report, indent=2), encoding="utf-8")

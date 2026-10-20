@@ -216,6 +216,9 @@ void DownloadController::LoadPersistedSettingsLocked() {
             }
         }
 
+        if (val.contains("tableColumnWidths")) {
+            m_settings.table_column_widths = val["tableColumnWidths"].as_string();
+        }
         m_settings.max_auto_retries = std::clamp<uint32_t>(
             static_cast<uint32_t>(val["maxAutoRetries"].as_int64(5)), 0u, 50u);
         m_settings.retry_interval_sec = std::clamp<uint32_t>(
@@ -268,6 +271,8 @@ Result<void> DownloadController::SaveSettingsLocked() {
     for (const auto& [k, v] : m_settings.site_rules) site_rules_obj[k] = v;
     obj["siteRules"] = site_rules_obj;
 
+    obj["tableColumnWidths"] = m_settings.table_column_widths;
+    obj["tableColumnWidths"] = m_settings.table_column_widths;
     obj["maxAutoRetries"] = static_cast<int64_t>(m_settings.max_auto_retries);
     obj["retryIntervalSec"] = static_cast<int64_t>(m_settings.retry_interval_sec);
     obj["queueCompletionAction"] = m_settings.queue_completion_action;

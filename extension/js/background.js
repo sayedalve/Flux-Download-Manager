@@ -736,6 +736,72 @@ class DownloadStateMachine {
 
 const downloadStateMachine = new DownloadStateMachine();
 
+
+async function transferBlobToFlux(tabId, blobUrl, filename, mime, correlationId, customTransport = null) {
+  return new Promise((resolve, reject) => {
+    if (!tabId || tabId <= 0) {
+      return reject(new Error("No tab available for blob data retrieval"));
+    }
+    if (typeof chrome === "undefined" || !chrome.tabs || typeof chrome.tabs.sendMessage !== "function") {
+      return reject(new Error("chrome.tabs.sendMessage not available in environment"));
+    }
+    chrome.tabs.sendMessage(tabId, {
+      action: "fluxFetchBlobData",
+      blobUrl,
+      filename,
+      correlationId
+    }, async (response) => {
+      const lastErr = (chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError.message : "";
+      if (lastErr || !response || !response.success || !response.dataBase64) {
+        return reject(new Error(lastErr || (response && response.error) || "Failed to fetch blob from tab"));
+      }
+      try {
+        const transferId = "blob-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+        const dataB64 = response.dataBase64;
+        const totalBytes = response.size || Math.round(dataB64.length * 0.75);
+
+        const startRes = await sendNativeRpc("download.startChunkedTransfer", {
+          taskId: transferId,
+          filename: filename || "artifact_download",
+          totalBytes,
+          mimeType: response.mimeType || mime || "application/octet-stream",
+          correlationId
+        }, customTransport);
+
+        if (!startRes || !startRes.accepted) {
+          return reject(new Error((startRes && startRes.reason) || "Chunked transfer rejected by Flux"));
+        }
+
+        const effectiveTaskId = startRes.taskId || transferId;
+        const chunkSize = 262144; // 256 KiB base64 chunk
+        let chunkIndex = 0;
+        for (let offset = 0; offset < dataB64.length; offset += chunkSize) {
+          const chunkStr = dataB64.slice(offset, offset + chunkSize);
+          await sendNativeRpc("download.transferChunk", {
+            taskId: effectiveTaskId,
+            chunkIndex,
+            dataBase64: chunkStr
+          }, customTransport);
+          chunkIndex++;
+        }
+
+        const completeRes = await sendNativeRpc("download.completeChunkedTransfer", {
+          taskId: effectiveTaskId,
+          totalBytes
+        }, customTransport);
+
+        if (!completeRes || !completeRes.success) {
+          return reject(new Error((completeRes && completeRes.error) || "Complete chunked transfer failed"));
+        }
+
+        resolve({ accepted: true, taskId: effectiveTaskId, fileName: completeRes.fileName || filename });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
 async function onDownloadCreatedHandler(
   downloadItem,
   customTransport = null,
@@ -780,9 +846,11 @@ async function onDownloadCreatedHandler(
   const isBlob = targetUrl.startsWith("blob:");
   const isData = targetUrl.startsWith("data:");
   const isInternal = downloadItem.byExtensionId || targetUrl.startsWith("chrome-extension:") || targetUrl.startsWith("chrome:") || targetUrl.startsWith("brave:");
+  const isWebBlob = targetUrl.startsWith("blob:http://") || targetUrl.startsWith("blob:https://");
 
-  // 3. Blob / Data / Browser Internal URLs must stay in browser memory without disrupting user gestures
-  if (isBlob || isData || isInternal) {
+  // 3. Extension-internal and data URLs must stay in browser memory without disrupting user gestures.
+  // Web blob URLs (e.g. ChatGPT artifacts) proceed to eligibility check and chunked transfer!
+  if ((isBlob && !isWebBlob) || isData || isInternal) {
     rec.state = "IGNORED";
     invokeSuggest();
     if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
@@ -1009,18 +1077,29 @@ async function onDownloadCreatedHandler(
         stage: "STAGE_NATIVE_RPC"
       });
 
-      const result = await sendNativeRpc("download.offer", {
-        url: targetUrl,
-        originalUrl: rec.originalUrl,
-        filename: cleanFilename,
-        fileSize: fileSize > 0 ? fileSize : 0,
-        mime,
-        tabUrl: pageReferrer,
-        bypassModifier: false,
-        correlationId: rec.correlationId,
-        headers,
-        autoStart: false // Browser intercepted downloads must NEVER start transferring silently!
-      }, customTransport);
+      let result;
+      if (isWebBlob) {
+        logPipelineStage(rec.correlationId, "BLOB_CHUNKED_TRANSFER_INITIATED", {
+          downloadId: rec.downloadId,
+          tabId: effectiveTabId,
+          url: targetUrl,
+          filename: cleanFilename
+        });
+        result = await transferBlobToFlux(effectiveTabId, targetUrl, cleanFilename, mime, rec.correlationId, customTransport);
+      } else {
+        result = await sendNativeRpc("download.offer", {
+          url: targetUrl,
+          originalUrl: rec.originalUrl,
+          filename: cleanFilename,
+          fileSize: fileSize > 0 ? fileSize : 0,
+          mime,
+          tabUrl: pageReferrer,
+          bypassModifier: false,
+          correlationId: rec.correlationId,
+          headers,
+          autoStart: false // Browser intercepted downloads must NEVER start transferring silently!
+        }, customTransport);
+      }
 
       logPipelineStage(rec.correlationId, "NATIVE_OFFER_RESPONSE", {
         downloadId: rec.downloadId,
@@ -1085,8 +1164,7 @@ async function onDownloadCreatedHandler(
         });
 
         // Cancel browser download shelf cleanly.
-        // CRITICAL: We NEVER call suggestCallback() when handed off to Flux, because calling suggest()
-        // signals Chromium to write bytes to disk in the native download shelf!
+        // Cancel browser download shelf cleanly without activating browser shelf.
         rec.suggestCallback = null;
 
         if (cancelBrowserDownloadFn) {
@@ -1099,26 +1177,12 @@ async function onDownloadCreatedHandler(
             });
           }
         } else if (typeof chrome !== "undefined" && chrome.downloads && chrome.downloads.cancel) {
-          const tryCancel = (retries = 3) => {
+          // Retry cancel without resuming in browser (calling resume causes Brave to download a duplicate copy!)
+          const tryCancel = (retries = 4) => {
             chrome.downloads.cancel(downloadItem.id, () => {
               const err = (chrome.runtime && chrome.runtime.lastError) ? chrome.runtime.lastError.message : "";
-              if (err) {
-                if (typeof chrome.downloads.resume === "function") {
-                  chrome.downloads.resume(downloadItem.id, () => {
-                    if (chrome.runtime) void chrome.runtime.lastError;
-                    chrome.downloads.cancel(downloadItem.id, () => {
-                      if (chrome.runtime) void chrome.runtime.lastError;
-                      if (typeof chrome.downloads.erase === "function") {
-                        chrome.downloads.erase({ id: downloadItem.id }, () => {
-                          if (chrome.runtime) void chrome.runtime.lastError;
-                        });
-                      }
-                    });
-                  });
-                } else if (retries > 0) {
-                  setTimeout(() => tryCancel(retries - 1), 60);
-                  return;
-                }
+              if (err && retries > 0) {
+                setTimeout(() => tryCancel(retries - 1), 50);
               } else if (typeof chrome.downloads.erase === "function") {
                 chrome.downloads.erase({ id: downloadItem.id }, () => {
                   if (chrome.runtime) void chrome.runtime.lastError;

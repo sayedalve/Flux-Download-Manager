@@ -290,6 +290,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright & Dependencies
+        shell: powershell
+        run: |
+          npm install
+          npx playwright install chromium
+
       - name: Download Staged Release Packages
         uses: actions/download-artifact@v4
         with:
@@ -424,8 +435,6 @@ jobs:
             dist/**/Flux-v*-Windows-x64-Core.zip
             dist/**/Flux-v*-Windows-x64.zip
             dist/**/SHA256SUMS.txt
-            LICENSE
-            THIRD_PARTY_NOTICES.md
             LICENSE
             THIRD_PARTY_NOTICES.md
         env:

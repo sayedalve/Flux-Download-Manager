@@ -422,6 +422,11 @@ public:
     void UpdateColumnResize(int mouse_x);
     void EndColumnResize();
     int HitTestColumnDivider(int x, int y, size_t scroll_offset = 0) const;
+    void SaveColumnWidthsToSettings();
+    void LoadColumnWidthsFromSettings();
+
+    void SetStartVisible(bool visible) { m_start_visible = visible; }
+    bool GetStartVisible() const { return m_start_visible; }
 
 #ifdef _WIN32
     void SetWindowHwnd(HWND hwnd) { m_hwnd = hwnd; }
@@ -556,6 +561,7 @@ private:
     int m_resizing_col_index{-1};
     int m_resize_start_x{0};
     int m_resize_orig_width{0};
+    bool m_start_visible{true};
 #ifdef _WIN32
     HWND m_hwnd{nullptr};
 #endif

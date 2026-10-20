@@ -785,6 +785,27 @@ async function runTests() {
   assert.strictEqual(resDl.intercepted, true, "Scenario 22: File download intercepted concurrently");
   console.log("  [Scenario 22/22] Concurrent media detection & file download -> PASS");
 
+  // Scenario 23: ChatGPT Web Blob Artifact with click correlation & chunked transfer
+  const chatgptBlobUrl = "blob:https://chatgpt.com/artifact-4a0e1c2d";
+  recordClickedLink(101, {
+    url: chatgptBlobUrl,
+    filename: "generated_script.py",
+    hasDownloadAttr: true,
+    referrer: "https://chatgpt.com/c/conversation-xyz"
+  });
+  const eligArtifact = isDownloadEligible({
+    url: chatgptBlobUrl,
+    filename: "generated_script.py",
+    hasDownloadAttr: true,
+    wasExplicitLinkClick: true,
+    tabUrl: "https://chatgpt.com/c/conversation-xyz"
+  });
+  assert.strictEqual(eligArtifact.eligible, true, "Scenario 23: ChatGPT artifact blob is eligible for interception");
+  assert.strictEqual(eligArtifact.isBlob, true, "Scenario 23: Identified as web blob artifact");
+  assert.strictEqual(eligArtifact.ext, "py", "Scenario 23: Correctly identified py extension");
+  console.log("  [Scenario 23/23] ChatGPT web blob artifact click correlation & eligibility -> PASS");
+
+
   console.log("\n[15/15] Testing YouTube Cipher Quality Extraction with Sizes & Floating Overlay Attachment...");
   // 1. Verify YouTube ciphered playerResponse extracts qualities with non-zero estimated sizes
   let emittedYtMedia = null;
@@ -913,7 +934,7 @@ async function runTests() {
   console.log("  -> PASS");
 
   console.log("\n=======================================================");
-  console.log("Browser Extension Suite: 15/15 suites (23/23 edge scenarios) PASSED.");
+  console.log("Browser Extension Suite: 15/15 suites (24/24 edge scenarios) PASSED.");
   console.log("=======================================================");
   process.exit(0);
 }

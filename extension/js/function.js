@@ -156,10 +156,11 @@ function isDownloadEligible(params = {}) {
   } = params;
 
   const targetUrl = finalUrl || url;
+  const isWebBlob = targetUrl.startsWith("blob:http://") || targetUrl.startsWith("blob:https://");
   if (!targetUrl) return { eligible: false, reason: "EMPTY_URL" };
 
   // 1. Exclude blob:, data:, and browser extension/internal schemes
-  if (targetUrl.startsWith("blob:") || targetUrl.startsWith("data:") ||
+  if ((targetUrl.startsWith("blob:") && (!isWebBlob || (!wasExplicitLinkClick && !hasDownloadAttr))) || targetUrl.startsWith("data:") ||
       targetUrl.startsWith("chrome:") || targetUrl.startsWith("chrome-extension:") ||
       targetUrl.startsWith("brave:") || targetUrl.startsWith("about:") || targetUrl.startsWith("javascript:")) {
     return { eligible: false, reason: "BROWSER_INTERNAL_OR_BLOB" };
@@ -174,7 +175,11 @@ function isDownloadEligible(params = {}) {
   const cleanFilename = sanitizeFilename(filename, "");
   const ext = (extractUrlExtension(cleanFilename) || extractUrlExtension(targetUrl) || extractUrlExtension(url)).toLowerCase();
   const webCodeExts = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "jsx", "ts", "tsx"]);
-  const hasDownloadExt = Boolean(ext && !webCodeExts.has(ext));
+  const webDocExts = new Set(["html", "htm", "xhtml"]);
+  const hasDownloadExt = Boolean(ext && (!webDocExts.has(ext) || hasDownloadAttr || isAttachment));
+  if (isWebBlob && (ext || hasDownloadAttr || wasExplicitLinkClick || cleanFilename || phase === "determine")) {
+    return { eligible: true, reason: "WEB_BLOB_ARTIFACT", ext, mime: cleanMime, filename: cleanFilename, isBlob: true };
+  }
 
   // 3. Exclude webpage watch URLs only when the request is an ordinary HTML page navigation
   // (Never disqualify an explicit attachment, a downloadable file extension, or download attribute)

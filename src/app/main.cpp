@@ -137,8 +137,10 @@ int main(int argc, char* argv[]) {
         HWND existing_hwnd = FindWindowW(L"Flux_MainWindowClass", nullptr);
         if (existing_hwnd) {
             if (mode.empty()) {
+                ShowWindow(existing_hwnd, SW_SHOW);
                 ShowWindow(existing_hwnd, SW_RESTORE);
                 SetForegroundWindow(existing_hwnd);
+                PostMessageW(existing_hwnd, WM_SYSCOMMAND, SC_RESTORE, 0);
             }
             return 0; // Seamless single instance: bring existing GUI window to front and exit
         }
@@ -186,12 +188,12 @@ int main(int argc, char* argv[]) {
     if (mode.empty() || mode == "minimized") {
         openidm::ipc::IpcServer server(controller, ipc_socket_path);
         server.Start();
-        if (mode == "minimized") {
-            auto settings = controller.GetSettings();
-            settings.start_minimized = true;
-            controller.UpdateSettings(settings);
-        }
         openidm::ui::DesktopView view(controller, &server);
+        if (mode == "minimized") {
+            view.SetStartVisible(false);
+        } else {
+            view.SetStartVisible(true);
+        }
         int rc = view.RunApplicationLoop(false);
         server.Stop();
         controller.Shutdown();

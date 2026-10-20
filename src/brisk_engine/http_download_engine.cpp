@@ -147,6 +147,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
     // Phase 1: Initial Probe (FR-001)
     // -------------------------------------------------------------------------
     task.state = TaskState::kProbing;
+    auto probe_t0 = std::chrono::steady_clock::now();
     task.status_detail = "Probing server & headers...";
     HttpResponseMeta probe_meta;
     std::atomic<bool> probe_cancel{false};
@@ -187,6 +188,9 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             probe_res = unrange_res;
         }
     }
+
+    auto probe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - probe_t0).count();
+    OPENIDM_LOG_INFO("HttpEngine", "Task " + task.task_id + ": Probe completed in " + std::to_string(probe_ms) + " ms (HTTP " + std::to_string(probe_meta.status_code) + ")");
 
     if (!probe_res.ok() || probe_meta.status_code >= 400) {
         Error probe_err = !probe_res.ok() ? *probe_res.error : *HttpClient::MapHttpStatusToError(probe_meta).error;
@@ -369,6 +373,25 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
     }
 
     if (total_bytes > 0) {
+        auto format_sz = [](uint64_t b) -> std::string {
+            if (b >= 1073741824ULL) return std::to_string(b / 1073741824ULL) + " GB";
+            if (b >= 1048576ULL) return std::to_string(b / 1048576ULL) + " MB";
+            if (b >= 1024ULL) return std::to_string(b / 1024ULL) + " KB";
+            return std::to_string(b) + " B";
+        };
+        task.status_detail = "Allocating storage (" + format_sz(total_bytes) + ")...";
+        if (on_progress) {
+            EngineProgress ep;
+            ep.task_id = task.task_id;
+            ep.state = TaskState::kProbing;
+            ep.downloaded_bytes = task.downloaded_bytes;
+            ep.total_bytes = total_bytes;
+            ep.speed_bps = 0;
+            ep.range_supported = range_supported;
+            ep.resolved_filename = task.file_name;
+            on_progress(ep);
+        }
+        auto alloc_t0 = std::chrono::steady_clock::now();
         if (!is_resume) {
             if (!part_file.Truncate(total_bytes)) {
                 part_file.Close();
@@ -386,6 +409,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                 part_file.Truncate(total_bytes);
             }
         }
+        auto alloc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - alloc_t0).count();
+        OPENIDM_LOG_INFO("HttpEngine", "Task " + task.task_id + ": Storage allocation completed in " + std::to_string(alloc_ms) + " ms");
     }
 
     task.state = TaskState::kDownloading;

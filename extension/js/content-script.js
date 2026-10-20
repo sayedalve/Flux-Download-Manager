@@ -514,7 +514,8 @@ function handleLinkClick(ev) {
 
     // 1. Browser-generated in-memory Blob and Data URLs:
     // Native browser download pipeline handles client-side files reliably without disruption.
-    if (isBlobOrData) {
+    const isWebBlob = href.startsWith("blob:http://") || href.startsWith("blob:https://");
+    if (isBlobOrData && !isWebBlob) {
       console.log(`[Flux Trace] [BROWSER_BLOB_OR_DATA] [${correlationId}]`, {
         url: href.slice(0, 48) + "...",
         filename: anchor.download || "",
@@ -544,10 +545,11 @@ function handleLinkClick(ev) {
     const interceptExts = new Set([
       "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "iso", "exe", "msi", "dmg", "pdf",
       "apk", "bin", "deb", "rpm", "docx", "xlsx", "pptx", "csv", "epub",
-      "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav"
+      "mp4", "mkv", "webm", "mov", "avi", "flv", "mp3", "m4a", "flac", "wav",
+      "py", "json", "txt", "md", "sql", "yaml", "xml", "html", "js", "ts", "cpp", "c", "rs", "go", "java"
     ]);
 
-    let isEligible = hasDownloadAttr || interceptExts.has(ext) ||
+    let isEligible = isWebBlob || hasDownloadAttr || interceptExts.has(ext) ||
       pathname.includes("/redirect") || pathname.includes("/download") || pathname.includes("/dl/");
 
     if (!isEligible && typeof URL !== "undefined") {
@@ -790,6 +792,53 @@ function initContentScript() {
         cleanupContentScript();
         return false;
       }
+      if (request && request.action === "fluxFetchBlobData") {
+        const blobUrl = request.blobUrl || "";
+        const requestId = request.requestId || ("blob-req-" + Date.now().toString(36));
+
+        const queryCatchScript = () => {
+          let resolved = false;
+          const handler = (ev) => {
+            if (!ev || !ev.data || ev.data.action !== "fluxBlobDataResponse" || ev.data.requestId !== requestId) return;
+            if (resolved) return;
+            resolved = true;
+            window.removeEventListener("message", handler, true);
+            sendResponse(ev.data);
+          };
+          window.addEventListener("message", handler, true);
+          window.postMessage({ action: "fluxGetBlobData", blobUrl, requestId }, "*");
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              window.removeEventListener("message", handler, true);
+              sendResponse({ success: false, error: "TIMEOUT" });
+            }
+          }, 8000);
+        };
+
+        if (typeof fetch === "function") {
+          fetch(blobUrl).then(r => r.blob()).then(blob => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const res = String(reader.result || "");
+              const commaIdx = res.indexOf(",");
+              const b64 = commaIdx >= 0 ? res.slice(commaIdx + 1) : res;
+              sendResponse({
+                success: true,
+                dataBase64: b64,
+                mimeType: blob.type || "application/octet-stream",
+                size: blob.size || 0
+              });
+            };
+            reader.onerror = () => { queryCatchScript(); };
+            reader.readAsDataURL(blob);
+          }).catch(() => { queryCatchScript(); });
+        } else {
+          queryCatchScript();
+        }
+        return true;
+      }
+
       if (request && request.action === "probePageMedia") {
         try {
           window.postMessage({ action: "fluxScanPageMedia" }, "*");

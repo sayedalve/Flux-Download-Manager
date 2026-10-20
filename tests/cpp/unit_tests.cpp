@@ -4045,31 +4045,23 @@ bool TestQualitySelectionSizeAndColumnDocking() {
             ASSERT_TRUE(geom.table_columns[4].title == "Upload", "Col 4 is Upload");
             ASSERT_TRUE(geom.table_columns[5].title == "Added", "Col 5 is Added");
 
-            // Verify highlighted columns right edge is docked strictly at w - 16
+            // Verify metadata columns remain grouped comfortably without pushing to far right edge on wide screens
             int rightmost_edge = geom.table_columns[5].rect.right;
-            ASSERT_TRUE(rightmost_edge == w - 16, "Added column right edge strictly anchored to w - 16");
+            if (w >= 1600) {
+                ASSERT_TRUE(rightmost_edge <= 1250, "Metadata columns grouped adjacent to file name without being pushed to far edge");
+            }
 
-            // Verify contiguous columns
+            // Verify contiguous columns without gaps
             for (size_t c = 1; c <= 5; ++c) {
                 ASSERT_TRUE(geom.table_columns[c].rect.left == geom.table_columns[c - 1].rect.right,
                     "Table columns are strictly contiguous without gaps or overlaps");
             }
-
-            // Verify Name column absorbed window width
-            int expected_table_w = w - 32;
-            int total_right_w = geom.table_columns[1].rect.width() +
-                                geom.table_columns[2].rect.width() +
-                                geom.table_columns[3].rect.width() +
-                                geom.table_columns[4].rect.width() +
-                                geom.table_columns[5].rect.width();
-            int expected_name_w = expected_table_w - total_right_w;
-            ASSERT_TRUE(geom.table_columns[0].rect.width() == expected_name_w, "Name column flexes to fill table");
         }
 
         std::filesystem::remove_all(db_dir, ec);
     }
 
-    std::cout << "  [5/5] Verifying column resize preserves right-docked anchor...\n";
+    std::cout << "  [5/5] Verifying Excel-style column resizing, divider hit testing and persistence...\n";
     {
         std::error_code ec;
         auto db_dir = std::filesystem::temp_directory_path() / "flux_resize_col_test";
@@ -4082,12 +4074,40 @@ bool TestQualitySelectionSizeAndColumnDocking() {
         openidm::ui::DesktopView view(controller);
 
         view.SetWindowDimensions(1200, 800);
-        view.StartColumnResize(0, 500); // start dragging divider 0 (between Name and Size)
-        view.UpdateColumnResize(550);   // drag 50px to the right
+        auto initial_geom = view.ComputeLayoutGeometry(0);
+        int orig_name_w = initial_geom.table_columns[0].rect.width();
+
+        // 1. Verify divider hit testing at column boundaries
+        int div0 = view.HitTestColumnDivider(initial_geom.table_columns[0].rect.right, initial_geom.table_header_rect.top + 10, 0);
+        ASSERT_TRUE(div0 == 0, "Divider 0 detected at right edge of Name column");
+        int div1 = view.HitTestColumnDivider(initial_geom.table_columns[1].rect.right, initial_geom.table_header_rect.top + 10, 0);
+        ASSERT_TRUE(div1 == 1, "Divider 1 detected at right edge of Size column");
+
+        // 2. Drag divider 0 (between Name and Size) by +50px
+        view.StartColumnResize(0, 400);
+        view.UpdateColumnResize(450); // +50px
         view.EndColumnResize();
 
-        auto geom = view.ComputeLayoutGeometry(0);
-        ASSERT_TRUE(geom.table_columns[5].rect.right == 1200 - 16, "Added column remains strictly docked at 1200 - 16 after column resize");
+        auto geom_resized = view.ComputeLayoutGeometry(0);
+        ASSERT_TRUE(geom_resized.table_columns[0].rect.width() == orig_name_w + 50, "Name column resized by +50px");
+        ASSERT_TRUE(geom_resized.table_columns[1].rect.left == geom_resized.table_columns[0].rect.right, "Size column shifted to stay contiguous");
+
+        // 3. Drag divider 1 (Size column) by +25px
+        int orig_size_w = geom_resized.table_columns[1].rect.width();
+        view.StartColumnResize(1, 500);
+        view.UpdateColumnResize(525); // +25px
+        view.EndColumnResize();
+
+        auto geom_resized2 = view.ComputeLayoutGeometry(0);
+        ASSERT_TRUE(geom_resized2.table_columns[1].rect.width() == orig_size_w + 25, "Size column resized by +25px");
+        ASSERT_TRUE(geom_resized2.table_columns[2].rect.left == geom_resized2.table_columns[1].rect.right, "Status column shifted to stay contiguous");
+
+        // 4. Verify persistence across instances via SQLite settings
+        openidm::ui::DesktopView view2(controller);
+        view2.SetWindowDimensions(1200, 800);
+        auto geom_persisted = view2.ComputeLayoutGeometry(0);
+        ASSERT_TRUE(geom_persisted.table_columns[0].rect.width() == orig_name_w + 50, "Persisted Name column width loaded on restart");
+        ASSERT_TRUE(geom_persisted.table_columns[1].rect.width() == orig_size_w + 25, "Persisted Size column width loaded on restart");
 
         std::filesystem::remove_all(db_dir, ec);
     }

@@ -924,6 +924,55 @@
           scanDomMediaElements();
           return;
         }
+        if (ev.data.action === "fluxGetBlobData") {
+          const blobUrl = ev.data.blobUrl || "";
+          const requestId = ev.data.requestId || "";
+          const blobEntry = blobRegistry.get(blobUrl);
+
+          const arrayBufferToBase64 = (buffer) => {
+            let binary = "";
+            const bytes = new Uint8Array(buffer);
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; ++i) {
+              binary += String.fromCharCode(bytes[i]);
+            }
+            return win.btoa(binary);
+          };
+
+          const processBlob = (blobObj, mimeType) => {
+            if (!blobObj || typeof blobObj.arrayBuffer !== "function") {
+              postToExtension({ action: "fluxBlobDataResponse", requestId, blobUrl, success: false, error: "INVALID_BLOB" });
+              return;
+            }
+            blobObj.arrayBuffer().then(buf => {
+              const b64 = arrayBufferToBase64(buf);
+              postToExtension({
+                action: "fluxBlobDataResponse",
+                requestId,
+                blobUrl,
+                success: true,
+                dataBase64: b64,
+                mimeType: mimeType || blobObj.type || "application/octet-stream",
+                size: blobObj.size || 0
+              });
+            }).catch(err => {
+              postToExtension({ action: "fluxBlobDataResponse", requestId, blobUrl, success: false, error: String(err) });
+            });
+          };
+
+          if (blobEntry && blobEntry.blob) {
+            processBlob(blobEntry.blob, blobEntry.mimeType);
+          } else if (win.fetch) {
+            win.fetch(blobUrl).then(r => r.blob()).then(b => {
+              processBlob(b, b.type);
+            }).catch(fetchErr => {
+              postToExtension({ action: "fluxBlobDataResponse", requestId, blobUrl, success: false, error: String(fetchErr) });
+            });
+          } else {
+            postToExtension({ action: "fluxBlobDataResponse", requestId, blobUrl, success: false, error: "BLOB_NOT_FOUND" });
+          }
+          return;
+        }
         if (ev.data.action !== "fluxDiscoverBlobSource") return;
         try {
           const blobUrl = ev.data.blobUrl || "";

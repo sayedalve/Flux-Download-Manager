@@ -262,17 +262,28 @@ async function runBrowserRuntimeTests() {
     const downloadPromise = page.waitForEvent("download", { timeout: 8000 }).catch(() => null);
     await page.click("#link-zip");
     const download = await downloadPromise;
+
+    // Check if Flux extension received/intercepted the download in Service Worker
+    const interceptionState = await serviceWorker.evaluate(() => {
+      const logs = (typeof G !== "undefined" && Array.isArray(G.pipelineLogs)) ? G.pipelineLogs : [];
+      const intercepted = logs.some(l => l.stage === "DOWNLOAD_INTERCEPTED" || l.stage === "NATIVE_RPC_SENT" || l.stage === "NATIVE_RPC_RESULT");
+      return { intercepted, count: logs.length };
+    });
+
     if (download) {
       const suggestedFilename = download.suggestedFilename();
       console.log(`  Download Event Captured by Browser: ${suggestedFilename}`);
-      if (suggestedFilename.includes("archive.zip")) {
-        console.log("  [OK] Suggested filename preserved: archive.zip");
+      if (!suggestedFilename.includes("archive.zip")) {
+        throw new Error(`Browser download suggested unexpected filename: "${suggestedFilename}" (expected "archive.zip")`);
       }
+      console.log("  [OK] Demonstrated browser fallback completion path for archive.zip");
+    } else if (interceptionState.intercepted) {
+      console.log(`  [OK] Demonstrated Flux extension download interception pipeline (pipeline events: ${interceptionState.count})`);
     } else {
-      console.log("  [OK] Download intercepted by Flux extension handler");
+      throw new Error("Neither Flux interception nor browser download completion occurred for #link-zip!");
     }
     await page.screenshot({ path: path.join(ARTIFACTS_DIR, "downloads-page.png") });
-    console.log("  -> PASS: Download capture and non-blocking browser fallback verified");
+    console.log("  -> PASS: Download capture and verified outcome demonstrated successfully");
 
     // Suite 3: Media Detection & Shadow DOM Video Overlay Attachment
     console.log(`\n[Suite 3/7] Testing HTML5 Video Detection & Shadow DOM Overlay Pill...`);
@@ -300,21 +311,36 @@ async function runBrowserRuntimeTests() {
       throw new Error("Video element missing data-flux-overlay-attached attribute");
     }
 
-    // Verify candidate was registered in background service worker
-    const hasMedia = await serviceWorker.evaluate(() => {
-      if (typeof G !== "undefined" && G.cacheData) {
-        for (const [_, list] of G.cacheData.entries()) {
-          if (list.some(item => item.url && item.url.includes("source.mp4"))) {
-            return true;
+    // Verify candidate was registered in background service worker (poll briefly for async message delivery)
+    let videoCandidate = { found: false };
+    for (let attempt = 0; attempt < 25; ++attempt) {
+      videoCandidate = await serviceWorker.evaluate(() => {
+        if (typeof G !== "undefined" && G.cacheData) {
+          const dump = [];
+          for (const [tabId, list] of G.cacheData.entries()) {
+            dump.push({ tabId, count: list.length, urls: list.map(x => x.url) });
           }
+          for (const [_, list] of G.cacheData.entries()) {
+            const item = list.find(it => it.url && it.url.includes("source.mp4"));
+            if (item) {
+              return { found: true, url: item.url, streamType: item.streamType, dump };
+            }
+          }
+          return { found: false, dump, cacheSize: G.cacheData.size };
         }
-      }
-      return false;
-    });
-    console.log(`  Service worker registered video source.mp4: ${hasMedia}`);
+        return { found: false, reason: "G or G.cacheData undefined" };
+      });
+      if (videoCandidate.found) break;
+      await new Promise(r => setTimeout(r, 200));
+    }
+    console.log(`  Service worker registered video candidate:`, videoCandidate);
+    if (!videoCandidate.found) {
+      throw new Error("Expected video URL 'source.mp4' was not registered in extension media candidates!");
+    }
+    console.log(`  [OK] Candidate 'source.mp4' strictly verified in extension candidate registry`);
 
     await videoPage.screenshot({ path: path.join(ARTIFACTS_DIR, "video-overlay.png") });
-    console.log("  -> PASS: HTML5 video detected and Shadow DOM overlay badge attached cleanly");
+    console.log("  -> PASS: HTML5 video detected, overlay badge attached, and media candidate registered");
 
     // Suite 4: Stream Manifest Sniffer (HLS & DASH)
     console.log(`\n[Suite 4/7] Testing HLS & DASH Stream Detection & Manifest Parsing...`);
@@ -331,63 +357,187 @@ async function runBrowserRuntimeTests() {
     await streamPage.waitForTimeout(1000);
     console.log("  [OK] DASH Manifest loaded in page context");
 
-    // Inspect service worker state via evaluate
-    const swCandidates = await serviceWorker.evaluate(() => {
-      if (typeof G !== "undefined" && G.cacheData) {
-        const all = [];
-        for (const [tabId, list] of G.cacheData.entries()) {
-          all.push({ tabId, count: list.length, items: list.map(c => ({ url: c.url, streamType: c.streamType, isMaster: c.isMaster })) });
-        }
-        return all;
+    // Inspect service worker state via evaluate and verify HLS and DASH candidates
+    const streamVerification = await serviceWorker.evaluate(() => {
+      if (typeof G === "undefined" || !G.cacheData) {
+        return { success: false, reason: "G.cacheData is undefined" };
       }
-      return null;
+      let hlsCandidate = null;
+      let dashCandidate = null;
+      let totalItems = 0;
+
+      for (const [_, list] of G.cacheData.entries()) {
+        totalItems += list.length;
+        for (const it of list) {
+          if (it.url && it.url.includes("master.m3u8")) {
+            hlsCandidate = { url: it.url, streamType: it.streamType, isMaster: Boolean(it.isMaster) };
+          }
+          if (it.url && it.url.includes("manifest.mpd")) {
+            dashCandidate = { url: it.url, streamType: it.streamType, isMaster: Boolean(it.isMaster) };
+          }
+        }
+      }
+      return {
+        success: Boolean(hlsCandidate && dashCandidate),
+        hlsCandidate,
+        dashCandidate,
+        totalItems
+      };
     });
-    console.log("  Service Worker Registered Candidates:", JSON.stringify(swCandidates, null, 2));
+
+    console.log("  Stream Verification Result:", JSON.stringify(streamVerification, null, 2));
+    if (!streamVerification.hlsCandidate) {
+      throw new Error("HLS master manifest ('master.m3u8') was missing or not registered in extension cacheData!");
+    }
+    if (streamVerification.hlsCandidate.streamType !== "HLS") {
+      throw new Error(`HLS candidate registered with incorrect streamType: "${streamVerification.hlsCandidate.streamType}" (expected "HLS")`);
+    }
+    if (!streamVerification.dashCandidate) {
+      throw new Error("DASH manifest ('manifest.mpd') was missing or not registered in extension cacheData!");
+    }
+    if (streamVerification.dashCandidate.streamType !== "DASH") {
+      throw new Error(`DASH candidate registered with incorrect streamType: "${streamVerification.dashCandidate.streamType}" (expected "DASH")`);
+    }
+    console.log("  [OK] HLS master manifest and DASH manifest verified with exact stream types");
+
     await streamPage.screenshot({ path: path.join(ARTIFACTS_DIR, "stream-page.png") });
-    console.log("  -> PASS: Stream manifests sniffed and recorded by extension background");
+    console.log("  -> PASS: HLS and DASH stream manifests sniffed, parsed, and recorded with correct types");
 
     // Suite 5: Popup UI & Filtering Verification
     console.log(`\n[Suite 5/7] Testing Extension Popup UI & Filter Controls...`);
     const popupPage = await context.newPage();
     const popupUrl = `chrome-extension://${EXPECTED_EXT_ID}/popup.html`;
-    try {
-      await popupPage.goto(popupUrl, { waitUntil: "domcontentloaded" });
-      await popupPage.waitForTimeout(1000);
-      const title = await popupPage.title();
-      console.log(`  Popup Title: "${title}"`);
 
-      // Verify popup body and UI layout
-      const hasMediaContainer = await popupPage.$("#media-list, #app, body");
-      if (hasMediaContainer) {
-        console.log("  [OK] Popup root container rendered");
-      }
-      await popupPage.screenshot({ path: path.join(ARTIFACTS_DIR, "popup-ui.png") });
-      console.log("  -> PASS: Popup interface loaded and rendered successfully");
-    } catch (popupErr) {
-      console.warn(`  [NOTE] Direct popup navigation: ${popupErr.message}`);
-      await popupPage.screenshot({ path: path.join(ARTIFACTS_DIR, "popup-error.png") }).catch(() => {});
+    // Direct navigation without swallowing errors
+    await popupPage.goto(popupUrl, { waitUntil: "domcontentloaded" });
+    await popupPage.waitForTimeout(500);
+
+    const title = await popupPage.title();
+    console.log(`  Popup Title: "${title}"`);
+    if (!title || !title.toLowerCase().includes("flux")) {
+      throw new Error(`Popup page title did not match expected 'Flux': "${title}"`);
     }
 
-    // Suite 6: Service Worker Restart & Session Persistence
-    console.log(`\n[Suite 6/7] Testing Service Worker State Persistence & Storage Recovery...`);
-    const storageState = await serviceWorker.evaluate(async () => {
-      if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-        return new Promise((resolve) => {
-          chrome.storage.local.get(null, (items) => resolve(items));
-        });
-      }
-      return {};
-    });
-    console.log("  Persisted chrome.storage.local Keys:", Object.keys(storageState || {}));
-    console.log("  -> PASS: Manifest V3 storage persistence confirmed");
+    // Verify essential controls exist, are visible, and properly configured
+    const requiredControls = [
+      { selector: "label.toggle", desc: "Site capture toggle switch", mustBeVisible: true },
+      { selector: "#siteToggle", desc: "Site capture checkbox input", mustBeVisible: false, checkChecked: true },
+      { selector: ".filter-tabs", desc: "Filter tabs container", mustBeVisible: true },
+      { selector: ".tab-btn[data-filter='all']", desc: "All media filter tab", mustBeVisible: true },
+      { selector: ".tab-btn[data-filter='stream']", desc: "Streams filter tab", mustBeVisible: true },
+      { selector: "#searchInput", desc: "Search input box", mustBeVisible: true },
+      { selector: "#mediaList", desc: "Media list container", mustBeVisible: true },
+      { selector: "#clearListBtn", desc: "Clear list button", mustBeVisible: true },
+      { selector: "#batchDownloadBtn", desc: "Batch download button", mustBeVisible: true },
+      { selector: "#footerSummary", desc: "Footer summary count", mustBeVisible: true }
+    ];
 
-    // Suite 7: Native Messaging Host & IPC Communication Verification
-    console.log(`\n[Suite 7/7] Testing Native Messaging IPC Bridge & Fallback Integrity...`);
-    const nmhStatus = await serviceWorker.evaluate(async () => {
+    for (const ctrl of requiredControls) {
+      const loc = popupPage.locator(ctrl.selector);
+      const count = await loc.count();
+      if (count === 0) {
+        throw new Error(`Essential popup control missing from DOM: ${ctrl.desc} (${ctrl.selector})`);
+      }
+      if (ctrl.mustBeVisible) {
+        const isVis = await loc.first().isVisible();
+        if (!isVis) {
+          throw new Error(`Essential popup control is not visible: ${ctrl.desc} (${ctrl.selector})`);
+        }
+      }
+      if (ctrl.checkChecked) {
+        const checked = await loc.first().isChecked();
+        if (!checked) {
+          throw new Error(`Expected popup checkbox to be checked by default: ${ctrl.selector}`);
+        }
+      }
+      console.log(`  [OK] Verified ${ctrl.desc} (${ctrl.selector})`);
+    }
+
+    await popupPage.screenshot({ path: path.join(ARTIFACTS_DIR, "popup-ui.png") });
+    console.log("  -> PASS: Popup interface loaded and essential controls verified strictly");
+
+    // Suite 6: Service Worker Real Termination & Storage Recovery
+    console.log(`\n[Suite 6/7] Testing Service Worker Real Lifecycle Termination & Storage Recovery...`);
+    const sentinelKey = `flux_sentinel_${Date.now()}`;
+    const sentinelVal = `val_${Math.random().toString(36).substring(2)}`;
+
+    // Write sentinel into storage before termination
+    await serviceWorker.evaluate(async ({ k, v }) => {
+      await chrome.storage.local.set({ [k]: v });
+    }, { k: sentinelKey, v: sentinelVal });
+    console.log(`  Written persistence sentinel: ${sentinelKey} = ${sentinelVal}`);
+
+    // Attach Chrome DevTools Protocol to terminate worker
+    const cdpPage = await context.newPage();
+    const cdp = await context.newCDPSession(cdpPage);
+    await cdp.send("ServiceWorker.enable");
+
+    const scopeURL = serviceWorker.url().replace(/js\/background\.js.*$/, "");
+    let isStopped = false;
+    let isRunningAgain = false;
+    let targetVersionId = "0";
+
+    cdp.on("ServiceWorker.workerVersionUpdated", (params) => {
+      for (const v of params.versions) {
+        if (v.runningStatus === "running" && !isStopped) {
+          targetVersionId = v.versionId;
+        }
+        if (v.runningStatus === "stopped") {
+          isStopped = true;
+        }
+        if (isStopped && v.runningStatus === "running") {
+          isRunningAgain = true;
+        }
+      }
+    });
+
+    await cdpPage.waitForTimeout(500);
+
+    console.log(`  Terminating Service Worker via CDP (versionId=${targetVersionId})...`);
+    await cdp.send("ServiceWorker.stopWorker", { versionId: targetVersionId });
+
+    const stopDeadline = Date.now() + 6000;
+    while (!isStopped && Date.now() < stopDeadline) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!isStopped) {
+      throw new Error("Service worker did not transition to 'stopped' status within deadline");
+    }
+    console.log("  [OK] Service Worker confirmed STOPPED via Chrome DevTools Protocol");
+
+    console.log(`  Restarting Service Worker via CDP (scopeURL=${scopeURL})...`);
+    await cdp.send("ServiceWorker.startWorker", { scopeURL });
+
+    const startDeadline = Date.now() + 6000;
+    while (!isRunningAgain && Date.now() < startDeadline) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!isRunningAgain) {
+      throw new Error("Service worker failed to reach 'running' status after restart");
+    }
+    console.log("  [OK] Service Worker confirmed RUNNING after lifecycle restart");
+
+    // Read back sentinel from restarted service worker
+    const activeWorker = context.serviceWorkers().find(w => !w.isDestroyed?.()) || context.serviceWorkers()[0];
+    const retrieved = await activeWorker.evaluate(async (k) => {
+      const res = await chrome.storage.local.get(k);
+      return res[k];
+    }, sentinelKey);
+
+    console.log(`  Retrieved sentinel after worker termination & restart: "${retrieved}"`);
+    if (retrieved !== sentinelVal) {
+      throw new Error(`Storage persistence failure across worker restart: expected "${sentinelVal}", got "${retrieved}"`);
+    }
+    await cdpPage.close().catch(() => {});
+    console.log("  -> PASS: Verified storage persistence across real Service Worker lifecycle termination");
+
+    // Suite 7: Native Messaging Offline Fallback Contract (Flux Desktop Offline)
+    console.log(`\n[Suite 7/7] Testing Native Messaging Offline Fallback Contract (Flux Offline)...`);
+    const fallbackStatus = await serviceWorker.evaluate(async () => {
       if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendNativeMessage) {
         return new Promise((resolve) => {
           try {
-            chrome.runtime.sendNativeMessage("com.flux.downloadmanager", { method: "ping" }, (response) => {
+            chrome.runtime.sendNativeMessage("com.flux.downloadmanager", { method: "system.handshake" }, (response) => {
               const err = chrome.runtime.lastError;
               resolve({
                 supported: true,
@@ -402,14 +552,13 @@ async function runBrowserRuntimeTests() {
       }
       return { supported: false, error: "sendNativeMessage not available in test context" };
     });
-    console.log("  Native Messaging Status:", nmhStatus);
-    if (nmhStatus.error) {
-      console.log(`  [TRANSPARENCY NOTE] Native Host Connection Status: ${nmhStatus.error}`);
-      console.log("  (As expected when Flux desktop GUI daemon is offline; download interception falls back to browser)");
+    console.log("  Native Messaging Offline Probe:", fallbackStatus);
+    if (!fallbackStatus.error) {
+      console.log("  [NOTE] Native Messaging Host responded:", fallbackStatus.response);
     } else {
-      console.log("  [OK] Native Messaging responded cleanly:", nmhStatus.response);
+      console.log(`  [OK] Expected offline fallback contract confirmed: "${fallbackStatus.error}"`);
     }
-    console.log("  -> PASS: Native Messaging transport and fallback contract verified");
+    console.log("  -> PASS: Native Messaging offline fallback contract verified");
 
     console.log("\n=================================================================");
     console.log("   ALL 7 BROWSER EXTENSION RUNTIME PLAYWRIGHT SUITES PASSED!     ");
@@ -423,7 +572,7 @@ async function runBrowserRuntimeTests() {
       failed: 0,
       browser: "Chromium (Playwright)",
       extensionId: EXPECTED_EXT_ID,
-      nmhStatus: nmhStatus,
+      nmhStatus: fallbackStatus,
       screenshots: [
         "downloads-page.png",
         "video-overlay.png",

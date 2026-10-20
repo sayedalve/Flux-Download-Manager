@@ -102,6 +102,7 @@ DesktopView::DesktopView(DownloadController& controller, ipc::IpcServer* ipc_ser
     m_starfield.SetReducedMotion(settings.reduced_motion);
     m_starfield.SetWindowState(!settings.start_minimized, settings.start_minimized);
     SetTheme(settings.theme, false);
+    LoadColumnWidthsFromSettings();
 }
 
 void DesktopView::SetWindowDimensions(int width, int height, uint32_t dpi) {
@@ -230,15 +231,17 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
     g.status_toggle_off_rect = {16, h - sb_h + (sb_h - 24) / 2, 62, h - sb_h + (sb_h + 24) / 2};
 
     int col_chk_w = 44;
-    int def_size_w = DesignSystem::ScaleForDpi(100, m.dpi);
-    int def_stat_w = DesignSystem::ScaleForDpi(170, m.dpi);
-    int def_dl_w = DesignSystem::ScaleForDpi(130, m.dpi);
-    int def_ul_w = DesignSystem::ScaleForDpi(100, m.dpi);
-    int def_added_w = DesignSystem::ScaleForDpi(155, m.dpi);
+    int def_name_w = DesignSystem::ScaleForDpi(380, m.dpi);
+    int def_size_w = DesignSystem::ScaleForDpi(105, m.dpi);
+    int def_stat_w = DesignSystem::ScaleForDpi(155, m.dpi);
+    int def_dl_w = DesignSystem::ScaleForDpi(115, m.dpi);
+    int def_ul_w = DesignSystem::ScaleForDpi(95, m.dpi);
+    int def_added_w = DesignSystem::ScaleForDpi(140, m.dpi);
 
     if (m_column_widths.size() < 6) {
-        m_column_widths = {0, def_size_w, def_stat_w, def_dl_w, def_ul_w, def_added_w};
+        m_column_widths = {def_name_w, def_size_w, def_stat_w, def_dl_w, def_ul_w, def_added_w};
     } else {
+        if (m_column_widths[0] < 120 || m_column_widths[0] > 2000) m_column_widths[0] = def_name_w;
         if (m_column_widths[1] < 40 || m_column_widths[1] > 2000) m_column_widths[1] = def_size_w;
         if (m_column_widths[2] < 40 || m_column_widths[2] > 2000) m_column_widths[2] = def_stat_w;
         if (m_column_widths[3] < 40 || m_column_widths[3] > 2000) m_column_widths[3] = def_dl_w;
@@ -246,16 +249,23 @@ WindowLayoutGeometry DesktopView::ComputeLayoutGeometry(size_t scroll_offset) co
         if (m_column_widths[5] < 40 || m_column_widths[5] > 2000) m_column_widths[5] = def_added_w;
     }
 
+    int col_name_w = m_column_widths[0];
     int col_size_w = m_column_widths[1];
     int col_stat_w = m_column_widths[2];
     int col_dl_w = m_column_widths[3];
     int col_ul_w = m_column_widths[4];
     int col_added_w = m_column_widths[5];
 
-    int total_right_w = col_size_w + col_stat_w + col_dl_w + col_ul_w + col_added_w;
-    int table_w = std::max(200, w - 32);
-    int col_name_total_w = (table_w > total_right_w + col_chk_w + 20) ? (table_w - total_right_w) : (col_chk_w + 20);
-    m_column_widths[0] = col_name_total_w;
+    // Responsive scaling on narrow windows:
+    // If the window is smaller than all columns combined, adapt Name down to min width (140)
+    int total_other_w = col_size_w + col_stat_w + col_dl_w + col_ul_w + col_added_w;
+    int available_for_name = w - 32 - total_other_w;
+    int col_name_total_w = col_name_w;
+    if (available_for_name < col_name_w && available_for_name >= DesignSystem::ScaleForDpi(140, m.dpi)) {
+        col_name_total_w = available_for_name;
+    } else if (available_for_name < DesignSystem::ScaleForDpi(140, m.dpi)) {
+        col_name_total_w = DesignSystem::ScaleForDpi(140, m.dpi);
+    }
 
     int cx = 16;
     g.table_columns.push_back({SortColumn::kFileName, "Name", {cx, bar_h, cx + col_name_total_w, bar_h + hdr_h}});
@@ -958,32 +968,89 @@ void DesktopView::StartColumnResize(int col_idx, int mouse_x) {
     if (col_idx >= 0 && col_idx < static_cast<int>(m_column_widths.size())) {
         m_resizing_col_index = col_idx;
         m_resize_start_x = mouse_x;
-        m_resize_orig_width = (col_idx == 0 && m_column_widths.size() > 1)
-            ? m_column_widths[1]
-            : m_column_widths[static_cast<size_t>(col_idx)];
+        m_resize_orig_width = m_column_widths[static_cast<size_t>(col_idx)];
     }
 }
 
 void DesktopView::UpdateColumnResize(int mouse_x) {
     if (m_resizing_col_index >= 0 && m_resizing_col_index < static_cast<int>(m_column_widths.size())) {
         int delta = mouse_x - m_resize_start_x;
-        if (m_resizing_col_index == 0 && m_column_widths.size() > 1) {
-            int new_w = std::max(50, m_resize_orig_width - delta);
-            m_column_widths[1] = new_w;
-        } else {
-            int new_w = std::max(50, m_resize_orig_width + delta);
-            m_column_widths[static_cast<size_t>(m_resizing_col_index)] = new_w;
+        int min_w = 60;
+        int max_w = 1200;
+        if (m_resizing_col_index == 0) { // Name
+            min_w = 140;
+            max_w = 1600;
+        } else if (m_resizing_col_index == 1) { // Size
+            min_w = 60;
+            max_w = 350;
+        } else if (m_resizing_col_index == 2) { // Status
+            min_w = 90;
+            max_w = 450;
+        } else if (m_resizing_col_index == 3) { // Download
+            min_w = 75;
+            max_w = 350;
+        } else if (m_resizing_col_index == 4) { // Upload
+            min_w = 65;
+            max_w = 300;
+        } else if (m_resizing_col_index == 5) { // Added
+            min_w = 80;
+            max_w = 350;
         }
+        int new_w = std::clamp(m_resize_orig_width + delta, min_w, max_w);
+        m_column_widths[static_cast<size_t>(m_resizing_col_index)] = new_w;
     }
 }
 
 void DesktopView::EndColumnResize() {
     m_resizing_col_index = -1;
+    SaveColumnWidthsToSettings();
 }
 
-int DesktopView::HitTestColumnDivider(int /*x*/, int /*y*/, size_t /*scroll_offset*/) const {
-    // Table column dividers are static and non-interactive
+int DesktopView::HitTestColumnDivider(int x, int y, size_t scroll_offset) const {
+    auto geom = ComputeLayoutGeometry(scroll_offset);
+    if (y < geom.table_header_rect.top || y > geom.table_header_rect.bottom) {
+        return -1;
+    }
+    for (size_t i = 0; i < geom.table_columns.size() && i <= 5; ++i) {
+        int edge_x = geom.table_columns[i].rect.right;
+        if (std::abs(x - edge_x) <= 4) {
+            return static_cast<int>(i);
+        }
+    }
     return -1;
+}
+
+void DesktopView::SaveColumnWidthsToSettings() {
+    if (m_column_widths.size() >= 6) {
+        std::string val = std::to_string(m_column_widths[0]) + "," +
+                          std::to_string(m_column_widths[1]) + "," +
+                          std::to_string(m_column_widths[2]) + "," +
+                          std::to_string(m_column_widths[3]) + "," +
+                          std::to_string(m_column_widths[4]) + "," +
+                          std::to_string(m_column_widths[5]);
+        auto s = m_controller.GetSettings();
+        if (s.table_column_widths != val) {
+            s.table_column_widths = val;
+            m_controller.UpdateSettings(s);
+        }
+    }
+}
+
+void DesktopView::LoadColumnWidthsFromSettings() {
+    auto s = m_controller.GetSettings();
+    if (!s.table_column_widths.empty()) {
+        std::vector<int> widths;
+        std::stringstream ss(s.table_column_widths);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            try {
+                widths.push_back(std::stoi(token));
+            } catch (...) {}
+        }
+        if (widths.size() >= 6) {
+            m_column_widths = std::move(widths);
+        }
+    }
 }
 
 std::vector<TaskModel> DesktopView::GetFilteredAndSortedTasks() const {
@@ -5322,6 +5389,13 @@ void PaintMainWindow(HWND hwnd, DesktopView& view) {
         RECT crc = ToWinRect(col.rect);
         std::wstring wt = Utf8ToW(col.title);
         DrawTextW(hdc, wt.c_str(), -1, &crc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        // Draw Excel-style resize divider handle between columns
+        if (col_idx < 6 && col.rect.right > 0 && col.rect.right < w) {
+            bool is_resizing = (view.GetResizingColumnIndex() == static_cast<int>(col_idx));
+            RECT div_handle{col.rect.right - 1, header_rc.top + 8, col.rect.right + 1, header_rc.bottom - 8};
+            FillRectSolid(hdc, div_handle, is_resizing ? pal.accent_primary : ColorRgba{0x45, 0x47, 0x50, 255});
+        }
     }
     RECT hdr_div{0, header_rc.bottom - 1, w, header_rc.bottom};
     FillRectSolid(hdc, hdr_div, pal.border_subtle);
@@ -6675,9 +6749,12 @@ int DesktopView::RunWin32MessageLoop() {
     }
 
     SetTimer(hwnd, IDT_UI_REFRESH, 100, nullptr);
-    bool start_min = m_controller.GetSettings().start_minimized;
+    bool start_min = !m_start_visible;
     SetWindowVisibility(!start_min, start_min);
-    ShowWindow(hwnd, start_min ? SW_HIDE : SW_SHOWDEFAULT);
+    ShowWindow(hwnd, start_min ? SW_HIDE : SW_SHOWNORMAL);
+    if (!start_min) {
+        SetForegroundWindow(hwnd);
+    }
     UpdateWindow(hwnd);
 
     MSG msg{};

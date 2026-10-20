@@ -111,6 +111,11 @@ var G = {
     "exe", "msi", "dmg", "pkg", "deb", "rpm", "apk", "appimage", "jar", "war", "ipa", "crx", "xpi", "whl", "nupkg",
     // Documents & E-books & Data
     "pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "odp", "rtf", "csv", "tsv", "epub", "mobi", "azw3", "torrent",
+    // Code & Scripts & Artifacts (ChatGPT, Claude, IDE exports)
+    "py", "ipynb", "js", "mjs", "cjs", "ts", "tsx", "jsx", "html", "htm", "css", "scss", "sass", "json", "jsonl",
+    "xml", "yaml", "yml", "toml", "ini", "cfg", "conf", "sql", "sh", "bash", "zsh", "bat", "cmd", "ps1",
+    "c", "cpp", "cc", "cxx", "h", "hpp", "hxx", "cs", "rs", "go", "java", "kt", "rb", "php", "lua", "r", "m", "swift",
+    "txt", "md", "markdown", "log", "svg", "webp",
     // Media & Progressive Audio/Video
     "mp4", "mkv", "webm", "mov", "avi", "flv", "wmv", "m4v", "3gp", "ts",
     "mp3", "m4a", "flac", "wav", "aac", "ogg", "opus", "wma",
@@ -157,6 +162,14 @@ var G = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "application/x-bittorrent",
+    "application/json",
+    "application/xml",
+    "text/xml",
+    "text/csv",
+    "text/plain",
+    "text/markdown",
+    "text/x-python",
+    "image/svg+xml",
     "video/mp4",
     "video/webm",
     "video/x-matroska",

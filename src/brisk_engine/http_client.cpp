@@ -9,6 +9,7 @@
 #include <cstring>
 #include <sstream>
 #include <vector>
+#include <mutex>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -137,6 +138,13 @@ bool HttpClient::IsPrivateOrLoopbackIpv6(const uint8_t bytes[16]) {
     return false;
 }
 
+struct DnsResolutionCacheEntry {
+    bool is_private{false};
+    std::chrono::steady_clock::time_point expires_at;
+};
+static std::mutex s_dns_resolution_mutex;
+static std::unordered_map<std::string, DnsResolutionCacheEntry> s_dns_resolution_cache;
+
 bool HttpClient::CheckHostResolvesToPrivate(const std::string& host) {
 #ifdef _WIN32
     static bool wsa_init = false;
@@ -148,6 +156,14 @@ bool HttpClient::CheckHostResolvesToPrivate(const std::string& host) {
 #endif
     std::string h = ToLower(host);
     if (h == "localhost" || h == "127.0.0.1" || h == "::1") return true;
+
+    {
+        std::lock_guard<std::mutex> lk(s_dns_resolution_mutex);
+        auto it = s_dns_resolution_cache.find(h);
+        if (it != s_dns_resolution_cache.end() && it->second.expires_at > std::chrono::steady_clock::now()) {
+            return it->second.is_private;
+        }
+    }
 
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
@@ -176,6 +192,10 @@ bool HttpClient::CheckHostResolvesToPrivate(const std::string& host) {
         }
     }
     freeaddrinfo(res);
+    {
+        std::lock_guard<std::mutex> lk(s_dns_resolution_mutex);
+        s_dns_resolution_cache[h] = {is_private, std::chrono::steady_clock::now() + std::chrono::seconds(60)};
+    }
     return is_private;
 }
 
@@ -710,10 +730,10 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
         if (!hSession) {
             return Result<HttpResponseMeta>::Err("ERR_NET_INIT", "WinHttpOpen failed", true);
         }
-        int resolve_timeout = std::max(timeout_ms, 15000);
-        int connect_timeout = std::max(timeout_ms, 15000);
-        int send_timeout = std::max(timeout_ms, 10000);
-        int recv_timeout = std::max(timeout_ms, 20000);
+        int resolve_timeout = std::clamp(timeout_ms, 2000, 8000);
+        int connect_timeout = std::clamp(timeout_ms, 3000, 10000);
+        int send_timeout = std::clamp(timeout_ms, 5000, 15000);
+        int recv_timeout = std::clamp(timeout_ms, 5000, 20000);
         WinHttpSetTimeouts(hSession, resolve_timeout, connect_timeout, send_timeout, recv_timeout);
 
         std::wstring whost = Utf8ToWide(pu.host);

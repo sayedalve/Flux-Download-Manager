@@ -125,6 +125,7 @@
 | **`[5/8]`** | Real HTTP Download via Installed Application with SHA-256 Check | `FR-001`, `FR-003`, `FR-007` | `Verified by Execution` | **PASSED** |
 | **`[6/8]`** | Clean Part-File Lifecycle, 404 Handling & Mid-Stream Reset Resume | `FR-004`, `FR-026`, `NFR-005` | `Verified by Execution` | **PASSED** |
 | **`[7/8]`** | Database State Persistence Across Process Restart | `FR-005`, `NFR-005` | `Verified by Execution` | **PASSED** |
+| **`[7b/8]`** | Positive Browser Native Messaging Integration (Chromium + Installed Extension) | `FR-008`, `FR-021`, `NFR-007` | `Verified by Execution` | **PASSED** |
 | **`[8/8]`** | Safe Uninstallation with Strict User Data Preservation | `FR-026`, `NFR-006`, `SEC-PRIV-01` | `Verified by Execution` | **PASSED** |
 
 ---
@@ -135,11 +136,11 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **`[1/7]`** | Extension Startup & Manifest V3 Service Worker Spawning | `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
 | **`[2/7]`** | Ordinary File Download Interception & Non-Blocking Fallback | `FR-008`, `FR-009`, `BUG-031` | `Verified by Execution` | **PASSED** |
-| **`[3/7]`** | HTML5 Video Player Detection & Closed Shadow DOM Pill Attachment | `FR-015`, `BUG-013`, `BUG-032` | `Verified by Execution` | **PASSED** |
-| **`[4/7]`** | HLS & DASH Stream Sniffing, Variant Deduplication & Registration | `FR-014`, `FR-016`, `FR-019` | `Verified by Execution` | **PASSED** |
-| **`[5/7]`** | Popup Interface (`popup.html`) Root Layout & Disconnected Messaging | `FR-008`, `FR-011`, `BUG-012` | `Verified by Execution` | **PASSED** |
-| **`[6/7]`** | Service Worker State Persistence & Storage Recovery | `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
-| **`[7/7]`** | Native Messaging Host IPC Round-Trip & Offline Fallback Contract | `FR-021`, `NFR-007`, `NFR-008` | `Verified by Execution` | **PASSED** |
+| **`[3/7]`** | HTML5 Video Player Detection, Shadow DOM Pill Attachment & Media Candidate Verification | `FR-015`, `BUG-013`, `BUG-032` | `Verified by Execution` | **PASSED** |
+| **`[4/7]`** | HLS & DASH Stream Sniffing, Exact Type Identification & Variant Deduplication | `FR-014`, `FR-016`, `FR-019` | `Verified by Execution` | **PASSED** |
+| **`[5/7]`** | Popup Interface (`popup.html`) Strict Visibility & Essential Control Audit | `FR-008`, `FR-011`, `BUG-012` | `Verified by Execution` | **PASSED** |
+| **`[6/7]`** | Real Service Worker Lifecycle Termination (CDP) & Storage Recovery | `FR-014`, `RISK-002` | `Verified by Execution` | **PASSED** |
+| **`[7/7]`** | Native Messaging Host Offline Fallback Contract (Flux Offline) | `FR-021`, `NFR-007`, `NFR-008` | `Verified by Execution` | **PASSED** |
 
 ---
 

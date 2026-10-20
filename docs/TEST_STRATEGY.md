@@ -81,17 +81,19 @@ flowchart TD
      - Confirms HKCU registry bindings for Chrome and Edge.
      - Performs a real HTTP download through installed `flux.exe` against a controlled local test server and verifies exact byte size and SHA-256 digest.
      - Injects network reset to verify auto-resume, verifies 404 error exit code, checks zero leftover `.part` files, and verifies database restart persistence.
+     - Launches installed application daemon and runs end-to-end positive Native Messaging exchange with Chromium, confirming `system.handshake`, `download.offer`, and SQLite task queue recording.
      - Uninstalls silently (`unins000.exe /VERYSILENT`) and verifies binary removal while strictly preserving `%LOCALAPPDATA%\Flux` user data.
 
 3. **Job 3: `browser-extension-runtime-test` (Playwright Chromium on Fresh Host):**
    - Downloads packaged extension and installs Playwright with Chromium.
    - Executes `node tests/browser/test_extension_runtime.js`:
      - Launches Chromium with real unpacked Manifest V3 extension loaded.
-     - Tests ordinary download link interception and non-blocking browser fallback.
-     - Verifies HTML5 video detection, content script isolated world execution, and closed Shadow DOM overlay pill attachment.
-     - Sniffs dynamic HLS `.m3u8` variant playlists and DASH `.mpd` manifests.
-     - Navigates to popup UI (`popup.html`), verifying root rendering, search filtering, and disconnected state messaging.
-     - Audits MV3 service worker lifecycle and `chrome.storage.local` session recovery.
+     - Tests ordinary download link interception and non-blocking browser fallback (strictly asserting one of the two outcomes occurred).
+     - Verifies HTML5 video detection, closed Shadow DOM overlay pill attachment, and candidate `source.mp4` registration in service worker.
+     - Sniffs dynamic HLS `.m3u8` variant playlists and DASH `.mpd` manifests, strictly asserting exact stream types.
+     - Navigates to popup UI (`popup.html`), verifying root rendering, essential controls, and search filtering without swallowing errors.
+     - Audits real MV3 service worker lifecycle termination via Chrome DevTools Protocol (`ServiceWorker.stopWorker`/`startWorker`) and `chrome.storage.local` persistence.
+     - Tests native messaging offline fallback contract when desktop application is offline.
      - Captures full-page screenshots and structured JSON test reports.
 
 4. **Job 4: `publish-release` (Tag Gated):**

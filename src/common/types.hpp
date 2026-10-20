@@ -242,6 +242,7 @@ struct AppSettings {
     uint32_t max_auto_retries{5};
     uint32_t retry_interval_sec{15};
     std::string queue_completion_action{"NONE"};      // "NONE", "SLEEP", "SHUTDOWN"
+    std::string table_column_widths;
 
     bool operator==(const AppSettings& other) const {
         return theme == other.theme &&
@@ -272,7 +273,8 @@ struct AppSettings {
                site_rules == other.site_rules &&
                max_auto_retries == other.max_auto_retries &&
                retry_interval_sec == other.retry_interval_sec &&
-               queue_completion_action == other.queue_completion_action;
+               queue_completion_action == other.queue_completion_action &&
+               table_column_widths == other.table_column_widths;
     }
     bool operator!=(const AppSettings& other) const { return !(*this == other); }
 };

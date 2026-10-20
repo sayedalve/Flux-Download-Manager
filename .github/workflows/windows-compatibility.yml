@@ -171,24 +171,72 @@ jobs:
           Write-Host "Architecture : $($osInfo.OSArchitecture)"
 
       - name: Run C++20 Regression Tests (62 Suites)
+        id: cpp_tests
         shell: powershell
         run: |
-          .\build\Release\radium_unit_tests.exe
+          $exitCode = 0
+          try {
+            .\build\Release\radium_unit_tests.exe
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running radium_unit_tests.exe: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::C++20 unit & regression tests failed with exit code $exitCode"
+          }
 
       - name: Run Core Operations, Pause/Resume & Concurrency Tests
+        id: core_tests
         shell: powershell
         run: |
-          python tests/test_core_operations.py --bin-dir build/Release --output-json test-results/core_operations_${{ matrix.os }}.json
+          $exitCode = 0
+          try {
+            python tests/test_core_operations.py --bin-dir build/Release --output-json test-results/core_operations_${{ matrix.os }}.json
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running test_core_operations.py: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::Core operations suite failed with exit code $exitCode"
+          }
 
       - name: Run Clean Installation Smoke Suite
+        id: installer_tests
         shell: powershell
         run: |
-          python tests/test_installer_smoke.py --dist-dir dist
+          $exitCode = 0
+          try {
+            python tests/test_installer_smoke.py --dist-dir dist
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running test_installer_smoke.py: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::Installer smoke suite failed with exit code $exitCode"
+          }
 
       - name: Run Browser Extension Runtime Suite (Chromium Playwright)
+        id: browser_tests
         shell: powershell
         run: |
-          node tests/browser/test_extension_runtime.js
+          $exitCode = 0
+          try {
+            node tests/browser/test_extension_runtime.js
+            $exitCode = $LASTEXITCODE
+          } catch {
+            $exitCode = 1
+            Write-Host "Exception running test_extension_runtime.js: $_"
+          }
+          if ($exitCode -ne 0) {
+            "test_failed=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            Write-Host "::error::Browser extension runtime suite failed with exit code $exitCode"
+          }
 
       - name: Generate OS Compatibility Report
         shell: powershell
@@ -213,3 +261,11 @@ jobs:
             COMPATIBILITY_REPORT_${{ matrix.os }}.md
             test-results/
             test-results/browser-extension/
+
+      - name: Assert All Required Test Suites Succeeded
+        shell: powershell
+        run: |
+          if ($env:test_failed -eq "true") {
+            throw "One or more required test suites failed on ${{ matrix.os }}. Review test results and compatibility report above."
+          }
+          Write-Host "All automated test suites verified successfully on ${{ matrix.os }}!" -ForegroundColor Green

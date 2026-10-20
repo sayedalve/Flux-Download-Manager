@@ -316,6 +316,11 @@ Result<MediaQualityResult> Nm3u8dlReAdapter::VerifyMediaQuality(
         probe_bin = PathSanitizer::FindWorkerBinary("ffprobe", PathSanitizer::GetExecutableDir());
     }
 
+    std::filesystem::path ffmpeg_bin;
+    if (probe_bin.empty() || !std::filesystem::exists(probe_bin, ec)) {
+        ffmpeg_bin = PathSanitizer::FindWorkerBinary("ffmpeg", PathSanitizer::GetExecutableDir());
+    }
+
     MediaQualityResult qr;
     qr.probed_file_size = disk_sz;
 
@@ -432,6 +437,109 @@ Result<MediaQualityResult> Nm3u8dlReAdapter::VerifyMediaQuality(
                     }
                 }
             } catch (...) {}
+        }
+    } else if (!ffmpeg_bin.empty() && std::filesystem::exists(ffmpeg_bin, ec)) {
+        // Fallback: Probe container metadata, dimensions, and codecs via ffmpeg -i <file>
+        std::vector<std::string> args = {
+            "-i", file_path.string()
+        };
+
+        std::string ffmpeg_output;
+#ifdef _WIN32
+        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        HANDLE hRead = nullptr, hWrite = nullptr;
+        if (CreatePipe(&hRead, &hWrite, &sa, 0)) {
+            SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+            STARTUPINFOW si{};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdOutput = hWrite;
+            si.hStdError = hWrite;
+            si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+            std::wostringstream wss;
+            wss << L"\"" << ffmpeg_bin.wstring() << L"\"";
+            for (const auto& a : args) {
+                int sz = MultiByteToWideChar(CP_UTF8, 0, a.data(), static_cast<int>(a.size()), nullptr, 0);
+                std::wstring w(sz, 0);
+                MultiByteToWideChar(CP_UTF8, 0, a.data(), static_cast<int>(a.size()), w.data(), sz);
+                wss << L" \"" << w << L"\"";
+            }
+            std::wstring wcmd = wss.str();
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+                CloseHandle(hWrite);
+                char buf[4096];
+                DWORD got = 0;
+                while (ReadFile(hRead, buf, sizeof(buf), &got, nullptr) && got > 0) {
+                    ffmpeg_output.append(buf, got);
+                }
+                WaitForSingleObject(pi.hProcess, 15000);
+                CloseHandle(pi.hThread);
+                CloseHandle(pi.hProcess);
+            } else {
+                CloseHandle(hWrite);
+            }
+            CloseHandle(hRead);
+        }
+#else
+        int pfd[2];
+        if (pipe(pfd) == 0) {
+            pid_t p = fork();
+            if (p == 0) {
+                ::close(pfd[0]);
+                dup2(pfd[1], STDOUT_FILENO);
+                dup2(pfd[1], STDERR_FILENO);
+                std::string bin_s = ffmpeg_bin.string();
+                std::vector<char*> argv_ptrs;
+                argv_ptrs.push_back(const_cast<char*>(bin_s.c_str()));
+                for (const auto& a : args) argv_ptrs.push_back(const_cast<char*>(a.c_str()));
+                argv_ptrs.push_back(nullptr);
+                execvp(bin_s.c_str(), argv_ptrs.data());
+                _exit(127);
+            }
+            ::close(pfd[1]);
+            char buf[4096];
+            ssize_t n = 0;
+            while ((n = ::read(pfd[0], buf, sizeof(buf))) > 0) {
+                ffmpeg_output.append(buf, static_cast<size_t>(n));
+            }
+            ::close(pfd[0]);
+            int st = 0;
+            waitpid(p, &st, 0);
+        }
+#endif
+
+        // Parse ffmpeg -i textual stderr output:
+        // Duration: 00:00:04.00, start: 0.000000, bitrate: 144 kb/s
+        // Stream #0:0[0x1](und): Video: h264 (avc1 / 0x31637661), yuv420p(progressive), 640x360 [SAR 1:1 DAR 16:9], ...
+        // Stream #0:1[0x2](und): Audio: aac (mp4a / 0x6134706D), 44100 Hz, mono, fltp, 63 kb/s (default)
+        std::istringstream iss(ffmpeg_output);
+        std::string line;
+        static const std::regex kDurRe(R"(Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?))");
+        static const std::regex kVideoRe(R"(Stream\s*#\d+:\d+.*?: Video:\s*([a-zA-Z0-9_-]+).*?,\s*(\d{2,5})x(\d{2,5}))");
+        static const std::regex kAudioRe(R"(Stream\s*#\d+:\d+.*?: Audio:\s*([a-zA-Z0-9_-]+))");
+
+        while (std::getline(iss, line)) {
+            std::smatch m;
+            if (qr.probed_duration_sec <= 0.0 && std::regex_search(line, m, kDurRe)) {
+                try {
+                    double hours = std::stod(m[1].str());
+                    double mins = std::stod(m[2].str());
+                    double secs = std::stod(m[3].str());
+                    qr.probed_duration_sec = hours * 3600.0 + mins * 60.0 + secs;
+                } catch (...) {}
+            }
+            if (qr.probed_video_codec.empty() && std::regex_search(line, m, kVideoRe)) {
+                qr.probed_video_codec = ToLowerStr(m[1].str());
+                try {
+                    qr.probed_width = std::stoi(m[2].str());
+                    qr.probed_height = std::stoi(m[3].str());
+                } catch (...) {}
+            }
+            if (qr.probed_audio_codec.empty() && std::regex_search(line, m, kAudioRe)) {
+                qr.probed_audio_codec = ToLowerStr(m[1].str());
+            }
         }
     }
 

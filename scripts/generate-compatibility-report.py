@@ -164,7 +164,28 @@ def generate_report(results_dir: Path, output_md: Path, output_json: Path, os_la
         f"",
         f"---",
         f"",
-        f"## 2. Server CI vs. Windows Desktop Operating Systems: Key Architectural Differences",
+        f"## 2. Test Execution Details on {os_label}",
+        f""
+    ]
+
+    if suite_data:
+        md_lines.append("| Suite / Test Name | Status | Message / Details |")
+        md_lines.append("| :--- | :---: | :--- |")
+        for sname, sinfo in suite_data.items():
+            if isinstance(sinfo, dict) and "tests" in sinfo:
+                for t in sinfo["tests"]:
+                    st = t.get("status", "UNKNOWN")
+                    icon = "✅" if st in ("PASS", "PASSED") else "❌"
+                    md_lines.append(f"| {t.get('name', 'Unnamed')} | {icon} {st} | {t.get('message', '')} |")
+            elif isinstance(sinfo, dict):
+                st = sinfo.get("status", "COMPLETED")
+                md_lines.append(f"| {sname} | {st} | Passed={sinfo.get('passed_tests', 0)}, Failed={sinfo.get('failed_tests', 0)} |")
+        md_lines.append("")
+        md_lines.append("---")
+        md_lines.append("")
+
+    md_lines.extend([
+        f"## 3. Server CI vs. Windows Desktop Operating Systems: Key Architectural Differences",
         f"",
         f"> [!IMPORTANT]",
         f"> **Zero Hallucination Policy:** Success on Windows Server 2022 or Windows Server 2025 verifies compiler compatibility, WinHTTP networking, SQLite locking, and headless process mechanics. It **does NOT** certify full consumer desktop compatibility.",

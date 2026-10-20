@@ -4374,6 +4374,18 @@ bool TestYouTubeQualitySelectionIntegrityAndVerification() {
     {
         std::filesystem::path fixture_path = "tests/fixtures/media/source.mp4";
         std::error_code ec;
+        if (!std::filesystem::exists(fixture_path, ec)) {
+            // Also search parent directories up to 3 levels for when tests execute in build/win-x64/Release/
+            std::filesystem::path cur = PathSanitizer::GetExecutableDir();
+            for (int d = 0; d < 3; ++d) {
+                if (std::filesystem::exists(cur / "tests/fixtures/media/source.mp4", ec)) {
+                    fixture_path = cur / "tests/fixtures/media/source.mp4";
+                    break;
+                }
+                if (!cur.has_parent_path()) break;
+                cur = cur.parent_path();
+            }
+        }
         if (std::filesystem::exists(fixture_path, ec)) {
             // Test 1: Expected height matches actual fixture (360p)
             MediaQualityExpectations exp_valid;
@@ -4382,6 +4394,18 @@ bool TestYouTubeQualitySelectionIntegrityAndVerification() {
             exp_valid.expect_video = true;
             exp_valid.expect_audio = true;
             auto res_valid = Nm3u8dlReAdapter::VerifyMediaQuality(fixture_path, exp_valid);
+            if (!res_valid.ok()) {
+                std::cerr << "  [DIAGNOSTIC] VerifyMediaQuality failed: code="
+                          << (res_valid.error ? res_valid.error->code : "UNKNOWN")
+                          << ", message=" << (res_valid.error ? res_valid.error->message : "none")
+                          << ", fixture=" << fixture_path.string() << "\n";
+            } else {
+                std::cout << "  [DIAGNOSTIC] Probed: " << res_valid.value->probed_width << "x"
+                          << res_valid.value->probed_height << ", video_codec="
+                          << res_valid.value->probed_video_codec << ", audio_codec="
+                          << res_valid.value->probed_audio_codec << ", duration="
+                          << res_valid.value->probed_duration_sec << "s\n";
+            }
             ASSERT_TRUE(res_valid.ok(), "Real fixture verifies successfully for 360p expectations");
             ASSERT_TRUE(res_valid.value->probed_width == 640 && res_valid.value->probed_height == 360, "Probed dimensions are 640x360");
             ASSERT_TRUE(res_valid.value->probed_video_codec == "h264", "Probed video codec is h264");

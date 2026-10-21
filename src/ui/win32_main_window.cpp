@@ -42,6 +42,7 @@ namespace openidm::ui {
 namespace {
 
 #ifdef _WIN32
+UINT g_msgTaskbarButtonCreated = 0;
 HICON CreateRadiumAppIcon();
 HICON CreateFluxAppIcon();
 
@@ -3365,56 +3366,68 @@ void InstallModernEditControl(HWND hEdit, uint32_t dpi = 96) {
     SetWindowSubclass(hEdit, ModernEditSubclassProc, SUBCLASS_MODERN_EDIT_ID, reinterpret_cast<DWORD_PTR>(data));
 }
 
-void SyncTaskbarProgress(HWND hwnd, ITaskbarList3* pTaskbar, const DesktopView& view, Win32WindowContext* ctx) {
-    if (!hwnd || !pTaskbar) return;
+bool SyncTaskbarProgress(HWND hwnd, ITaskbarList3* pTaskbar, const DesktopView& view, Win32WindowContext* ctx) {
+    if (!hwnd || !pTaskbar) return false;
     auto info = view.ComputeTaskbarProgress();
     
-    // Prevent flickering: check if taskbar state or relevant values actually changed
+    // Prevent flickering: check if taskbar state or relevant values actually changed and were successfully applied previously
     if (ctx && ctx->taskbar_info_initialized) {
         if (ctx->last_taskbar_info.state == info.state &&
             ctx->last_taskbar_info.total_bytes == info.total_bytes) {
             if (info.state == TaskbarProgressState::kNoProgress ||
                 info.state == TaskbarProgressState::kIndeterminate ||
                 info.state == TaskbarProgressState::kError) {
-                return; // Nothing changed, skip redundant Win32 ITaskbarList3 COM dispatch
+                return true; // Nothing changed, skip redundant Win32 ITaskbarList3 COM dispatch
             }
             if (info.state == TaskbarProgressState::kNormal || info.state == TaskbarProgressState::kPaused) {
                 // If progress value delta is identical or negligible, skip
                 if (ctx->last_taskbar_info.completed_bytes == info.completed_bytes) {
-                    return;
+                    return true;
                 }
             }
         }
     }
 
-    if (ctx) {
-        ctx->last_taskbar_info = info;
-        ctx->taskbar_info_initialized = true;
-    }
+    HRESULT hrState = S_OK;
+    HRESULT hrVal = S_OK;
 
     switch (info.state) {
         case TaskbarProgressState::kNoProgress:
-            // Explicitly clear progress value and clear any stale flags
-            pTaskbar->SetProgressValue(hwnd, 0, 1);
-            pTaskbar->SetProgressState(hwnd, TBPF_NOPROGRESS);
+            // Explicitly clear progress value first, then reset state to TBPF_NOPROGRESS
+            hrVal = pTaskbar->SetProgressValue(hwnd, 0, 1);
+            hrState = pTaskbar->SetProgressState(hwnd, TBPF_NOPROGRESS);
             break;
         case TaskbarProgressState::kIndeterminate:
-            pTaskbar->SetProgressState(hwnd, TBPF_INDETERMINATE);
+            hrState = pTaskbar->SetProgressState(hwnd, TBPF_INDETERMINATE);
             break;
         case TaskbarProgressState::kNormal:
-            pTaskbar->SetProgressState(hwnd, TBPF_NORMAL);
-            pTaskbar->SetProgressValue(hwnd, info.completed_bytes, std::max<uint64_t>(1ULL, info.total_bytes));
+            hrState = pTaskbar->SetProgressState(hwnd, TBPF_NORMAL);
+            hrVal = pTaskbar->SetProgressValue(hwnd, info.completed_bytes, std::max<uint64_t>(1ULL, info.total_bytes));
             break;
         case TaskbarProgressState::kPaused:
-            pTaskbar->SetProgressState(hwnd, TBPF_PAUSED);
+            hrState = pTaskbar->SetProgressState(hwnd, TBPF_PAUSED);
             if (info.total_bytes > 0) {
-                pTaskbar->SetProgressValue(hwnd, info.completed_bytes, info.total_bytes);
+                hrVal = pTaskbar->SetProgressValue(hwnd, info.completed_bytes, info.total_bytes);
             }
             break;
         case TaskbarProgressState::kError:
-            pTaskbar->SetProgressState(hwnd, TBPF_ERROR);
+            hrState = pTaskbar->SetProgressState(hwnd, TBPF_ERROR);
             break;
     }
+
+    bool success = SUCCEEDED(hrState) && SUCCEEDED(hrVal);
+    if (ctx) {
+        if (success) {
+            ctx->last_taskbar_info = info;
+            ctx->taskbar_info_initialized = true;
+        } else {
+            // If the COM call failed (e.g., explorer restarting, E_FAIL, or invalid hwnd),
+            // invalidate cached state so the next UI timer tick will retry.
+            ctx->taskbar_info_initialized = false;
+        }
+    }
+
+    return success;
 }
 
 RECT ToWinRect(const RectI& r) {
@@ -6422,6 +6435,9 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     switch (msg) {
         case WM_CREATE: {
+            if (g_msgTaskbarButtonCreated == 0) {
+                g_msgTaskbarButtonCreated = RegisterWindowMessageW(L"TaskbarButtonCreated");
+            }
             InitWin32DarkMode(hwnd);
             DragAcceptFiles(hwnd, TRUE);
             HICON hAppIcon = CreateRadiumAppIcon();
@@ -6429,6 +6445,10 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hAppIcon));
                 SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(hAppIcon));
             }
+            // Reset taskbar cache upon creation/re-creation
+            ctx->taskbar_info_initialized = false;
+            ctx->last_taskbar_info = {};
+
             // Initialize COM for ITaskbarList3 (apartment-threaded, UI thread)
             HRESULT hr_com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             ctx->com_initialized = SUCCEEDED(hr_com) || (hr_com == RPC_E_CHANGED_MODE);
@@ -7435,6 +7455,8 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 ctx->pTaskbarList->Release();
                 ctx->pTaskbarList = nullptr;
             }
+            ctx->taskbar_info_initialized = false;
+            ctx->last_taskbar_info = {};
             if (ctx->com_initialized) {
                 CoUninitialize();
                 ctx->com_initialized = false;
@@ -7446,6 +7468,36 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             PostQuitMessage(0);
             return 0;
         }
+    }
+    if (g_msgTaskbarButtonCreated != 0 && msg == g_msgTaskbarButtonCreated) {
+        // Explorer restarted or recreated taskbar buttons - re-acquire ITaskbarList3 and reset cached state
+        if (ctx) {
+            ctx->taskbar_info_initialized = false;
+            ctx->last_taskbar_info = {};
+            if (ctx->pTaskbarList) {
+                ctx->pTaskbarList->Release();
+                ctx->pTaskbarList = nullptr;
+            }
+            if (!ctx->com_initialized) {
+                HRESULT hr_com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                ctx->com_initialized = SUCCEEDED(hr_com) || (hr_com == RPC_E_CHANGED_MODE);
+            }
+            ITaskbarList3* pTbl = nullptr;
+            HRESULT hr_tbl = CoCreateInstance(
+                CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
+                IID_ITaskbarList3, reinterpret_cast<void**>(&pTbl));
+            if (SUCCEEDED(hr_tbl) && pTbl) {
+                if (SUCCEEDED(pTbl->HrInit())) {
+                    ctx->pTaskbarList = pTbl;
+                } else {
+                    pTbl->Release();
+                }
+            }
+            if (ctx->pTaskbarList && ctx->view) {
+                SyncTaskbarProgress(hwnd, ctx->pTaskbarList, *ctx->view, ctx);
+            }
+        }
+        return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }

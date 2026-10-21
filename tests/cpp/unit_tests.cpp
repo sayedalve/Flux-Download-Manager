@@ -4631,11 +4631,129 @@ bool TestYouTubeQualitySelectionIntegrityAndVerification() {
     return true;
 }
 
+bool TestAutoScrollToCurrentDownload() {
+    std::cout << "  [1/4] Testing ScrollTaskIntoView when row is below visible window...\n";
+    std::error_code ec;
+    auto db_dir = std::filesystem::temp_directory_path() / ("radium_test_autoscroll_" + openidm::GenerateUuidV4());
+    std::filesystem::create_directories(db_dir, ec);
+
+    openidm::ControllerConfig cfg;
+    cfg.state_db_path = db_dir / "test.db";
+    cfg.default_download_dir = db_dir / "downloads";
+    cfg.temp_root_dir = db_dir / "temp";
+    std::filesystem::create_directories(cfg.default_download_dir, ec);
+    std::filesystem::create_directories(cfg.temp_root_dir, ec);
+
+    {
+        openidm::DownloadController controller(cfg);
+        auto init_res = controller.Initialize();
+        ASSERT_TRUE(init_res.ok(), "Controller initialization succeeds");
+
+        // Add 25 tasks
+        std::vector<std::string> task_ids;
+        for (int i = 0; i < 25; ++i) {
+            openidm::TaskModel t;
+            t.task_id = "task_" + std::to_string(i + 1);
+            t.url = "https://example.com/file_" + std::to_string(i + 1) + ".zip";
+            t.file_name = "file_" + std::to_string(i + 1) + ".zip";
+            t.save_dir = cfg.default_download_dir.string();
+            t.state = openidm::TaskState::kPaused;
+            t.total_bytes = 1000000;
+            auto add_res = controller.AddTask(std::move(t), false, false);
+            ASSERT_TRUE(add_res.ok(), "Task added successfully");
+            task_ids.push_back(add_res.value->task_id);
+        }
+
+        openidm::ui::DesktopView view(controller);
+        view.SetWindowDimensions(1200, 600, 96);
+        // Window height 600 -> table_body_rect ~450px, row_h=52px -> ~8 visible rows
+        view.SetScrollOffset(0);
+        ASSERT_TRUE(view.GetScrollOffset() == 0, "Initial scroll offset is 0");
+
+        auto filtered_tasks = view.GetFilteredAndSortedTasks();
+        ASSERT_TRUE(filtered_tasks.size() == 25, "All 25 tasks are in filtered list");
+        // Pick the item near the bottom of filtered list (e.g. index 23)
+        std::string bottom_task_id = filtered_tasks[23].task_id;
+        bool scrolled = view.ScrollTaskIntoView(bottom_task_id, true);
+        ASSERT_TRUE(scrolled, "ScrollTaskIntoView returns true for existing task");
+        ASSERT_TRUE(view.GetSelectedTaskId() == bottom_task_id, "Task row is selected");
+        ASSERT_TRUE(view.GetScrollOffset() > 0, "Scroll offset automatically increased to bring bottom row into view");
+
+        std::cout << "  [2/4] Testing ScrollTaskIntoView when row is above current scroll offset...\n";
+        // Now scroll to top task in filtered list (index 0)
+        std::string top_task_id = filtered_tasks[0].task_id;
+        scrolled = view.ScrollTaskIntoView(top_task_id, true);
+        ASSERT_TRUE(scrolled, "ScrollTaskIntoView returns true when scrolling upwards");
+        ASSERT_TRUE(view.GetSelectedTaskId() == top_task_id, "Top task row is selected");
+        ASSERT_TRUE(view.GetScrollOffset() == 0, "Scroll offset reset to 0 to bring top row into view");
+
+        std::cout << "  [3/4] Testing manual and browser intercepted submission auto-scrolls...\n";
+        // Set scroll to top and submit a 26th task via SubmitAddDownloadDialog
+        view.SetScrollOffset(0);
+        openidm::ui::AddDownloadDialogInput input;
+        input.url = "https://example.com/new_download.mp4";
+        input.custom_filename = "new_download.mp4";
+        input.save_dir = cfg.default_download_dir.string();
+        input.start_immediately = true;
+
+        auto submit_res = view.SubmitAddDownloadDialog(input);
+        ASSERT_TRUE(submit_res.ok(), "SubmitAddDownloadDialog succeeds");
+        std::string new_id = submit_res.value->task_id;
+        ASSERT_TRUE(view.GetSelectedTaskId() == new_id, "Newly submitted download is selected");
+        // Because sorting is default by created_at descending or similar, verify it is selected and visible
+        ASSERT_TRUE(view.ScrollTaskIntoView(new_id, true), "New task can be scrolled into view");
+
+        std::cout << "  [4/4] Testing CheckAndAutoScrollNewOrStartedDownloads during state transitions vs normal progress...\n";
+        // Initialize tracking
+        view.CheckAndAutoScrollNewOrStartedDownloads();
+
+        // Add a new task directly to controller (simulating intercepted or background start)
+        openidm::TaskModel t_new;
+        t_new.task_id = "intercepted_task_99";
+        t_new.url = "https://example.com/intercepted.pkg";
+        t_new.file_name = "intercepted.pkg";
+        t_new.save_dir = cfg.default_download_dir.string();
+        t_new.state = openidm::TaskState::kQueued;
+        controller.AddTask(t_new, false, false);
+
+        bool detected_new = view.CheckAndAutoScrollNewOrStartedDownloads();
+        ASSERT_TRUE(detected_new, "Detected new download and auto-scrolled");
+        ASSERT_TRUE(view.GetSelectedTaskId() == "intercepted_task_99", "Selected intercepted download");
+
+        // Normal progress update on existing download should NOT re-trigger auto scroll
+        size_t current_scroll = view.GetScrollOffset();
+        t_new.downloaded_bytes = 500000;
+        t_new.speed_bps = 100000;
+        controller.UpdateTask(t_new);
+
+        bool detected_progress = view.CheckAndAutoScrollNewOrStartedDownloads();
+        ASSERT_TRUE(!detected_progress, "Normal progress updates do not re-trigger scroll adjustments");
+        ASSERT_TRUE(view.GetScrollOffset() == current_scroll, "Scroll position remains stable during transfer");
+
+        // Now transition an existing paused task to downloading (starting)
+        auto paused_task_opt = controller.GetTask(task_ids[15]);
+        ASSERT_TRUE(paused_task_opt.has_value(), "Paused task exists");
+        openidm::TaskModel starting_task = *paused_task_opt;
+        starting_task.state = openidm::TaskState::kDownloading;
+        controller.UpdateTask(starting_task);
+
+        bool detected_start = view.CheckAndAutoScrollNewOrStartedDownloads();
+        ASSERT_TRUE(detected_start, "Detected download start transition and auto-scrolled");
+        ASSERT_TRUE(view.GetSelectedTaskId() == task_ids[15], "Started task is selected");
+
+        controller.Shutdown();
+        std::filesystem::remove_all(db_dir, ec);
+    }
+
+    std::cout << "  -> All automatic scrolling and selection tests PASSED.\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 62;
+    const int total = 63;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "..." << std::endl;
@@ -4707,6 +4825,7 @@ int main() {
     run(60, "TestQualitySelectionSizeAndColumnDocking", TestQualitySelectionSizeAndColumnDocking);
     run(61, "TestNewDownloadDialogSubmissionAndTaskCreation", TestNewDownloadDialogSubmissionAndTaskCreation);
     run(62, "TestYouTubeQualitySelectionIntegrityAndVerification", TestYouTubeQualitySelectionIntegrityAndVerification);
+    run(63, "TestAutoScrollToCurrentDownload", TestAutoScrollToCurrentDownload);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

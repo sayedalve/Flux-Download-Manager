@@ -216,6 +216,9 @@ function initPopupUI() {
   let activeSearchQuery = "";
   let isDesktopConnected = false;
   let activeErrorMessage = "";
+  let isSelectDropdownOpen = false;
+  let activeSelectCandId = null;
+  let pendingRefreshRequested = false;
 
   const mediaListEl = document.getElementById("mediaList");
   const connectionBadge = document.getElementById("connectionBadge");
@@ -277,13 +280,31 @@ function initPopupUI() {
   function refreshListDisplay() {
     updateCounters();
     if (!mediaListEl) return;
-    mediaListEl.innerHTML = renderDetectedMediaList(currentCandidates, {
+
+    // Guard: Never destroy DOM while a quality dropdown is active/expanded!
+    const activeEl = document.activeElement;
+    const isSelectActive = isSelectDropdownOpen || (activeEl && (activeEl.classList?.contains("quality-select") || activeEl.tagName === "SELECT"));
+    if (isSelectActive) {
+      pendingRefreshRequested = true;
+      return;
+    }
+
+    const newHtml = renderDetectedMediaList(currentCandidates, {
       filterMode: activeFilterMode,
       searchQuery: activeSearchQuery,
       desktopConnected: isDesktopConnected,
       errorMessage: activeErrorMessage,
       pageLinks: currentTabLinks
     });
+
+    // Zero DOM churn if HTML output is unchanged
+    if (mediaListEl.innerHTML === newHtml) {
+      return;
+    }
+
+    const prevScrollTop = mediaListEl.scrollTop;
+    mediaListEl.innerHTML = newHtml;
+    mediaListEl.scrollTop = prevScrollTop;
     attachItemClickListeners();
   }
 
@@ -291,7 +312,20 @@ function initPopupUI() {
     if (!mediaListEl) return;
     const qualitySelects = mediaListEl.querySelectorAll(".quality-select");
     qualitySelects.forEach(sel => {
+      sel.addEventListener("mousedown", () => {
+        isSelectDropdownOpen = true;
+        activeSelectCandId = sel.getAttribute("data-id");
+      });
+      sel.addEventListener("pointerdown", () => {
+        isSelectDropdownOpen = true;
+        activeSelectCandId = sel.getAttribute("data-id");
+      });
+      sel.addEventListener("focus", () => {
+        activeSelectCandId = sel.getAttribute("data-id");
+      });
       sel.addEventListener("change", (ev) => {
+        isSelectDropdownOpen = false;
+        activeSelectCandId = null;
         const selTarget = ev.currentTarget || ev.target;
         const candId = selTarget.getAttribute("data-id");
         const cand = currentCandidates.find(c => c.candidateId === candId);
@@ -314,8 +348,35 @@ function initPopupUI() {
               const szPrefix = chosen.sizeEstimated ? " · ~" : " · ";
               metaMono.textContent = cand.resolution + (chosenSize > 0 ? szPrefix + formatMediaSize(chosenSize) : "");
             }
+            if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+              chrome.runtime.sendMessage({
+                action: "updateCandidateQuality",
+                tabId: currentTabId,
+                candidateId: cand.candidateId,
+                qualityId: chosen.id,
+                resolution: chosen.resolution
+              }, () => {
+                if (chrome.runtime) void chrome.runtime.lastError;
+              });
+            }
           }
         }
+        if (pendingRefreshRequested) {
+          pendingRefreshRequested = false;
+          setTimeout(refreshListDisplay, 40);
+        }
+      });
+      sel.addEventListener("blur", () => {
+        setTimeout(() => {
+          if (document.activeElement !== sel) {
+            isSelectDropdownOpen = false;
+            activeSelectCandId = null;
+            if (pendingRefreshRequested) {
+              pendingRefreshRequested = false;
+              refreshListDisplay();
+            }
+          }
+        }, 100);
       });
     });
 
@@ -455,7 +516,17 @@ function initPopupUI() {
         if (siteToggle) {
           siteToggle.checked = Boolean(res.captureEnabled && !res.siteDisabled);
         }
-        currentCandidates = res.candidates || [];
+        // Preserve user's active quality selections across refreshes
+        const prevSelections = new Map();
+        (currentCandidates || []).forEach(c => {
+          if (c.selectedQualityId) prevSelections.set(c.candidateId, c.selectedQualityId);
+        });
+        currentCandidates = (res.candidates || []).map(c => {
+          if (prevSelections.has(c.candidateId)) {
+            c.selectedQualityId = prevSelections.get(c.candidateId);
+          }
+          return c;
+        });
         activeErrorMessage = (currentCandidates.length === 0 && res.playerError) ? res.playerError : "";
         fetchPageLinks();
         refreshListDisplay();
@@ -508,12 +579,29 @@ function initPopupUI() {
 
   // Listen for live updates from background service worker while popup is open
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
+    let updateDebounceTimer = null;
     chrome.runtime.onMessage.addListener((msg) => {
-      if (msg && msg.action === "mediaUpdated" && (!msg.tabId || msg.tabId === currentTabId)) {
-        fetchTabData(currentTabId);
+      if (msg && msg.action === "mediaUpdated" && (!msg.tabId || msg.tabId === currentTabId || (Array.isArray(msg.tabs) && msg.tabs.includes(currentTabId)))) {
+        if (updateDebounceTimer) clearTimeout(updateDebounceTimer);
+        updateDebounceTimer = setTimeout(() => {
+          updateDebounceTimer = null;
+          fetchTabData(currentTabId);
+        }, 80);
       }
     });
   }
+
+  // Dismiss dropdown interaction guard when clicking anywhere outside quality select
+  document.addEventListener("click", (ev) => {
+    if (!ev.target || !ev.target.classList || !ev.target.classList.contains("quality-select")) {
+      isSelectDropdownOpen = false;
+      activeSelectCandId = null;
+      if (pendingRefreshRequested) {
+        pendingRefreshRequested = false;
+        refreshListDisplay();
+      }
+    }
+  });
 
   // Filter tab buttons
   filterTabs.forEach(tab => {

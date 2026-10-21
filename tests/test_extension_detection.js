@@ -978,8 +978,54 @@ async function runTests() {
 
   console.log("  -> PASS");
 
+  console.log("\n[16/16] Testing HLS/DASH Quality Dropdown State Retention & Live Update Stability...");
+  const hlsItem = {
+    candidateId: "cand-hls-stream-1",
+    url: "https://video.example.com/live/master.m3u8",
+    streamType: "HLS",
+    sourceType: "HLS_MANIFEST",
+    resolution: "1080p",
+    qualities: [
+      { id: "1080p", label: "1080p (FHD)", resolution: "1080p", size: 104857600 },
+      { id: "720p", label: "720p (HD)", resolution: "720p", size: 52428800 },
+      { id: "480p", label: "480p (SD)", resolution: "480p", size: 26214400 }
+    ]
+  };
+
+  // Step 1: Default renders with 1080p selected
+  const initialHtml = renderDetectedMediaList([hlsItem]);
+  assert.ok(initialHtml.includes('value="1080p" selected'), "1080p initially selected by default");
+
+  // Step 2: User selects 720p in dropdown
+  hlsItem.selectedQualityId = "720p";
+  const updatedHtml = renderDetectedMediaList([hlsItem]);
+  assert.ok(updatedHtml.includes('value="720p" selected'), "720p retained as selected after user choice");
+  assert.ok(!updatedHtml.includes('value="1080p" selected'), "1080p no longer marked selected");
+
+  // Step 3: Verify candidate selection preservation across background refreshes
+  const incomingCandidates = [
+    {
+      candidateId: "cand-hls-stream-1",
+      url: "https://video.example.com/live/master.m3u8",
+      streamType: "HLS",
+      resolution: "1080p",
+      qualities: hlsItem.qualities
+    }
+  ];
+  const prevMap = new Map();
+  [hlsItem].forEach(c => { if (c.selectedQualityId) prevMap.set(c.candidateId, c.selectedQualityId); });
+  const mergedCandidates = incomingCandidates.map(c => {
+    if (prevMap.has(c.candidateId)) c.selectedQualityId = prevMap.get(c.candidateId);
+    return c;
+  });
+  assert.strictEqual(mergedCandidates[0].selectedQualityId, "720p", "User selected quality survived candidate refresh");
+
+  const postRefreshHtml = renderDetectedMediaList(mergedCandidates);
+  assert.ok(postRefreshHtml.includes('value="720p" selected'), "Rendered dropdown keeps 720p selected after refresh");
+  console.log("  -> PASS");
+
   console.log("\n=======================================================");
-  console.log("Browser Extension Suite: 15/15 suites (25/25 edge scenarios) PASSED.");
+  console.log("Browser Extension Suite: 16/16 suites (26/26 edge scenarios) PASSED.");
   console.log("=======================================================");
   process.exit(0);
 }

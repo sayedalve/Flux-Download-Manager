@@ -442,21 +442,37 @@ function findRecentRequestHeadersForUrl(url) {
   return {};
 }
 
+let popupNotifyTimer = null;
+const pendingNotifyTabs = new Set();
+
 function notifyPopupMediaUpdated(tabId) {
-  if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
-    try {
-      chrome.runtime.sendMessage({ action: "mediaUpdated", tabId }, () => {
-        if (chrome.runtime) void chrome.runtime.lastError;
-      });
-    } catch (_) {}
+  if (typeof tabId === "number" && tabId > 0) {
+    pendingNotifyTabs.add(tabId);
   }
-  if (typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.sendMessage === "function" && typeof tabId === "number" && tabId > 0) {
-    try {
-      chrome.tabs.sendMessage(tabId, { action: "mediaUpdated", tabId }, () => {
-        if (chrome.runtime) void chrome.runtime.lastError;
-      });
-    } catch (_) {}
-  }
+  if (popupNotifyTimer) clearTimeout(popupNotifyTimer);
+  popupNotifyTimer = setTimeout(() => {
+    popupNotifyTimer = null;
+    const tabsToNotify = Array.from(pendingNotifyTabs);
+    pendingNotifyTabs.clear();
+    const targetTab = tabsToNotify.length === 1 ? tabsToNotify[0] : (typeof tabId === "number" ? tabId : null);
+
+    if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+      try {
+        chrome.runtime.sendMessage({ action: "mediaUpdated", tabId: targetTab, tabs: tabsToNotify }, () => {
+          if (chrome.runtime) void chrome.runtime.lastError;
+        });
+      } catch (_) {}
+    }
+    for (const tid of tabsToNotify) {
+      if (typeof chrome !== "undefined" && chrome.tabs && typeof chrome.tabs.sendMessage === "function") {
+        try {
+          chrome.tabs.sendMessage(tid, { action: "mediaUpdated", tabId: tid }, () => {
+            if (chrome.runtime) void chrome.runtime.lastError;
+          });
+        } catch (_) {}
+      }
+    }
+  }, 100);
 }
 
 async function autoProbeManifestQualities(tabId, candidate) {
@@ -2024,6 +2040,18 @@ function handleRuntimeMessage(msg, sender, sendResponse) {
     if (msg.key) {
       if (!G.capturedKeys.has(tabId)) G.capturedKeys.set(tabId, new Set());
       G.capturedKeys.get(tabId).add(msg.key);
+    }
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (msg.action === "updateCandidateQuality") {
+    const list = G.cacheData.get(tabId) || [];
+    const cand = list.find(c => c.candidateId === msg.candidateId);
+    if (cand) {
+      cand.selectedQualityId = msg.qualityId;
+      if (msg.resolution) cand.resolution = msg.resolution;
+      persistSessionState().catch(() => {});
     }
     sendResponse({ success: true });
     return true;

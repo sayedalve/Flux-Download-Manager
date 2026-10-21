@@ -470,11 +470,74 @@ bool TestNativeAnimationsAndTaskbarProgress() {
         ASSERT_TRUE(info.state == TaskbarProgressState::kNormal || info.state == TaskbarProgressState::kIndeterminate,
                     "Downloading task with known size -> kNormal or kIndeterminate");
 
-        // Cancel task -> no progress
-        ctrl.CancelTask(task_ref.task_id);
+        // Paused task -> kPaused state
+        task_ref.state = openidm::TaskState::kPaused;
+        ctrl.UpdateTask(task_ref);
         info = view.ComputeTaskbarProgress();
-        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress || info.state == TaskbarProgressState::kNormal,
-                    "After cancel -> task exits active state");
+        ASSERT_TRUE(info.state == TaskbarProgressState::kPaused, "Paused task -> kPaused");
+        ASSERT_TRUE(info.completed_bytes == 500 && info.total_bytes == 1000, "Paused progress values preserved");
+
+        // Multiple downloads aggregation: add second downloading task
+        openidm::TaskModel t2;
+        t2.task_id = openidm::GenerateUuidV4();
+        t2.url = "https://example.com/file2.bin";
+        t2.file_name = "file2.bin";
+        t2.save_dir = (work_dir / "downloads").string();
+        t2.state = openidm::TaskState::kDownloading;
+        t2.total_bytes = 2000;
+        t2.downloaded_bytes = 1000;
+        ctrl.AddTask(t2, false, false);
+
+        task_ref.state = openidm::TaskState::kDownloading;
+        ctrl.UpdateTask(task_ref);
+
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNormal, "Multiple active downloads -> kNormal");
+        ASSERT_TRUE(info.completed_bytes == 1500 && info.total_bytes == 3000, "Aggregated multi-download progress");
+
+        // Historical failed & canceled tasks must NOT trigger kError when no downloads are active
+        ctrl.CancelTask(task_ref.task_id);
+        ctrl.CancelTask(t2.task_id);
+        
+        auto tasks_after = ctrl.ListTasks();
+        // Set one task to failed and one to canceled in history
+        if (tasks_after.size() >= 2) {
+            tasks_after[0].state = openidm::TaskState::kFailed;
+            ctrl.UpdateTask(tasks_after[0]);
+            tasks_after[1].state = openidm::TaskState::kCanceled;
+            ctrl.UpdateTask(tasks_after[1]);
+        }
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, 
+                    "Historical failed and canceled tasks -> kNoProgress");
+
+        // Complete a download while older failed/canceled tasks remain in history
+        openidm::TaskModel t3;
+        t3.task_id = openidm::GenerateUuidV4();
+        t3.url = "https://example.com/file3.bin";
+        t3.file_name = "file3.bin";
+        t3.save_dir = (work_dir / "downloads").string();
+        t3.state = openidm::TaskState::kDownloading;
+        t3.total_bytes = 5000;
+        t3.downloaded_bytes = 2500;
+        ctrl.AddTask(t3, false, false);
+
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNormal, "Active download with failed/canceled in history -> kNormal");
+        ASSERT_TRUE(info.completed_bytes == 2500 && info.total_bytes == 5000, "Progress only counts active download");
+
+        // Mark active download completed -> must clear to kNoProgress, not turn red (kError)
+        auto all_now = ctrl.ListTasks();
+        for (auto& item : all_now) {
+            if (item.task_id == t3.task_id) {
+                item.state = openidm::TaskState::kCompleted;
+                item.downloaded_bytes = 5000;
+                ctrl.UpdateTask(item);
+            }
+        }
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, 
+                    "Download completion with older failed/canceled tasks in history -> cleanly transitions to kNoProgress");
 
         ctrl.Shutdown();
     }
@@ -2262,6 +2325,14 @@ bool TestSchedulerStopTimesAndPostCompletionActions() {
     t.file_name = "nightly.iso";
     auto add_res = ctrl.AddTask(t, false, true);
     ASSERT_TRUE(add_res.ok(), "Added task");
+
+    // Verify rejection of invalid schedule time format
+    auto bad_sched1 = ctrl.SetTaskSchedule("task-sched-1", "25:00", "06:00");
+    ASSERT_TRUE(!bad_sched1.ok() && bad_sched1.error->code == "ERR_INVALID_SCHEDULE", "Reject invalid hour in start time");
+    auto bad_sched2 = ctrl.SetTaskSchedule("task-sched-1", "02:65", "06:00");
+    ASSERT_TRUE(!bad_sched2.ok() && bad_sched2.error->code == "ERR_INVALID_SCHEDULE", "Reject invalid minute in start time");
+    auto bad_sched3 = ctrl.SetTaskSchedule("task-sched-1", "02:00", "abc");
+    ASSERT_TRUE(!bad_sched3.ok() && bad_sched3.error->code == "ERR_INVALID_SCHEDULE", "Reject non-numeric stop time");
 
     auto set_sched = ctrl.SetTaskSchedule("task-sched-1", "02:00", "06:00");
     ASSERT_TRUE(set_sched.ok(), "SetTaskSchedule succeeded");

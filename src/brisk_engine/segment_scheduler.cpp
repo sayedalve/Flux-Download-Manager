@@ -276,4 +276,34 @@ bool SegmentScheduler::CanSplitAnySegment() const {
     return false;
 }
 
+uint32_t SegmentScheduler::GetMaxConnections() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_max_connections;
+}
+
+void SegmentScheduler::SetMaxConnections(uint32_t conns) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_max_connections = std::clamp(conns, 1u, 32u);
+}
+
+void SegmentScheduler::ReduceConnectionsByHalf() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_max_connections = std::max(1u, m_max_connections / 2u);
+}
+
+void SegmentScheduler::ResetConsecutiveFailures() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_consecutive_failures = 0;
+}
+
+uint32_t SegmentScheduler::IncrementConsecutiveFailures() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return ++m_consecutive_failures;
+}
+
+uint32_t SegmentScheduler::GetConsecutiveFailures() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_consecutive_failures;
+}
+
 } // namespace openidm::brisk

@@ -283,7 +283,27 @@ void PopulateHeaderField(HttpResponseMeta& meta, const std::string& k, const std
     } else if (kl == "content-type") {
         meta.content_type = v;
     } else if (kl == "retry-after") {
-        try { meta.retry_after_sec = std::stoi(v); } catch (...) {}
+        try {
+            meta.retry_after_sec = std::stoi(v);
+        } catch (...) {
+            // Check if Retry-After is an HTTP-date (e.g. "Wed, 21 Oct 2026 07:28:00 GMT")
+            std::tm tm_buf{};
+            std::istringstream ss_date(v);
+            ss_date >> std::get_time(&tm_buf, "%a, %d %b %Y %H:%M:%S");
+            if (!ss_date.fail()) {
+#ifdef _WIN32
+                time_t target_t = _mkgmtime(&tm_buf);
+#else
+                time_t target_t = timegm(&tm_buf);
+#endif
+                time_t now_t = std::time(nullptr);
+                if (target_t > now_t) {
+                    meta.retry_after_sec = static_cast<int>(target_t - now_t);
+                }
+            }
+        }
+        if (meta.retry_after_sec < 0) meta.retry_after_sec = 0;
+        if (meta.retry_after_sec > 3600) meta.retry_after_sec = 3600; // Cap to 1 hour
     }
 }
 
@@ -817,10 +837,13 @@ Result<HttpResponseMeta> HttpClient::PerformGet(
             bool is_retryable = true;
             if (winhttp_err == ERROR_WINHTTP_TIMEOUT || winhttp_err == ERROR_WINHTTP_RESPONSE_DRAIN_OVERFLOW) {
                 err_code = "ERR_NET_TIMEOUT";
-                err_desc = "WinHTTP request timed out waiting for server response (error 12002)";
-            } else if (winhttp_err == ERROR_WINHTTP_CANNOT_CONNECT || winhttp_err == ERROR_WINHTTP_CONNECTION_ERROR) {
+                err_desc = "WinHTTP request timed out waiting for server response (error " + std::to_string(winhttp_err) + ")";
+            } else if (winhttp_err == ERROR_WINHTTP_CANNOT_CONNECT) {
                 err_code = "ERR_NET_CONNECT";
                 err_desc = "WinHTTP cannot connect to server (error " + std::to_string(winhttp_err) + ")";
+            } else if (winhttp_err == ERROR_WINHTTP_CONNECTION_ERROR || winhttp_err == 12030 || winhttp_err == 12031) {
+                err_code = "ERR_NET_CONNECTION_RESET";
+                err_desc = "WinHTTP connection was reset or aborted by server (error " + std::to_string(winhttp_err) + ")";
             } else if (winhttp_err == ERROR_WINHTTP_NAME_NOT_RESOLVED) {
                 err_code = "ERR_NET_DNS";
                 err_desc = "WinHTTP host name could not be resolved (error 12007)";

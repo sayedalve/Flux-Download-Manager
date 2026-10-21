@@ -84,8 +84,21 @@ std::string ExtractExtensionLower(const std::string& filename) {
     return ext;
 }
 
+bool IsValidTimeFormat(const std::string& t) {
+    if (t.empty()) return true;
+    if (t.size() != 5 || t[2] != ':') return false;
+    if (!std::isdigit(static_cast<unsigned char>(t[0])) || !std::isdigit(static_cast<unsigned char>(t[1])) ||
+        !std::isdigit(static_cast<unsigned char>(t[3])) || !std::isdigit(static_cast<unsigned char>(t[4]))) {
+        return false;
+    }
+    int hh = (t[0] - '0') * 10 + (t[1] - '0');
+    int mm = (t[3] - '0') * 10 + (t[4] - '0');
+    return hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59;
+}
+
 bool IsTimeInScheduledWindow(const std::string& cur, const std::string& start, const std::string& stop) {
-    if (cur.size() != 5) return false;
+    if (!IsValidTimeFormat(cur) || cur.empty()) return false;
+    if (!IsValidTimeFormat(start) || !IsValidTimeFormat(stop)) return false;
     if (start.empty() && stop.empty()) return true;
     if (!start.empty() && stop.empty()) {
         return cur >= start;
@@ -1830,6 +1843,12 @@ Result<void> DownloadController::SetTaskSchedule(
     const std::string& task_id,
     const std::string& start_time_local,
     const std::string& stop_time_local) {
+    if (!IsValidTimeFormat(start_time_local)) {
+        return Result<void>::Err("ERR_INVALID_SCHEDULE", "Invalid start time format (expected HH:MM 00:00-23:59)");
+    }
+    if (!IsValidTimeFormat(stop_time_local)) {
+        return Result<void>::Err("ERR_INVALID_SCHEDULE", "Invalid stop time format (expected HH:MM 00:00-23:59)");
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     auto it = m_tasks.find(task_id);
     if (it == m_tasks.end() || m_deleted_tasks.count(task_id)) {

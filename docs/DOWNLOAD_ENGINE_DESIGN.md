@@ -61,6 +61,11 @@ Every secondary worker (`Worker 1 .. N-1`) requests `Range: bytes=<start>-<end>`
 - If HTTP status is **not `206 Partial Content`** (for example, the server ignores the `Range` header and returns `200 OK` from byte 0), the worker **immediately closes the request handle without writing a single byte to disk**, disables further connection spawning for that task, and logs `WARN_SERVER_IGNORED_RANGE`.
 - Furthermore, the worker parses `Content-Range: bytes <resp_start>-<resp_end>/<resp_total>` and verifies `resp_start == requested_start` and `resp_total == task.total_bytes` before writing to disk.
 
+5. **Dynamic Concurrency Scaling & Network Resilience (`FR-003`, `FR-004`):**
+   - **Secondary Range Capability Probe (`Case B`):** If the initial probe returns `200 OK` with `Accept-Ranges: bytes` and `Content-Length > min_split_bytes`, the engine performs an active single-byte verification probe (`Range: bytes=total/2..total/2`). If the server confirms `206 Partial Content`, `range_supported` is upgraded to `true`. If the server rejects the partial request, the engine safely falls back to single-stream sequential downloading.
+   - **HTTP 429 (`Too Many Requests`) Adaptive Recovery:** When a `429` response is encountered during probing or active segment downloads, the engine parses `Retry-After` (supporting integer seconds and RFC 7231 / RFC 1123 HTTP-date formats like `Wed, 21 Oct 2026 07:28:00 GMT`), calls `SegmentScheduler::ReduceConnectionsByHalf()`, disables further segment splitting, and performs a non-blocking cancellation-aware sleep before resuming workers.
+   - **Connection Reset / Server Connection Limit Detection:** On encountering transient connection resets (`ERR_NET_CONNECTION_RESET`, `ERROR_WINHTTP_CONNECTION_ERROR` codes `12030`/`12031`), connection drops (`ERR_NET_CONNECT`), or socket timeouts (`ERR_NET_TIMEOUT`), consecutive failure counters track instability. After `3` consecutive failures, concurrency is halved (`ReduceConnectionsByHalf()`); after `12` cumulative failures without forward progress, the task transitions cleanly to a resumable state.
+
 ---
 
 ## 4. Dynamic Connection Spawning & Work-Stealing Algorithm (`FR-003`)

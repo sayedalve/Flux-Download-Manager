@@ -139,21 +139,23 @@ TaskbarProgressInfo DesktopView::ComputeTaskbarProgress() const {
 
     size_t active_count = 0;
     size_t paused_count = 0;
+    size_t failed_count = 0;
     uint64_t active_completed = 0;
     uint64_t active_total = 0;
-    bool has_indeterminate_active = false;
+    size_t active_with_total = 0;
 
     uint64_t paused_completed = 0;
     uint64_t paused_total = 0;
 
     for (const auto& t : tasks) {
-        if (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || t.state == TaskState::kMuxing) {
+        if (t.state == TaskState::kDownloading || t.state == TaskState::kProbing || 
+            t.state == TaskState::kMuxing || t.state == TaskState::kVerifying || 
+            t.state == TaskState::kFinalizing) {
             active_count++;
-            if (t.state == TaskState::kProbing || t.total_bytes == 0) {
-                has_indeterminate_active = true;
-            } else {
+            if (t.total_bytes > 0) {
                 active_completed += t.downloaded_bytes;
                 active_total += t.total_bytes;
+                active_with_total++;
             }
         } else if (t.state == TaskState::kPaused) {
             paused_count++;
@@ -161,11 +163,13 @@ TaskbarProgressInfo DesktopView::ComputeTaskbarProgress() const {
                 paused_completed += t.downloaded_bytes;
                 paused_total += t.total_bytes;
             }
+        } else if (t.state == TaskState::kFailed) {
+            failed_count++;
         }
     }
 
     if (active_count > 0) {
-        if (has_indeterminate_active || active_total == 0) {
+        if (active_with_total == 0 || active_total == 0) {
             info.state = TaskbarProgressState::kIndeterminate;
         } else {
             info.state = TaskbarProgressState::kNormal;
@@ -181,6 +185,9 @@ TaskbarProgressInfo DesktopView::ComputeTaskbarProgress() const {
             info.progress_fraction = static_cast<double>(paused_completed) / static_cast<double>(paused_total);
         }
     } else {
+        // When there are no active or paused downloads, clear taskbar progress completely.
+        // Historical completed, failed, or canceled downloads in the task list must NOT keep
+        // the taskbar in an error or progress state.
         info.state = TaskbarProgressState::kNoProgress;
     }
 
@@ -3124,6 +3131,7 @@ constexpr int IDM_CTX_COPY_URL      = 3019;
 constexpr int IDM_CTX_REFRESH_URL   = 3020;
 constexpr int IDM_CTX_ADD_MIRROR    = 3021;
 constexpr int IDM_CTX_SCHEDULE      = 3022;
+constexpr int IDM_CTX_SPEED_LIMIT   = 3024;
 constexpr int IDM_CTX_FILE_INTEGRITY = 3023;
 
 struct Win32WindowContext {
@@ -3139,13 +3147,142 @@ struct Win32WindowContext {
     bool is_vscroll_hovered{false};
     ITaskbarList3* pTaskbarList{nullptr};
     bool com_initialized{false};
+    TaskbarProgressInfo last_taskbar_info{};
+    bool taskbar_info_initialized{false};
 };
 
-void SyncTaskbarProgress(HWND hwnd, ITaskbarList3* pTaskbar, const DesktopView& view) {
+// Modern Edit Control Subclass: custom padding, Segoe UI typography, subtle borders, and Coral Red focus glow
+constexpr UINT_PTR SUBCLASS_MODERN_EDIT_ID = 9001;
+
+struct ModernEditData {
+    bool is_focused{false};
+    bool is_hovered{false};
+    int pad_x{8};
+    int pad_y{4};
+    int radius{6};
+};
+
+LRESULT CALLBACK ModernEditSubclassProc(
+    HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
+    auto* data = reinterpret_cast<ModernEditData*>(dwRefData);
+    if (!data) return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+
+    switch (uMsg) {
+        case WM_SETFOCUS: {
+            data->is_focused = true;
+            InvalidateRect(hWnd, nullptr, FALSE);
+            break;
+        }
+        case WM_KILLFOCUS: {
+            data->is_focused = false;
+            InvalidateRect(hWnd, nullptr, FALSE);
+            break;
+        }
+        case WM_MOUSEMOVE: {
+            if (!data->is_hovered) {
+                data->is_hovered = true;
+                TRACKMOUSEEVENT tme{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hWnd, 0};
+                TrackMouseEvent(&tme);
+                InvalidateRect(hWnd, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            data->is_hovered = false;
+            InvalidateRect(hWnd, nullptr, FALSE);
+            break;
+        }
+        case WM_PAINT: {
+            LRESULT res = DefSubclassProc(hWnd, uMsg, wParam, lParam);
+            // Draw modern border over non-client / border region
+            HDC hdc = GetWindowDC(hWnd);
+            if (hdc) {
+                RECT wr{};
+                GetWindowRect(hWnd, &wr);
+                RECT rc{0, 0, wr.right - wr.left, wr.bottom - wr.top};
+                bool is_enabled = IsWindowEnabled(hWnd) != FALSE;
+                
+                // Color choices matching Radium design system:
+                // Focus: Coral Red #FF4F57
+                // Hover: #555866
+                // Normal: #3E404A
+                // Disabled: #2A2A30
+                COLORREF border_clr = !is_enabled ? RGB(0x2A, 0x2A, 0x30)
+                                      : (data->is_focused ? RGB(0xFF, 0x4F, 0x57)
+                                      : (data->is_hovered ? RGB(0x55, 0x58, 0x66) : RGB(0x3E, 0x40, 0x4A)));
+                
+                HBRUSH hBorderBrush = CreateSolidBrush(border_clr);
+                FrameRect(hdc, &rc, hBorderBrush);
+                DeleteObject(hBorderBrush);
+
+                // Subtle inner accent line when focused for a crisp, high-DPI modern border feel
+                if (data->is_focused && is_enabled) {
+                    RECT inner_rc = rc;
+                    InflateRect(&inner_rc, -1, -1);
+                    HBRUSH hGlowBrush = CreateSolidBrush(RGB(0x80, 0x27, 0x2B));
+                    FrameRect(hdc, &inner_rc, hGlowBrush);
+                    DeleteObject(hGlowBrush);
+                }
+                ReleaseDC(hWnd, hdc);
+            }
+            return res;
+        }
+        case WM_NCPAINT: {
+            // Suppress standard Windows 3D border painting
+            return 0;
+        }
+        case WM_NCDESTROY: {
+            RemoveWindowSubclass(hWnd, ModernEditSubclassProc, uIdSubclass);
+            delete data;
+            break;
+        }
+    }
+    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
+}
+
+void InstallModernEditControl(HWND hEdit, uint32_t dpi = 96) {
+    if (!hEdit) return;
+    int pad_x = DesignSystem::ScaleForDpi(8, dpi);
+    int pad_y = DesignSystem::ScaleForDpi(4, dpi);
+    int r = DesignSystem::ScaleForDpi(6, dpi);
+    SendMessageW(hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(pad_x, pad_x));
+
+    auto* data = new ModernEditData{false, false, pad_x, pad_y, r};
+    SetWindowSubclass(hEdit, ModernEditSubclassProc, SUBCLASS_MODERN_EDIT_ID, reinterpret_cast<DWORD_PTR>(data));
+}
+
+void SyncTaskbarProgress(HWND hwnd, ITaskbarList3* pTaskbar, const DesktopView& view, Win32WindowContext* ctx) {
     if (!hwnd || !pTaskbar) return;
     auto info = view.ComputeTaskbarProgress();
+    
+    // Prevent flickering: check if taskbar state or relevant values actually changed
+    if (ctx && ctx->taskbar_info_initialized) {
+        if (ctx->last_taskbar_info.state == info.state &&
+            ctx->last_taskbar_info.total_bytes == info.total_bytes) {
+            if (info.state == TaskbarProgressState::kNoProgress ||
+                info.state == TaskbarProgressState::kIndeterminate ||
+                info.state == TaskbarProgressState::kError) {
+                return; // Nothing changed, skip redundant Win32 ITaskbarList3 COM dispatch
+            }
+            if (info.state == TaskbarProgressState::kNormal || info.state == TaskbarProgressState::kPaused) {
+                // If progress value delta is identical or negligible, skip
+                if (ctx->last_taskbar_info.completed_bytes == info.completed_bytes) {
+                    return;
+                }
+            }
+        }
+    }
+
+    if (ctx) {
+        ctx->last_taskbar_info = info;
+        ctx->taskbar_info_initialized = true;
+    }
+
     switch (info.state) {
         case TaskbarProgressState::kNoProgress:
+            // Explicitly clear progress value and clear any stale flags
+            pTaskbar->SetProgressValue(hwnd, 0, 1);
             pTaskbar->SetProgressState(hwnd, TBPF_NOPROGRESS);
             break;
         case TaskbarProgressState::kIndeterminate:
@@ -3416,19 +3553,21 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
             // URL Edit
             int y_url = DesignSystem::ScaleForDpi(82, dpi);
-            ctx->hUrlEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            ctx->hUrlEdit = CreateWindowExW(0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 pad_x, y_url, full_w, edit_h, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5001)), hInst, nullptr);
             SendMessageW(ctx->hUrlEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
             SendMessageW(ctx->hUrlEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Paste or enter download URL (HTTP, HTTPS, FTP, or video link)..."));
+            InstallModernEditControl(ctx->hUrlEdit, dpi);
 
             // Filename Edit
             int y_fn = DesignSystem::ScaleForDpi(142, dpi);
-            ctx->hFilenameEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            ctx->hFilenameEdit = CreateWindowExW(0, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 pad_x, y_fn, full_w, edit_h, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5002)), hInst, nullptr);
             SendMessageW(ctx->hFilenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
             SendMessageW(ctx->hFilenameEdit, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"File name (leave blank to auto-detect from server)"));
+            InstallModernEditControl(ctx->hFilenameEdit, dpi);
 
             // Save Dir Edit & Browse Button
             auto s = ctx->controller->GetSettings();
@@ -3436,10 +3575,11 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int y_dir = DesignSystem::ScaleForDpi(202, dpi);
             int browse_w = DesignSystem::ScaleForDpi(100, dpi);
             int dir_w = full_w - browse_w - DesignSystem::ScaleForDpi(10, dpi);
-            ctx->hSaveDirEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", def_dir.c_str(),
+            ctx->hSaveDirEdit = CreateWindowExW(0, L"EDIT", def_dir.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 pad_x, y_dir, dir_w, edit_h, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5003)), hInst, nullptr);
             SendMessageW(ctx->hSaveDirEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            InstallModernEditControl(ctx->hSaveDirEdit, dpi);
 
             ctx->hBrowseBtn = CreateWindowExW(0, L"BUTTON", L"Browse...",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON | BS_OWNERDRAW,
@@ -3613,12 +3753,13 @@ LRESULT CALLBACK NewDownloadDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5010)), hInst, nullptr);
             SendMessageW(ctx->hScheduleChk, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
 
-            ctx->hScheduleTimeEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"23:00",
+            ctx->hScheduleTimeEdit = CreateWindowExW(0, L"EDIT", L"23:00",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | WS_DISABLED,
                 pad_x + sched_w + DesignSystem::ScaleForDpi(8, dpi), y_sched,
                 DesignSystem::ScaleForDpi(80, dpi), DesignSystem::ScaleForDpi(24, dpi),
                 hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(5011)), hInst, nullptr);
             SendMessageW(ctx->hScheduleTimeEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
+            InstallModernEditControl(ctx->hScheduleTimeEdit, dpi);
 
             // Download & Cancel Action Buttons
             int y_btn = DesignSystem::ScaleForDpi(404, dpi);
@@ -4333,11 +4474,12 @@ LRESULT CALLBACK SimpleInputDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ctx->hEditBrush = CreateSolidBrush(RGB(0x20, 0x20, 0x28));
 
             HINSTANCE hInst = GetModuleHandleW(nullptr);
-            ctx->hEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->initial_value.c_str(),
+            ctx->hEdit = CreateWindowExW(0, L"EDIT", ctx->initial_value.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                 24, 60, 432, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(7001)), hInst, nullptr);
             SendMessageW(ctx->hEdit, WM_SETFONT, reinterpret_cast<WPARAM>(ctx->hFontBody), TRUE);
             SendMessageW(ctx->hEdit, EM_SETSEL, 0, -1);
+            InstallModernEditControl(ctx->hEdit, 96);
 
             ctx->hOkBtn = CreateWindowExW(0, L"BUTTON", L"OK",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -6737,6 +6879,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_REFRESH_URL, L"Change / Refresh URL...");
             AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_ADD_MIRROR, L"Add Mirror URL...");
             AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_SCHEDULE, L"Schedule Download...");
+            AppendMenuW(hMenu, has_sel ? MF_STRING : MF_STRING | MF_GRAYED, IDM_CTX_SPEED_LIMIT, L"Set Speed Limit...");
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
 
             // Group 4: Integrity & Security
@@ -6836,6 +6979,27 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                             } else {
                                 MessageBoxW(hwnd, Utf8ToW(r.error->message).c_str(), L"Failed to Add Mirror", MB_OK | MB_ICONERROR);
                             }
+                        }
+                    }
+                }
+            } else if (cmd == IDM_CTX_SPEED_LIMIT) {
+                if (has_sel) {
+                    uint64_t cur_limit = sel_task->speed_limit_bps;
+                    std::wstring init_val = (cur_limit > 0) ? std::to_wstring(cur_limit / 1024) : L"0";
+                    std::wstring val_w;
+                    if (ShowSimpleInputDialogWin32(hwnd, L"Set Download Speed Limit", L"Enter speed limit in KB/s (0 = Unlimited):", init_val, val_w)) {
+                        std::string val_str = WToUtf8(val_w);
+                        try {
+                            uint64_t kbps = std::stoull(val_str);
+                            uint64_t bps = kbps * 1024ULL;
+                            auto r = ctx->controller->SetTaskSpeedLimit(sel, bps);
+                            if (r.ok()) {
+                                ctx->view->SetFeedbackMessage((bps == 0) ? "Task speed limit set to Unlimited" : ("Task speed limit set to " + DesktopView::FormatSpeed(bps)));
+                            } else {
+                                MessageBoxW(hwnd, Utf8ToW(r.error->message).c_str(), L"Speed Limit Failed", MB_OK | MB_ICONWARNING);
+                            }
+                        } catch (...) {
+                            MessageBoxW(hwnd, L"Invalid speed limit number entered.", L"Invalid Input", MB_OK | MB_ICONWARNING);
                         }
                     }
                 }
@@ -7048,7 +7212,7 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_TIMER: {
             if (wParam == IDT_UI_REFRESH) {
                 // Sync Windows taskbar progress indicator
-                SyncTaskbarProgress(hwnd, ctx->pTaskbarList, *ctx->view);
+                SyncTaskbarProgress(hwnd, ctx->pTaskbarList, *ctx->view, ctx);
                 // Always repaint: active downloads, smooth animations, icon pulses
                 InvalidateRect(hwnd, nullptr, FALSE);
             }

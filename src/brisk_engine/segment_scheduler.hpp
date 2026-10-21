@@ -64,12 +64,21 @@ public:
     size_t ActiveWorkerCount() const;
     bool CanSplitAnySegment() const;
 
+    // Concurrency and rate limiting management
+    uint32_t GetMaxConnections() const;
+    void SetMaxConnections(uint32_t conns);
+    void ReduceConnectionsByHalf();
+    void ResetConsecutiveFailures();
+    uint32_t IncrementConsecutiveFailures();
+    uint32_t GetConsecutiveFailures() const;
+
 private:
     mutable std::mutex m_mutex;
     uint64_t m_total_bytes{0};
     uint32_t m_max_connections{8};
     uint64_t m_min_split_bytes{262144}; // Default 256 KiB min split remainder
     uint32_t m_next_segment_id{0};
+    uint32_t m_consecutive_failures{0};
     std::vector<std::shared_ptr<LiveSegment>> m_segments;
 };
 

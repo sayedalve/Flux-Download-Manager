@@ -89,15 +89,50 @@ class ControlledTestHttpServer(http.server.BaseHTTPRequestHandler):
             seed = int(idx) if idx.isdigit() else 1
             payload = bytes([(i + seed) % 256 for i in range(1024 * 1024)]) # 1 MiB each
             self._serve_buffer(payload, filename=f"concurrent_{idx}.bin")
+        elif path == "/files/norange_fallback.bin":
+            # Explicit Non-Range server returning Accept-Ranges: none with Content-Length
+            self._serve_buffer(PAYLOAD_MEDIUM, filename="norange_fallback.bin", support_range=False)
+        elif path == "/files/rate_limited_429.bin":
+            rng_hdr = self.headers.get("Range", "")
+            # Always serve the range-capability probe (bytes=0-0) normally so the
+            # engine can detect Accept-Ranges / Content-Length before rate-limiting.
+            # The 429 fires only on the first real segment download request.
+            if rng_hdr == "bytes=0-0":
+                self._serve_buffer(PAYLOAD_MEDIUM, filename="rate_limited_429.bin", support_range=True)
+            elif getattr(ControlledTestHttpServer, "_hit_429", False) is False:
+                ControlledTestHttpServer._hit_429 = True
+                self.send_response(429)
+                self.send_header("Retry-After", "1")
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", "18")
+                self.end_headers()
+                self.wfile.write(b"Too Many Requests\n")
+            else:
+                self._serve_buffer(PAYLOAD_MEDIUM, filename="rate_limited_429.bin", support_range=True)
+        elif path == "/files/reset_drop.bin":
+            if getattr(ControlledTestHttpServer, "_hit_reset", False) is False:
+                ControlledTestHttpServer._hit_reset = True
+                self.send_response(206)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes 0-{len(PAYLOAD_MEDIUM)-1}/{len(PAYLOAD_MEDIUM)}")
+                self.send_header("Content-Length", str(len(PAYLOAD_MEDIUM)))
+                self.end_headers()
+                self.wfile.write(PAYLOAD_MEDIUM[:32768])
+                # Premature abort to trigger connection reset
+                self.close_connection = True
+                return
+            else:
+                self._serve_buffer(PAYLOAD_MEDIUM, filename="reset_drop.bin", support_range=True)
         else:
             self.send_response(404)
             self.end_headers()
 
-    def _serve_buffer(self, buf: bytes, filename: str):
+    def _serve_buffer(self, buf: bytes, filename: str, support_range: bool = True):
         total = len(buf)
         rng = self.headers.get("Range")
         mv = memoryview(buf)
-        if rng and rng.startswith("bytes="):
+        if support_range and rng and rng.startswith("bytes="):
             spec = rng.split("=", 1)[1].strip()
             s_str, e_str = spec.split("-", 1)
             start = int(s_str) if s_str else 0
@@ -118,7 +153,10 @@ class ControlledTestHttpServer(http.server.BaseHTTPRequestHandler):
         else:
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Accept-Ranges", "bytes")
+            if support_range:
+                self.send_header("Accept-Ranges", "bytes")
+            else:
+                self.send_header("Accept-Ranges", "none")
             self.send_header("Content-Length", str(total))
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.end_headers()
@@ -329,6 +367,58 @@ def run_test_suite(radium_bin: Path, nmh_bin: Path) -> dict:
             record("TC-CORE-07: Pause/Resume Byte Offset & Full Integrity Check", has_paused and resumed_ok, "Pre-existing partial file was resumed to 100% SHA-256 match")
         except Exception as e:
             record("TC-CORE-07: Pause/Resume Byte Offset & Full Integrity Check", False, str(e))
+
+        # 8. Non-Range Server Single Stream Fallback
+        try:
+            url_norange = f"{base_url}/files/norange_fallback.bin"
+            nr_db = tmp_dir / "norange.db"
+            nr_res = subprocess.run(
+                [str(radium_bin), "--db", str(nr_db), "--out", str(dl_dir), "--allow-loopback", "--download", url_norange],
+                capture_output=True, text=True
+            )
+            nr_file = dl_dir / "norange_fallback.bin"
+            if not nr_file.exists():
+                nr_file = dl_dir / "General" / "norange_fallback.bin"
+            nr_ok = nr_res.returncode == 0 and nr_file.is_file() and hashlib.sha256(nr_file.read_bytes()).hexdigest() == HASH_MEDIUM
+            record("TC-CORE-08: Non-Range Server Single Stream Fallback", nr_ok, "Non-range server downloaded bit-exact in single-stream mode")
+        except Exception as e:
+            record("TC-CORE-08: Non-Range Server Single Stream Fallback", False, str(e))
+
+        # 9. HTTP 429 Rate Limiting with Retry-After Backoff
+        try:
+            ControlledTestHttpServer._hit_429 = False
+            url_429 = f"{base_url}/files/rate_limited_429.bin"
+            r429_db = tmp_dir / "rate_limit_429.db"
+            t0_429 = time.time()
+            r429_res = subprocess.run(
+                [str(radium_bin), "--db", str(r429_db), "--out", str(dl_dir), "--allow-loopback", "--download", url_429],
+                capture_output=True, text=True
+            )
+            elapsed_429 = time.time() - t0_429
+            r429_file = dl_dir / "rate_limited_429.bin"
+            if not r429_file.exists():
+                r429_file = dl_dir / "General" / "rate_limited_429.bin"
+            r429_ok = r429_res.returncode == 0 and r429_file.is_file() and hashlib.sha256(r429_file.read_bytes()).hexdigest() == HASH_MEDIUM and elapsed_429 >= 0.5
+            record("TC-CORE-09: HTTP 429 Rate Limiting & Retry-After Recovery", r429_ok, f"Handled 429 with backoff in {elapsed_429:.2f}s and verified SHA-256")
+        except Exception as e:
+            record("TC-CORE-09: HTTP 429 Rate Limiting & Retry-After Recovery", False, str(e))
+
+        # 10. Transient Connection Reset & Exact Resume
+        try:
+            ControlledTestHttpServer._hit_reset = False
+            url_reset = f"{base_url}/files/reset_drop.bin"
+            reset_db = tmp_dir / "reset_drop.db"
+            reset_res = subprocess.run(
+                [str(radium_bin), "--db", str(reset_db), "--out", str(dl_dir), "--allow-loopback", "--download", url_reset],
+                capture_output=True, text=True
+            )
+            reset_file = dl_dir / "reset_drop.bin"
+            if not reset_file.exists():
+                reset_file = dl_dir / "General" / "reset_drop.bin"
+            reset_ok = reset_res.returncode == 0 and reset_file.is_file() and hashlib.sha256(reset_file.read_bytes()).hexdigest() == HASH_MEDIUM
+            record("TC-CORE-10: Connection Reset Auto-Recovery & Resumption", reset_ok, "Recovered from mid-stream connection reset and verified SHA-256")
+        except Exception as e:
+            record("TC-CORE-10: Connection Reset Auto-Recovery & Resumption", False, str(e))
 
     finally:
         server.shutdown()

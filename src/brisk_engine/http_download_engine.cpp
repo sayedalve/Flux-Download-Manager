@@ -167,6 +167,38 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         nullptr,
         m_cfg.net_opts);
 
+    // FDM-020: If probe is rate-limited (HTTP 429), back off using Retry-After
+    // and retry the probe once. Servers may apply per-IP rate limits to all
+    // requests, including the initial range-capability probe (bytes=0-0).
+    if (probe_meta.status_code == 429 ||
+        (!probe_res.ok() && probe_res.error && probe_res.error->code == "ERR_HTTP_429_RATE_LIMITED")) {
+        int wait_sec = (probe_meta.retry_after_sec > 0) ? std::min(probe_meta.retry_after_sec, 30) : 2;
+        OPENIDM_LOG_WARN("HttpEngine", "Task " + task.task_id + ": Probe received HTTP 429; waiting "
+                             + std::to_string(wait_sec) + "s then retrying probe...");
+        for (int slept = 0; slept < wait_sec * 1000; slept += 50) {
+            if (pause_requested.load() || cancel_requested.load()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, wait_sec * 1000 - slept)));
+        }
+        if (!pause_requested.load() && !cancel_requested.load()) {
+            probe_cancel.store(false);
+            probe_meta = {};
+            probe_res = HttpClient::PerformGet(
+                task.url,
+                req_headers,
+                0,
+                0,
+                m_cfg.stall_timeout_ms,
+                m_cfg.allow_loopback_redirect,
+                probe_cancel,
+                [&](const HttpResponseMeta& meta) -> HeaderAction {
+                    probe_meta = meta;
+                    return HeaderAction::kStopSuccess;
+                },
+                nullptr,
+                m_cfg.net_opts);
+        }
+    }
+
     // FDM-017: If server returned 416 Range Not Satisfiable during range probe (common for 0-byte files), retry un-ranged GET
     if (probe_meta.status_code == 416) {
         probe_cancel.store(false);
@@ -232,6 +264,34 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         total_bytes = probe_meta.range_total;
     } else if (probe_meta.has_content_length) {
         total_bytes = probe_meta.content_length;
+    }
+
+    // Secondary Range capability probe if server answered 200 OK with Accept-Ranges: bytes and Content-Length > 128 KiB
+    if (!range_supported && probe_meta.status_code == 200 && probe_meta.accept_ranges_bytes && total_bytes > m_cfg.min_split_bytes) {
+        OPENIDM_LOG_INFO("HttpEngine", "Probe received 200 OK with Accept-Ranges: bytes; performing secondary range verification probe...");
+        HttpResponseMeta sec_meta;
+        std::atomic<bool> sec_cancel{false};
+        uint64_t test_start = total_bytes / 2;
+        auto sec_res = HttpClient::PerformGet(
+            task.url,
+            req_headers,
+            test_start,
+            test_start,
+            m_cfg.stall_timeout_ms,
+            m_cfg.allow_loopback_redirect,
+            sec_cancel,
+            [&](const HttpResponseMeta& meta) -> HeaderAction {
+                sec_meta = meta;
+                return HeaderAction::kStopSuccess;
+            },
+            nullptr,
+            m_cfg.net_opts);
+        if (sec_res.ok() && sec_meta.status_code == 206 && sec_meta.is_partial_content) {
+            range_supported = true;
+            OPENIDM_LOG_INFO("HttpEngine", "Secondary range probe confirmed HTTP 206 Range capability!");
+        } else {
+            OPENIDM_LOG_INFO("HttpEngine", "Secondary range probe rejected HTTP 206 (status " + std::to_string(sec_meta.status_code) + "); falling back to single stream");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -556,6 +616,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
 
                     std::atomic<bool> req_cancel{false};
                     bool server_ignored_range = false;
+                    int captured_retry_after_sec = 0; // captured from on_headers for 429 backoff
 
                     auto res = HttpClient::PerformGet(
                         task.url,
@@ -566,6 +627,7 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         m_cfg.allow_loopback_redirect,
                         req_cancel,
                         [&](const HttpResponseMeta& meta) -> HeaderAction {
+                            captured_retry_after_sec = meta.retry_after_sec;
                             if (meta.status_code == 416) {
                                 if (curr == 0 && (total_bytes == 0 || meta.range_total == 0)) {
                                     seg->completed.store(true);
@@ -667,10 +729,33 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                     }
 
                     if (!res.ok()) {
+                        uint32_t fail_streak = scheduler.IncrementConsecutiveFailures();
+                        int retry_after_ms = 0;
+
                         if (res.error->code == "ERR_HTTP_429_RATE_LIMITED") {
                             disable_splitting.store(true);
+                            scheduler.ReduceConnectionsByHalf();
+                            retry_after_ms = (captured_retry_after_sec > 0)
+                                                ? (captured_retry_after_sec * 1000)
+                                                : 2000;
+                            OPENIDM_LOG_WARN("BriskEngine", "HTTP 429 Rate Limited on segment #" +
+                                std::to_string(seg->segment_id) + "; reduced target concurrency to " +
+                                std::to_string(scheduler.GetMaxConnections()) + ", waiting " +
+                                std::to_string(retry_after_ms) + " ms");
+                        } else if (res.error->code == "ERR_NET_CONNECTION_RESET" ||
+                                   res.error->code == "ERR_NET_CONNECT" ||
+                                   res.error->code == "ERR_NET_TIMEOUT" ||
+                                   res.error->code == "ERR_NET_SEND") {
+                            if (fail_streak >= 3) {
+                                // Server connection limit or repeated network drop detected
+                                scheduler.ReduceConnectionsByHalf();
+                                OPENIDM_LOG_WARN("BriskEngine", "Server connection limit/reset streak (" +
+                                    std::to_string(fail_streak) + "); scaled down concurrency to " +
+                                    std::to_string(scheduler.GetMaxConnections()));
+                            }
                         }
-                        if (!res.error->retryable || retries >= m_cfg.max_retries_per_worker) {
+
+                        if (!res.error->retryable || retries >= m_cfg.max_retries_per_worker || fail_streak > 12) {
                             seg->active_worker.store(false);
                             std::lock_guard<std::mutex> lk(err_mu);
                             if (!fatal_error.has_value()) {
@@ -682,9 +767,18 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         ++retries;
                         OPENIDM_LOG_INFO("BriskEngine", "Resetting stalled/failed segment connection #" +
                             std::to_string(seg->segment_id) + " at offset " + std::to_string(seg->current_offset.load()) +
-                            " (retry " + std::to_string(retries) + ")");
-                        int backoff_ms = std::min(3000, (50 * (1 << std::min(retries, 5))) + (std::rand() % 100));
-                        std::this_thread::sleep_for(std::chrono::milliseconds(backoff_ms));
+                            " (retry " + std::to_string(retries) + ", streak " + std::to_string(fail_streak) + ")");
+
+                        int exp_backoff = (100 * (1 << std::min(retries, 6))) + (std::rand() % 150);
+                        int backoff_ms = std::max(retry_after_ms, exp_backoff);
+                        backoff_ms = std::min(backoff_ms, 15000); // Bound backoff
+
+                        for (int slept = 0; slept < backoff_ms; slept += 50) {
+                            if (fatal_abort.load() || pause_requested.load() || cancel_requested.load()) break;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, backoff_ms - slept)));
+                        }
+                    } else {
+                        scheduler.ResetConsecutiveFailures();
                     }
                 }
             }
@@ -711,7 +805,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         while (!scheduler.AllCompleted() && !fatal_abort.load() && !pause_requested.load() && !cancel_requested.load()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-            if (running_workers.load() < max_conns && spawned < (max_conns * 8) && !disable_splitting.load() &&
+            uint32_t dynamic_max = std::min(max_conns, scheduler.GetMaxConnections());
+            if (running_workers.load() < dynamic_max && spawned < (dynamic_max * 8) && !disable_splitting.load() &&
                 scheduler.CanSplitAnySegment()) {
                 workers.emplace_back(worker_fn, spawned++);
             }

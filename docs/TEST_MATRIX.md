@@ -115,6 +115,23 @@
 
 ---
 
+### 1.3b Core Operations, Concurrency & Resilience Suites (`python tests/test_core_operations.py` — `10 / 10 PASSED`)
+
+| Test ID | Test Scenario (`tests/test_core_operations.py`) | Mapped Requirements & Invariants | Verification Category | Result |
+| :--- | :--- | :--- | :--- | :--- |
+| **`TC-CORE-01`** | Application Startup & CLI Version Check (`--version`) | `FR-028`, `NFR-002` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-02`** | Core Multi-Connection Segmented Download & SHA-256 Check | `FR-001`, `FR-003`, `FR-007` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-03`** | SQLite Schema, WAL Mode & Task Persistence | `FR-005`, `NFR-005` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-04`** | AppSettings Configuration Persistence Across Invocations | `FR-024`, `FR-025` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-05`** | Desktop UI Virtual View & Snapshot Rendering | `FR-011`, `NFR-004` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-06`** | Concurrent Multi-Task Queue Execution | `FR-024`, `NFR-003` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-07`** | Pause/Resume Byte Offset & Full Integrity Check | `FR-004`, `FR-005` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-08`** | Non-Range Server Single Stream Fallback (`Accept-Ranges: none`) | `FR-002`, `BUG-008` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-09`** | HTTP 429 Rate Limiting & Retry-After Recovery | `FR-003`, `FR-004`, `NFR-005` | `Verified by Execution` | **PASSED** |
+| **`TC-CORE-10`** | Connection Reset Auto-Recovery & Resumption | `FR-004`, `NFR-005` | `Verified by Execution` | **PASSED** |
+
+---
+
 ### 1.4 Clean Installation Smoke & Recovery Suites (`python tests/test_installer_smoke.py` — `8 / 8 PASSED`)
 
 | Suite # | Test Scenario (`tests/test_installer_smoke.py`) | Mapped Requirements & Invariants | Verification Category | Result |

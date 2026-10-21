@@ -809,8 +809,29 @@ async function transferBlobToFlux(tabId, blobUrl, filename, mime, correlationId,
   let directTotalBytes = 0;
   let directMime = mime || "application/octet-stream";
 
-  // 1. Direct Background Service Worker fetch (immune to webpage CSP)
-  if (blobUrl && blobUrl.startsWith("blob:") && typeof fetch === "function") {
+  // 1a. Direct data: URL parsing (RFC 2397)
+  if (blobUrl && blobUrl.startsWith("data:")) {
+    try {
+      const commaIdx = blobUrl.indexOf(",");
+      if (commaIdx >= 0) {
+        const metaPart = blobUrl.slice(5, commaIdx);
+        const dataPart = blobUrl.slice(commaIdx + 1);
+        if (metaPart.includes(";base64")) {
+          directDataB64 = dataPart;
+          directTotalBytes = Math.round(dataPart.length * 0.75);
+        } else {
+          const decoded = decodeURIComponent(dataPart);
+          directTotalBytes = decoded.length;
+          directDataB64 = btoa(unescape(encodeURIComponent(decoded)));
+        }
+        const mimeMatch = metaPart.match(/^([^;]+)/);
+        if (mimeMatch) directMime = mimeMatch[1];
+      }
+    } catch (_) {}
+  }
+
+  // 1b. Direct Background Service Worker fetch for blob: URLs (immune to webpage CSP)
+  if (!directDataB64 && blobUrl && blobUrl.startsWith("blob:") && typeof fetch === "function") {
     try {
       const resp = await fetch(blobUrl);
       if (resp && resp.ok) {
@@ -1002,22 +1023,21 @@ async function onDownloadCreatedHandler(
   const isInternal = downloadItem.byExtensionId || targetUrl.startsWith("chrome-extension:") || targetUrl.startsWith("chrome:") || targetUrl.startsWith("brave:");
   const isWebBlob = targetUrl.startsWith("blob:http://") || targetUrl.startsWith("blob:https://");
 
-  // 3. Extension-internal and data URLs must stay in browser memory without disrupting user gestures.
-  // Web blob URLs (e.g. ChatGPT artifacts) proceed to eligibility check and chunked transfer!
-  if ((isBlob && !isWebBlob) || isData || isInternal) {
+  // 3. Extension-internal URLs must stay in browser memory without disrupting user gestures.
+  if (isInternal) {
     rec.state = "IGNORED";
     invokeSuggest();
     if (!customTransport && typeof chrome !== "undefined" && chrome.downloads && typeof chrome.downloads.resume === "function" && downloadItem.id !== undefined) {
       try { chrome.downloads.resume(downloadItem.id, () => { if (chrome.runtime) void chrome.runtime.lastError; }); } catch (_) {}
     }
-    const mechanism = isBlob ? "BROWSER_BLOB_OR_DATA" : (isData ? "BROWSER_DATA_DOWNLOAD" : "BROWSER_INTERNAL_OR_EXTENSION");
+    const mechanism = "BROWSER_INTERNAL_OR_EXTENSION";
     logPipelineStage(rec.correlationId, "DOWNLOAD_DELEGATED_TO_BROWSER", {
       downloadId: rec.downloadId,
       mechanism,
       stage: "STAGE_DELEGATION",
       filename: downloadItem.filename,
       url: targetUrl.slice(0, 64),
-      reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
+      reason: "URL_IS_INTERNAL_OR_EXTENSION_TRANSFERRING_VIA_BROWSER"
     });
     logPipelineStage(rec.correlationId, "DELEGATED_TO_BROWSER", {
       downloadId: rec.downloadId,
@@ -1025,9 +1045,9 @@ async function onDownloadCreatedHandler(
       stage: "STAGE_DELEGATION",
       filename: downloadItem.filename,
       url: targetUrl.slice(0, 64),
-      reason: "URL_IS_IN_MEMORY_OR_INTERNAL_TRANSFERRING_BYTES_VIA_BROWSER"
+      reason: "URL_IS_INTERNAL_OR_EXTENSION_TRANSFERRING_VIA_BROWSER"
     });
-    return { intercepted: false, reason: "EXTENSION_OR_BLOB_URL", mechanism };
+    return { intercepted: false, reason: "BROWSER_INTERNAL_PAGE", mechanism };
   }
 
   // 4. In Chromium/Brave/Edge, onCreated fires first. Pause the download immediately so no bytes transfer
@@ -1267,11 +1287,11 @@ async function onDownloadCreatedHandler(
       });
 
       let result;
-      if (isWebBlob) {
-        logPipelineStage(rec.correlationId, "BLOB_CHUNKED_TRANSFER_INITIATED", {
+      if (isBlob || isData) {
+        logPipelineStage(rec.correlationId, isData ? "DATA_URL_TRANSFER_INITIATED" : "BLOB_CHUNKED_TRANSFER_INITIATED", {
           downloadId: rec.downloadId,
           tabId: effectiveTabId,
-          url: targetUrl,
+          url: targetUrl.slice(0, 80),
           filename: cleanFilename
         });
         result = await transferBlobToFlux(effectiveTabId, targetUrl, cleanFilename, mime, rec.correlationId, customTransport);

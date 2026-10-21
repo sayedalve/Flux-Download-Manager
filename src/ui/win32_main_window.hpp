@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Radium Download Manager — Windows 11 Cosmic Dark Desktop Interface, Hit-Testing,
 // Interaction Controller, Cosmic Starfield & Professional Settings Center
 #pragma once
@@ -435,6 +435,8 @@ public:
     size_t GetScrollOffset() const { return m_scroll_offset; }
     void SetScrollOffset(size_t offset) { m_scroll_offset = offset; }
     void ScrollBy(int delta_rows);
+    bool ScrollTaskIntoView(const std::string& task_id, bool select_row = true);
+    bool CheckAndAutoScrollNewOrStartedDownloads();
 
     int GetColumnWidth(size_t col_idx) const;
     void SetColumnWidth(size_t col_idx, int width);
@@ -581,6 +583,8 @@ private:
     bool m_speed_limiter_active{false};
 
     size_t m_scroll_offset{0};
+    mutable std::map<std::string, TaskState> m_known_task_states;
+    mutable bool m_known_tasks_initialized{false};
     mutable std::vector<int> m_column_widths;
     int m_resizing_col_index{-1};
     int m_resize_start_x{0};

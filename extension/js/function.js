@@ -198,12 +198,10 @@ function isDownloadEligible(params = {}) {
     (tabUrl && (tabUrl.includes("chatgpt.com") || tabUrl.includes("claude.ai") || tabUrl.includes("oaiusercontent.com")))
   );
 
-  // 1. Exclude blob:, data:, and browser extension/internal schemes
-  // Web-origin blobs (e.g. ChatGPT artifacts) proceed to Step 2b below
-  if ((targetUrl.startsWith("blob:") && (!isWebBlob || (!isAiWebBlob && !wasExplicitLinkClick && !hasDownloadAttr))) || targetUrl.startsWith("data:") ||
-      targetUrl.startsWith("chrome:") || targetUrl.startsWith("chrome-extension:") ||
+  // 1. Exclude browser extension/internal schemes
+  if (targetUrl.startsWith("chrome:") || targetUrl.startsWith("chrome-extension:") ||
       targetUrl.startsWith("brave:") || targetUrl.startsWith("about:") || targetUrl.startsWith("javascript:")) {
-    return { eligible: false, reason: "BROWSER_INTERNAL_OR_BLOB" };
+    return { eligible: false, reason: "BROWSER_INTERNAL_PAGE" };
   }
 
   // 2. Exclude disabled/blocked hostnames
@@ -218,8 +216,21 @@ function isDownloadEligible(params = {}) {
   const webCodeExts = new Set(["html", "htm", "xhtml", "css", "js", "mjs", "jsx", "ts", "tsx"]);
   const webDocExts = new Set(["html", "htm", "xhtml"]);
   const hasDownloadExt = Boolean(ext && (!webDocExts.has(ext) || hasDownloadAttr || isAttachment));
-  if (isWebBlob && (ext || hasDownloadAttr || wasExplicitLinkClick || cleanFilename || phase === "determine" || isAiWebBlob || !phase)) {
-    return { eligible: true, reason: "WEB_BLOB_ARTIFACT", ext, mime: cleanMime, filename: cleanFilename, isBlob: true };
+
+  // Handle blob: URLs (web-origin blobs, worker-generated blobs, canvas/pdf exports)
+  if (targetUrl.startsWith("blob:")) {
+    if (isAiWebBlob || ((isWebBlob || wasExplicitLinkClick || hasDownloadAttr) && (wasExplicitLinkClick || hasDownloadAttr || isAiWebBlob))) {
+      return { eligible: true, reason: "WEB_BLOB_ARTIFACT", ext, mime: cleanMime, filename: cleanFilename, isBlob: true };
+    }
+    return { eligible: false, reason: "BROWSER_INTERNAL_OR_BLOB" };
+  }
+
+  // Handle data: URLs (RFC 2397 base64 or encoded payloads, e.g. generated text/csv/pdf/images)
+  if (targetUrl.startsWith("data:")) {
+    if (wasExplicitLinkClick || hasDownloadAttr) {
+      return { eligible: true, reason: "DATA_URL_DOWNLOAD", ext, mime: cleanMime, filename: cleanFilename, isData: true };
+    }
+    return { eligible: false, reason: "BROWSER_INTERNAL_OR_BLOB" };
   }
 
   // 3. Exclude webpage watch URLs only when the request is an ordinary HTML page navigation

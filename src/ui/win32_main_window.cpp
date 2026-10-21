@@ -1051,6 +1051,117 @@ void DesktopView::ScrollBy(int delta_rows) {
     m_scroll_offset = static_cast<size_t>(cur);
 }
 
+bool DesktopView::ScrollTaskIntoView(const std::string& task_id, bool select_row) {
+    if (task_id.empty()) return false;
+    auto filtered = GetFilteredAndSortedTasks();
+    if (filtered.empty()) return false;
+
+    // Check if task exists in currently filtered/sorted list
+    int found_idx = -1;
+    for (size_t i = 0; i < filtered.size(); ++i) {
+        if (filtered[i].task_id == task_id) {
+            found_idx = static_cast<int>(i);
+            break;
+        }
+    }
+
+    // If not visible under current filter/search, switch category to AllDownloads and clear search
+    if (found_idx < 0) {
+        auto task_opt = m_controller.GetTask(task_id);
+        if (!task_opt.has_value()) return false;
+        m_selected_category = SidebarCategory::kAllDownloads;
+        m_search_query.clear();
+        filtered = GetFilteredAndSortedTasks();
+        for (size_t i = 0; i < filtered.size(); ++i) {
+            if (filtered[i].task_id == task_id) {
+                found_idx = static_cast<int>(i);
+                break;
+            }
+        }
+        if (found_idx < 0) return false;
+    }
+
+    if (select_row) {
+        m_selected_task_id = task_id;
+    }
+
+    int row_h = DesignSystem::ScaleForDpi(52, m_metrics.dpi);
+    int hdr_h = DesignSystem::ScaleForDpi(38, m_metrics.dpi);
+    int bar_h = DesignSystem::ScaleForDpi(48, m_metrics.dpi);
+    int sb_h = DesignSystem::ScaleForDpi(36, m_metrics.dpi);
+    int body_h = std::max(50, m_window_height - bar_h - hdr_h - sb_h);
+    size_t visible_count = static_cast<size_t>(std::max(1, body_h / row_h));
+
+    if (filtered.size() <= visible_count) {
+        m_scroll_offset = 0;
+    } else {
+        size_t max_scroll = filtered.size() - visible_count;
+        size_t target_idx = static_cast<size_t>(found_idx);
+        if (target_idx < m_scroll_offset) {
+            m_scroll_offset = target_idx;
+        } else if (target_idx >= m_scroll_offset + visible_count) {
+            m_scroll_offset = target_idx - visible_count + 1;
+        }
+        if (m_scroll_offset > max_scroll) {
+            m_scroll_offset = max_scroll;
+        }
+    }
+    return true;
+}
+
+bool DesktopView::CheckAndAutoScrollNewOrStartedDownloads() {
+    auto all_tasks = m_controller.ListTasks();
+
+    if (!m_known_tasks_initialized) {
+        m_known_tasks_initialized = true;
+        for (const auto& t : all_tasks) {
+            m_known_task_states[t.task_id] = t.state;
+        }
+        return false;
+    }
+
+    std::string task_to_focus;
+
+    // Check for newly added downloads or downloads transitioning to active transfer states
+    for (const auto& t : all_tasks) {
+        auto it = m_known_task_states.find(t.task_id);
+        if (it == m_known_task_states.end()) {
+            // Brand new download task detected!
+            task_to_focus = t.task_id;
+            break;
+        } else {
+            TaskState old_state = it->second;
+            // Detect when an existing task starts downloading
+            bool was_active = (old_state == TaskState::kDownloading ||
+                               old_state == TaskState::kProbing ||
+                               old_state == TaskState::kMuxing ||
+                               old_state == TaskState::kVerifying ||
+                               old_state == TaskState::kFinalizing);
+            bool is_active = (t.state == TaskState::kDownloading ||
+                              t.state == TaskState::kProbing ||
+                              t.state == TaskState::kMuxing ||
+                              t.state == TaskState::kVerifying ||
+                              t.state == TaskState::kFinalizing);
+            if (!was_active && is_active) {
+                task_to_focus = t.task_id;
+                break;
+            }
+        }
+    }
+
+    // Refresh known state cache
+    m_known_task_states.clear();
+    for (const auto& t : all_tasks) {
+        m_known_task_states[t.task_id] = t.state;
+    }
+
+    if (!task_to_focus.empty()) {
+        return ScrollTaskIntoView(task_to_focus, true);
+    }
+
+    return false;
+}
+
 int DesktopView::GetColumnWidth(size_t col_idx) const {
     if (col_idx < m_column_widths.size()) {
         return m_column_widths[col_idx];
@@ -2467,6 +2578,7 @@ Result<TaskModel> DesktopView::SubmitAddDownloadDialog(const AddDownloadDialogIn
     auto res = m_controller.AddTask(std::move(t), input.start_immediately, false);
     if (res.ok()) {
         m_selected_task_id = res.value->task_id;
+        ScrollTaskIntoView(res.value->task_id, true);
         m_last_feedback_message = "Added download: " + res.value->file_name;
     } else {
         m_last_feedback_message = "Failed to add download: " + res.error->message;
@@ -2517,6 +2629,7 @@ Result<TaskModel> DesktopView::ConfirmStreamSelectionDialog(
     auto res = m_controller.AddTask(std::move(t), true, false);
     if (res.ok()) {
         m_selected_task_id = res.value->task_id;
+        ScrollTaskIntoView(res.value->task_id, true);
         m_last_feedback_message = "Queued stream download: " + res.value->file_name;
     }
     return res;
@@ -7211,6 +7324,8 @@ LRESULT CALLBACK OpenIdmWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
         case WM_TIMER: {
             if (wParam == IDT_UI_REFRESH) {
+                // Check for newly added or started downloads and auto-scroll into view
+                ctx->view->CheckAndAutoScrollNewOrStartedDownloads();
                 // Sync Windows taskbar progress indicator
                 SyncTaskbarProgress(hwnd, ctx->pTaskbarList, *ctx->view, ctx);
                 // Always repaint: active downloads, smooth animations, icon pulses

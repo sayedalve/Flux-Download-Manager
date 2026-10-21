@@ -63,6 +63,7 @@ public:
     bool AllCompleted() const;
     size_t ActiveWorkerCount() const;
     bool CanSplitAnySegment() const;
+    bool HasIncompleteUnassignedSegment() const;
 
     // Concurrency and rate limiting management
     uint32_t GetMaxConnections() const;

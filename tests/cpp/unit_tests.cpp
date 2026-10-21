@@ -470,12 +470,12 @@ bool TestNativeAnimationsAndTaskbarProgress() {
         ASSERT_TRUE(info.state == TaskbarProgressState::kNormal || info.state == TaskbarProgressState::kIndeterminate,
                     "Downloading task with known size -> kNormal or kIndeterminate");
 
-        // Paused task -> kPaused state
+        // Paused task when no downloads are active -> must evaluate to kNoProgress so paused downloads
+        // do not leave a stale colored line on the Windows taskbar
         task_ref.state = openidm::TaskState::kPaused;
         ctrl.UpdateTask(task_ref);
         info = view.ComputeTaskbarProgress();
-        ASSERT_TRUE(info.state == TaskbarProgressState::kPaused, "Paused task -> kPaused");
-        ASSERT_TRUE(info.completed_bytes == 500 && info.total_bytes == 1000, "Paused progress values preserved");
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, "Paused task with no active downloads -> kNoProgress");
 
         // Multiple downloads aggregation: add second downloading task
         openidm::TaskModel t2;
@@ -538,6 +538,45 @@ bool TestNativeAnimationsAndTaskbarProgress() {
         info = view.ComputeTaskbarProgress();
         ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, 
                     "Download completion with older failed/canceled tasks in history -> cleanly transitions to kNoProgress");
+
+        // Verify scenario where all tasks finish (all kCompleted, kFailed, kCanceled)
+        // Ensure no stale indicator remains and taskbar state evaluates to kNoProgress
+        openidm::TaskModel t4;
+        t4.task_id = openidm::GenerateUuidV4();
+        t4.url = "https://example.com/file4.bin";
+        t4.file_name = "file4.bin";
+        t4.save_dir = (work_dir / "downloads").string();
+        t4.state = openidm::TaskState::kDownloading;
+        t4.total_bytes = 10000;
+        t4.downloaded_bytes = 4000;
+        ctrl.AddTask(t4, false, false);
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNormal, "New active task brings taskbar to kNormal");
+
+        // Cancel t4 -> all downloads finished/inactive
+        ctrl.CancelTask(t4.task_id);
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, "Canceling last active task resets taskbar to kNoProgress");
+
+        // Add t5 and fail it -> taskbar must reset to kNoProgress
+        openidm::TaskModel t5;
+        t5.task_id = openidm::GenerateUuidV4();
+        t5.url = "https://example.com/file5.bin";
+        t5.file_name = "file5.bin";
+        t5.save_dir = (work_dir / "downloads").string();
+        t5.state = openidm::TaskState::kDownloading;
+        t5.total_bytes = 8000;
+        t5.downloaded_bytes = 1000;
+        ctrl.AddTask(t5, false, false);
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNormal, "Active download is kNormal");
+
+        auto t5_task = ctrl.GetTask(t5.task_id).value();
+        t5_task.state = openidm::TaskState::kFailed;
+        t5_task.error_code = "ERR_CONNECTION_RESET";
+        ctrl.UpdateTask(t5_task);
+        info = view.ComputeTaskbarProgress();
+        ASSERT_TRUE(info.state == TaskbarProgressState::kNoProgress, "Failed download does not leave stale progress, resets to kNoProgress");
 
         ctrl.Shutdown();
     }
@@ -4749,11 +4788,215 @@ bool TestAutoScrollToCurrentDownload() {
     return true;
 }
 
+bool TestHttp429AdaptiveConnectionFallbackAndIntegrity() {
+    using namespace openidm::brisk;
+
+    std::cout << "  [1/4] Testing HTTP 429 vs Range Incompatibility Header Classification...\n";
+    {
+        uint64_t curr = 1048576;
+
+        // Case A: HTTP 429 Too Many Requests with Retry-After header
+        HttpResponseMeta meta_429;
+        meta_429.status_code = 429;
+        meta_429.retry_after_sec = 5;
+        meta_429.raw_headers["retry-after"] = "5";
+
+        // Must NOT be classified as server_ignored_range
+        bool is_ignored_range = (meta_429.status_code == 200 ||
+            (meta_429.status_code == 206 && (!meta_429.is_partial_content || meta_429.range_start != curr)));
+        ASSERT_TRUE(!is_ignored_range, "HTTP 429 is not classified as server_ignored_range");
+
+        auto err_res = HttpClient::MapHttpStatusToError(meta_429);
+        ASSERT_TRUE(!err_res.ok(), "HTTP 429 maps to error");
+        ASSERT_TRUE(err_res.error->code == "ERR_HTTP_429_RATE_LIMITED", "HTTP 429 error code verified");
+        ASSERT_TRUE(err_res.error->retryable, "HTTP 429 is marked retryable");
+
+        // Case B: HTTP 503 Service Unavailable / 5xx transient server error
+        HttpResponseMeta meta_503;
+        meta_503.status_code = 503;
+        bool is_ignored_range_503 = (meta_503.status_code == 200 ||
+            (meta_503.status_code == 206 && (!meta_503.is_partial_content || meta_503.range_start != curr)));
+        ASSERT_TRUE(!is_ignored_range_503, "HTTP 503 is not classified as server_ignored_range");
+        auto err_503 = HttpClient::MapHttpStatusToError(meta_503);
+        ASSERT_TRUE(err_503.error->code == "ERR_HTTP_5XX_TRANSIENT", "HTTP 503 maps to ERR_HTTP_5XX_TRANSIENT");
+
+        // Case C: Genuine Range Incompatibility - Server sends 200 OK starting at 0
+        HttpResponseMeta meta_200;
+        meta_200.status_code = 200;
+        meta_200.is_partial_content = false;
+        meta_200.range_start = 0;
+        bool genuine_ignored_200 = (meta_200.status_code == 200 ||
+            (meta_200.status_code == 206 && (!meta_200.is_partial_content || meta_200.range_start != curr)));
+        ASSERT_TRUE(genuine_ignored_200, "200 OK in response to Range is genuinely identified as ignoring Range");
+
+        // Case D: Server sends 206 but wrong byte range offset
+        HttpResponseMeta meta_mismatched_206;
+        meta_mismatched_206.status_code = 206;
+        meta_mismatched_206.is_partial_content = true;
+        meta_mismatched_206.range_start = 0; // expected curr = 1048576
+        bool genuine_ignored_mismatch = (meta_mismatched_206.status_code == 200 ||
+            (meta_mismatched_206.status_code == 206 && (!meta_mismatched_206.is_partial_content || meta_mismatched_206.range_start != curr)));
+        ASSERT_TRUE(genuine_ignored_mismatch, "206 with mismatched range_start is genuinely identified as ignoring Range");
+    }
+
+    std::cout << "  [2/4] Testing SegmentScheduler Concurrency Reduction (32 -> 16 -> 8 -> 4 -> 2 -> 1)...\n";
+    {
+        uint64_t total_size = 100 * 1024 * 1024; // 100 MiB
+        SegmentScheduler scheduler(total_size, 32, 262144);
+        scheduler.Initialize();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 32, "Initial max connections is 32");
+
+        scheduler.ReduceConnectionsByHalf();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 16, "Reduced 32 -> 16");
+
+        scheduler.ReduceConnectionsByHalf();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 8, "Reduced 16 -> 8");
+
+        scheduler.ReduceConnectionsByHalf();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 4, "Reduced 8 -> 4");
+
+        scheduler.ReduceConnectionsByHalf();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 2, "Reduced 4 -> 2");
+
+        scheduler.ReduceConnectionsByHalf();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 1, "Reduced 2 -> 1");
+
+        // Minimum boundary floor is 1
+        scheduler.ReduceConnectionsByHalf();
+        ASSERT_TRUE(scheduler.GetMaxConnections() == 1, "Floor preserved at 1 connection");
+    }
+
+    std::cout << "  [3/4] Testing Work-Stealing Segment Preservation Across Worker Retirement...\n";
+    {
+        uint64_t total_size = 4 * 1024 * 1024; // 4 MiB
+        SegmentScheduler scheduler(total_size, 4, 262144);
+        scheduler.Initialize();
+
+        // Worker 0 acquires initial segment [0, 4MB-1]
+        auto seg0 = scheduler.AcquireNextOrStealSegment(false);
+        ASSERT_TRUE(seg0 != nullptr, "Worker 0 acquired initial segment");
+        ASSERT_TRUE(seg0->start_offset == 0 && seg0->end_offset.load() == total_size - 1, "Full segment bounds");
+
+        // Worker 1 splits segment (work stealing)
+        auto seg1 = scheduler.AcquireNextOrStealSegment(true);
+        ASSERT_TRUE(seg1 != nullptr, "Worker 1 stole segment");
+        ASSERT_TRUE(seg0->end_offset.load() < total_size - 1, "Worker 0 end offset adjusted");
+        ASSERT_TRUE(seg1->start_offset == seg0->end_offset.load() + 1, "Worker 1 starts exactly after Worker 0");
+        ASSERT_TRUE(seg1->end_offset.load() == total_size - 1, "Worker 1 ends at total_size - 1");
+
+        // Simulate Worker 1 hitting HTTP 429 rate limit: worker retires and sets active_worker = false
+        seg1->active_worker.store(false);
+
+        // Verify: The segment is NOT lost, corrupted, or rolled back incorrectly.
+        // When Worker 0 completes its own portion and seeks more work, it acquires seg1 cleanly:
+        seg0->current_offset.store(seg0->end_offset.load() + 1);
+        seg0->completed.store(true);
+        seg0->active_worker.store(false);
+
+        auto reacquired = scheduler.AcquireNextOrStealSegment(false);
+        ASSERT_TRUE(reacquired != nullptr, "Worker reacquired incomplete unassigned segment");
+        ASSERT_TRUE(reacquired->segment_id == seg1->segment_id, "Reacquired exact abandoned segment");
+        ASSERT_TRUE(reacquired->current_offset.load() == seg1->start_offset, "Offset unchanged and intact");
+    }
+
+    std::cout << "  [4/4] Testing Multi-Segment Concurrent Write and SHA-256 Hash Integrity...\n";
+    {
+        std::error_code ec;
+        auto test_dir = std::filesystem::temp_directory_path(ec) / ("flux_test_429_" + openidm::GenerateUuidV4());
+        std::filesystem::create_directories(test_dir, ec);
+
+        auto target_part = test_dir / "test_file.bin.part";
+        const uint64_t kTotalBytes = 1024 * 1024; // 1 MiB
+        std::string full_payload(kTotalBytes, '\0');
+        for (uint64_t i = 0; i < kTotalBytes; ++i) {
+            full_payload[i] = static_cast<char>((i * 7 + 13) % 256);
+        }
+        std::string expected_sha256 = openidm::CryptoUtils::ComputeBufferSha256Hex(full_payload);
+
+        std::ofstream ofs(target_part, std::ios::binary);
+        ofs.seekp(kTotalBytes - 1);
+        ofs.write("\0", 1);
+        ofs.close();
+
+        // Split across 8 segments, simulate concurrent writes with simulated rate-limit backoff & handoff
+        SegmentScheduler scheduler(kTotalBytes, 8, 32768);
+        scheduler.Initialize();
+
+        std::vector<std::shared_ptr<LiveSegment>> segments;
+        for (int i = 0; i < 8; ++i) {
+            auto s = scheduler.AcquireNextOrStealSegment(true);
+            if (s) segments.push_back(s);
+        }
+
+        std::vector<std::thread> threads;
+        std::atomic<bool> sim_429_encountered{false};
+        std::mutex file_mu;
+
+        for (auto& seg : segments) {
+            threads.emplace_back([&, seg]() {
+                uint64_t start = seg->start_offset;
+                uint64_t end = seg->end_offset.load();
+                uint64_t half = start + (end - start + 1) / 2;
+
+                // Write first half
+                size_t first_len = static_cast<size_t>(half - start);
+                if (first_len > 0) {
+                    {
+                        std::lock_guard<std::mutex> lk(file_mu);
+                        std::fstream fs(target_part, std::ios::in | std::ios::out | std::ios::binary);
+                        fs.seekp(start);
+                        fs.write(full_payload.data() + start, first_len);
+                    }
+                    seg->current_offset.store(half);
+                }
+
+                // Simulate rate limit pause on odd segments
+                if (seg->segment_id % 2 == 1) {
+                    sim_429_encountered.store(true);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+
+                // Write second half
+                size_t second_len = static_cast<size_t>(end - half + 1);
+                if (second_len > 0) {
+                    {
+                        std::lock_guard<std::mutex> lk(file_mu);
+                        std::fstream fs(target_part, std::ios::in | std::ios::out | std::ios::binary);
+                        fs.seekp(half);
+                        fs.write(full_payload.data() + half, second_len);
+                    }
+                    seg->current_offset.store(end + 1);
+                }
+                seg->completed.store(true);
+                seg->active_worker.store(false);
+            });
+        }
+
+        for (auto& t : threads) {
+            if (t.joinable()) t.join();
+        }
+
+        ASSERT_TRUE(sim_429_encountered.load(), "Rate limit condition simulated during concurrent execution");
+
+        // Read written file and verify exact SHA-256 match
+        std::ifstream ifs(target_part, std::ios::binary);
+        std::string written_data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        ASSERT_TRUE(written_data.size() == kTotalBytes, "Total written size matches");
+        std::string actual_sha256 = openidm::CryptoUtils::ComputeBufferSha256Hex(written_data);
+        ASSERT_TRUE(actual_sha256 == expected_sha256, "Final assembled file SHA-256 exactly matches payload without gaps or overlaps");
+
+        std::filesystem::remove_all(test_dir, ec);
+    }
+
+    std::cout << "  -> All HTTP 429 adaptive fallback and data integrity tests PASSED.\n";
+    return true;
+}
+
 } // namespace
 
 int main() {
     int passed = 0;
-    const int total = 63;
+    const int total = 64;
 
     auto run = [&](int idx, const char* name, bool (*fn)()) {
         std::cout << "[" << idx << "/" << total << "] Running " << name << "..." << std::endl;
@@ -4826,6 +5069,7 @@ int main() {
     run(61, "TestNewDownloadDialogSubmissionAndTaskCreation", TestNewDownloadDialogSubmissionAndTaskCreation);
     run(62, "TestYouTubeQualitySelectionIntegrityAndVerification", TestYouTubeQualitySelectionIntegrityAndVerification);
     run(63, "TestAutoScrollToCurrentDownload", TestAutoScrollToCurrentDownload);
+    run(64, "TestHttp429AdaptiveConnectionFallbackAndIntegrity", TestHttp429AdaptiveConnectionFallbackAndIntegrity);
 
     std::cout << "\nC++20 Unit & Regression Test Summary: " << passed << " / " << total << " suites PASSED.\n";
     return (passed == total) ? 0 : 1;

@@ -78,3 +78,7 @@ redesign/
 *antigravity*.txt
 benchmarks/*local*
 benchmarks/test_*
+ 
+benchmarks/real_internet_work/
+benchmarks/fixtures/temp_*
+

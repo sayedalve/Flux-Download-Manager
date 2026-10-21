@@ -178,17 +178,11 @@ TaskbarProgressInfo DesktopView::ComputeTaskbarProgress() const {
             info.total_bytes = active_total;
             info.progress_fraction = static_cast<double>(active_completed) / static_cast<double>(active_total);
         }
-    } else if (paused_count > 0) {
-        info.state = TaskbarProgressState::kPaused;
-        info.completed_bytes = paused_completed;
-        info.total_bytes = paused_total;
-        if (paused_total > 0) {
-            info.progress_fraction = static_cast<double>(paused_completed) / static_cast<double>(paused_total);
-        }
     } else {
-        // When there are no active or paused downloads, clear taskbar progress completely.
-        // Historical completed, failed, or canceled downloads in the task list must NOT keep
-        // the taskbar in an error or progress state.
+        // When there are no active downloads (kDownloading, kProbing, kMuxing, kVerifying, kFinalizing),
+        // clear taskbar progress completely using TBPF_NOPROGRESS.
+        // Historical completed, failed, canceled, and paused downloads in the task list must NEVER keep
+        // a stale progress indicator on the Windows taskbar.
         info.state = TaskbarProgressState::kNoProgress;
     }
 
@@ -3392,11 +3386,22 @@ bool SyncTaskbarProgress(HWND hwnd, ITaskbarList3* pTaskbar, const DesktopView& 
     HRESULT hrVal = S_OK;
 
     switch (info.state) {
-        case TaskbarProgressState::kNoProgress:
-            // Explicitly clear progress value first, then reset state to TBPF_NOPROGRESS
-            hrVal = pTaskbar->SetProgressValue(hwnd, 0, 1);
-            hrState = pTaskbar->SetProgressState(hwnd, TBPF_NOPROGRESS);
+        case TaskbarProgressState::kNoProgress: {
+            // Explicitly clear progress value and reset state to TBPF_NOPROGRESS with verification and retry
+            bool reset_ok = false;
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                hrVal = pTaskbar->SetProgressValue(hwnd, 0, 1);
+                hrState = pTaskbar->SetProgressState(hwnd, TBPF_NOPROGRESS);
+                if (SUCCEEDED(hrState) && SUCCEEDED(hrVal)) {
+                    reset_ok = true;
+                    break;
+                }
+                Sleep(10);
+            }
+            OPENIDM_LOG_INFO("UI", "Taskbar progress cleared via TBPF_NOPROGRESS (hrState=" + 
+                             std::to_string(static_cast<long>(hrState)) + ", success=" + (reset_ok ? "true" : "false") + ")");
             break;
+        }
         case TaskbarProgressState::kIndeterminate:
             hrState = pTaskbar->SetProgressState(hwnd, TBPF_INDETERMINATE);
             break;

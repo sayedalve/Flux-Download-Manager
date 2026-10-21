@@ -168,13 +168,20 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         m_cfg.net_opts);
 
     // FDM-020: If probe is rate-limited (HTTP 429), back off using Retry-After
-    // and retry the probe once. Servers may apply per-IP rate limits to all
-    // requests, including the initial range-capability probe (bytes=0-0).
-    if (probe_meta.status_code == 429 ||
-        (!probe_res.ok() && probe_res.error && probe_res.error->code == "ERR_HTTP_429_RATE_LIMITED")) {
+    // and retry a bounded number of times. Servers may apply per-IP rate
+    // limits to all requests, including the initial range-capability probe
+    // (bytes=0-0). Keep this finite so a permanently rate-limited endpoint
+    // reaches the controller's normal retry/error path.
+    constexpr int kMaxProbeAttempts = 3;
+    for (int probe_attempt = 1;
+         probe_attempt < kMaxProbeAttempts &&
+         (probe_meta.status_code == 429 ||
+          (!probe_res.ok() && probe_res.error && probe_res.error->code == "ERR_HTTP_429_RATE_LIMITED"));
+         ++probe_attempt) {
         int wait_sec = (probe_meta.retry_after_sec > 0) ? std::min(probe_meta.retry_after_sec, 30) : 2;
         OPENIDM_LOG_WARN("HttpEngine", "Task " + task.task_id + ": Probe received HTTP 429; waiting "
-                             + std::to_string(wait_sec) + "s then retrying probe...");
+                             + std::to_string(wait_sec) + "s then retrying probe (attempt "
+                             + std::to_string(probe_attempt + 1) + "/" + std::to_string(kMaxProbeAttempts) + ")...");
         for (int slept = 0; slept < wait_sec * 1000; slept += 50) {
             if (pause_requested.load() || cancel_requested.load()) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(std::min(50, wait_sec * 1000 - slept)));
@@ -641,11 +648,15 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 fatal_abort.store(true);
                                 return HeaderAction::kAbort;
                             }
-                            // Range satisfaction validation (aria2 HttpRequest::isRangeSatisfied)
-                            if (meta.status_code != 206 || !meta.is_partial_content || meta.range_start != curr) {
+                            // Range satisfaction validation (aria2 HttpRequest::isRangeSatisfied).
+                            // Only classify as server_ignored_range if the server returned a 2xx response that
+                            // failed to honor the requested byte range (e.g. 200 OK instead of 206, or 206 with mismatched range_start).
+                            if (meta.status_code == 200 || (meta.status_code == 206 && (!meta.is_partial_content || meta.range_start != curr))) {
                                 server_ignored_range = true;
                                 disable_splitting.store(true);
-                                OPENIDM_LOG_WARN("BriskEngine", "Server ignored Range header on worker; aborting secondary range stream");
+                                OPENIDM_LOG_WARN("BriskEngine", "Server ignored Range header on worker (status " +
+                                    std::to_string(meta.status_code) + ", range_start " + std::to_string(meta.range_start) +
+                                    ", expected " + std::to_string(curr) + "); aborting secondary range stream");
                                 return HeaderAction::kAbort;
                             }
                             if (total_bytes > 0 && meta.range_total > 0 && meta.range_total != total_bytes) {
@@ -745,6 +756,19 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 std::to_string(seg->segment_id) + "; reduced target concurrency to " +
                                 std::to_string(scheduler.GetMaxConnections()) + ", waiting " +
                                 std::to_string(retry_after_ms) + " ms");
+
+                            // Adaptive connection fallback: If active concurrency now exceeds
+                            // the reduced target connection limit, this extra worker should release
+                            // the incomplete segment and gracefully terminate rather than repeatedly colliding.
+                            uint32_t current_max = scheduler.GetMaxConnections();
+                            if (running_workers.load() > current_max && running_workers.load() > 1) {
+                                seg->active_worker.store(false);
+                                OPENIDM_LOG_INFO("BriskEngine", "Worker retiring to respect adaptive rate limit concurrency (" +
+                                    std::to_string(running_workers.load()) + " > " + std::to_string(current_max) +
+                                    "); segment #" + std::to_string(seg->segment_id) + " returned to pool");
+                                running_workers.fetch_sub(1, std::memory_order_relaxed);
+                                return; // Fully exit worker thread
+                            }
                         } else if (res.error->code == "ERR_NET_CONNECTION_RESET" ||
                                    res.error->code == "ERR_NET_CONNECT" ||
                                    res.error->code == "ERR_NET_TIMEOUT" ||
@@ -755,10 +779,23 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                                 OPENIDM_LOG_WARN("BriskEngine", "Server connection limit/reset streak (" +
                                     std::to_string(fail_streak) + "); scaled down concurrency to " +
                                     std::to_string(scheduler.GetMaxConnections()));
+                                uint32_t current_max = scheduler.GetMaxConnections();
+                                if (running_workers.load() > current_max && running_workers.load() > 1) {
+                                    seg->active_worker.store(false);
+                                    OPENIDM_LOG_INFO("BriskEngine", "Worker retiring to respect network backoff concurrency (" +
+                                        std::to_string(running_workers.load()) + " > " + std::to_string(current_max) +
+                                        "); segment #" + std::to_string(seg->segment_id) + " returned to pool");
+                                    running_workers.fetch_sub(1, std::memory_order_relaxed);
+                                return; // Fully exit worker thread
+                                }
                             }
                         }
 
-                        if (!res.error->retryable || retries >= m_cfg.max_retries_per_worker || fail_streak > 12) {
+                        // For rate limiting (429), allow up to 20 retries with backoff and reset streak so concurrent 429s don't prematurely abort
+                        int max_retries = (res.error->code == "ERR_HTTP_429_RATE_LIMITED") ? 20 : m_cfg.max_retries_per_worker;
+                        uint32_t max_streak = (res.error->code == "ERR_HTTP_429_RATE_LIMITED") ? 30 : 12;
+
+                        if (!res.error->retryable || retries >= max_retries || fail_streak > max_streak) {
                             seg->active_worker.store(false);
                             std::lock_guard<std::mutex> lk(err_mu);
                             if (!fatal_error.has_value()) {
@@ -795,11 +832,9 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
         uint64_t current_speed = 0;
 
         std::vector<std::thread> workers;
-        // Immediately pre-spawn workers for all splittable segments up to max_conns
-        uint32_t target_initial = 1;
-        while (target_initial < max_conns && scheduler.CanSplitAnySegment()) {
-            ++target_initial;
-        }
+        // Paced ramp-up: Spawn initial worker, then ramp concurrency in the coordinator loop
+        // rather than burst-spawning 32 connections simultaneously at t=0, avoiding firewall/CDN flood triggers.
+        uint32_t target_initial = std::min<uint32_t>(2, max_conns);
         for (uint32_t i = 0; i < target_initial; ++i) {
             workers.emplace_back(worker_fn, i);
         }
@@ -809,8 +844,8 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
             uint32_t dynamic_max = std::min(max_conns, scheduler.GetMaxConnections());
-            if (running_workers.load() < dynamic_max && spawned < (dynamic_max * 8) && !disable_splitting.load() &&
-                scheduler.CanSplitAnySegment()) {
+            if (running_workers.load() < dynamic_max && spawned < 256 &&
+                (scheduler.HasIncompleteUnassignedSegment() || (!disable_splitting.load() && scheduler.CanSplitAnySegment()))) {
                 workers.emplace_back(worker_fn, spawned++);
             }
 

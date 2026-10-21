@@ -262,6 +262,18 @@ size_t SegmentScheduler::ActiveWorkerCount() const {
     return count;
 }
 
+bool SegmentScheduler::HasIncompleteUnassignedSegment() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto& seg : m_segments) {
+        if (!seg->completed.load() && !seg->active_worker.load()) {
+            if (seg->current_offset.load() <= seg->end_offset.load()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool SegmentScheduler::CanSplitAnySegment() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     uint64_t min_separation = (std::max<uint64_t>)(m_min_split_bytes, 262144ULL);

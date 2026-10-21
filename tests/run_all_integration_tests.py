@@ -489,6 +489,8 @@ def main():
     dl_dir = work_dir / "downloads"
     db_path = work_dir / "state.db"
     sock_path = f"\\\\.\\pipe\\flux_test_{os.getpid()}" if IS_WINDOWS else f"/tmp/flux_test_{os.getpid()}.sock"
+    daemon_proc = None
+    nmh_proc = None
 
     FaultInjectionHttpHandler.fixture_dir = fixture_dir
     server = ThreadedHTTPServer(("127.0.0.1", 0), FaultInjectionHttpHandler)
@@ -908,6 +910,30 @@ def main():
         print("\nALL 8 END-TO-END INTEGRATION, NATIVE WORKER & ENFORCED BENCHMARK SUITES PASSED!")
 
     finally:
+        # Always tear down child processes, including when an assertion fails.
+        # Leaving the daemon alive after a failed run can claim the test pipe and
+        # make the next IPC run fail with a misleading desktop-unavailable error.
+        if nmh_proc is not None:
+            try:
+                if nmh_proc.stdin and not nmh_proc.stdin.closed:
+                    nmh_proc.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+            if nmh_proc.poll() is None:
+                nmh_proc.terminate()
+            try:
+                nmh_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                nmh_proc.kill()
+                nmh_proc.wait(timeout=5)
+        if daemon_proc is not None:
+            if daemon_proc.poll() is None:
+                daemon_proc.terminate()
+            try:
+                daemon_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                daemon_proc.kill()
+                daemon_proc.wait(timeout=5)
         server.shutdown()
         shutil.rmtree(work_dir, ignore_errors=True)
         if not IS_WINDOWS and os.path.exists(sock_path):

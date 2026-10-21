@@ -171,9 +171,16 @@ Result<ScanReport> AntivirusScanner::ScanWithDefender(
         return Result<ScanReport>::Err("ERR_DEFENDER_NOT_FOUND", "Windows Defender (MpCmdRun.exe) not found");
     }
 
+    // MpCmdRun.exe requires an absolute normalized path. A relative path causes error 0x80508023
+    // with exit code 2, which would otherwise be misclassified as a detected threat!
+    std::filesystem::path abs_target = std::filesystem::absolute(target_file, ec);
+    if (ec) {
+        abs_target = target_file;
+    }
+
     auto start_tp = std::chrono::steady_clock::now();
 
-    std::wstring cmd = L"\"" + defender_path.wstring() + L"\" -Scan -ScanType 3 -File \"" + target_file.wstring() + L"\"";
+    std::wstring cmd = L"\"" + defender_path.wstring() + L"\" -Scan -ScanType 3 -File \"" + abs_target.wstring() + L"\"";
     auto proc_res = RunProcessCaptureOutput(defender_path.wstring(), cmd, timeout_ms);
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_tp).count();
@@ -191,7 +198,17 @@ Result<ScanReport> AntivirusScanner::ScanWithDefender(
     if (rep.exit_code == 0) {
         rep.status = ScanStatus::kClean;
     } else if (rep.exit_code == 2) {
-        rep.status = ScanStatus::kThreatDetected;
+        // Exit code 2 is returned both for genuine threat detections and for execution errors (e.g. hr = 0x80508023).
+        // Confirm whether threats were actually reported in the scanner output or if an error occurred.
+        if (rep.output_message.find("found no threats") != std::string::npos) {
+            rep.status = ScanStatus::kClean;
+        } else if (rep.output_message.find("Failed with hr =") != std::string::npos ||
+                   rep.output_message.find("ERROR:") != std::string::npos ||
+                   rep.output_message.find("error") != std::string::npos) {
+            rep.status = ScanStatus::kScannerError;
+        } else {
+            rep.status = ScanStatus::kThreatDetected;
+        }
     } else {
         rep.status = ScanStatus::kScannerError;
     }

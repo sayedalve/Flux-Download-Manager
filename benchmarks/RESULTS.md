@@ -1,7 +1,7 @@
-# Real Internet Download Performance Benchmark: Flux vs Internet Download Manager (IDM)
+# Real Internet Download Performance Benchmark: Radium & Flux vs Internet Download Manager (IDM)
 
 **Document Status:** Published Benchmark Report  
-**Benchmark Execution Date:** 2026-10-20 09:03:39 UTC  
+**Last Updated:** 2026-10-21 21:12 UTC  
 **Target URL:** `https://fsn1-speed.hetzner.com/100MB.bin`  
 **Target Payload:** Hetzner 100 MiB Binary Test File (`100MB.bin`)  
 **Payload Size:** 104,857,600 bytes (100.00 MiB / 104.86 MB)  
@@ -12,76 +12,115 @@
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary & Controlled 8-Connection Head-to-Head
 
-This report documents an authentic, sequential live-internet download benchmark comparing **Flux Download Manager (v0.3.1)** against the user's licensed and activated **Internet Download Manager (IDM 6.43.15)** on this Windows 11 workstation.
+This report documents authentic, sequential live-internet download benchmarks comparing **Radium Download Manager (v0.3.2)**, licensed **Internet Download Manager (IDM 6.43.15)**, and legacy **Flux Download Manager (v0.3.1)** on this Windows 11 workstation.
 
-Both applications targeted the identical direct HTTPS download URL (`https://fsn1-speed.hetzner.com/100MB.bin`) under identical local network conditions directly to the same NVMe solid-state storage volume.
+All downloads were executed sequentially using the identical destination NVMe storage volume, identical network connection, and identical target file URL.
+
+### Controlled 10-Trial Alternating Benchmark (8 Connections Configured for Each App)
+
+To eliminate bias from server load fluctuations, network contention, and transient route changes, 10 sequential trials (5 Radium, 5 IDM) were executed in strict alternating order (**Radium $\rightarrow$ IDM $\rightarrow$ Radium $\rightarrow$ IDM...**).
 
 > [!IMPORTANT]
-> **Scope & Testing Disclaimer:**
-> This benchmark measures point-in-time throughput against Hetzner's Falkenstein public speedtest server (`fsn1-speed.hetzner.com`), **not** general maximum internet bandwidth. Public speedtest servers enforce upstream TCP rate limiting and concurrent connection throttling that directly influence segmented download behavior.
+> **Server Rate-Limiting Finding:**
+> Hetzner's Falkenstein speedtest server enforces an upstream per-IP concurrent connection throttle (~2 to 3 simultaneous range requests). 
+> - **IDM** spawned 4 connections initially, received HTTP 429 on connections 3 and 4, dropped back to **3 effective connections**, and completed with median **76.64 s** (**1.30 MiB/s**).
+> - **Radium** spawned 8 connections initially, received HTTP 429 on secondary streams, adaptively scaled down to **1 effective connection**, and completed sequentially with median **79.44 s** (**1.26 MiB/s**).
+> - **Resource Consumption:** Radium used **62% less RAM** (18.3 MB vs 48.8 MB) and **72% less peak CPU** (15.6% vs 56.2%) than IDM.
 
-| Metric | Internet Download Manager (IDM) | Flux Download Manager (32 Conns) | Flux Download Manager (Diagnostic / 1 Conn) |
+| Metric | Radium Download Manager (v0.3.2) | Internet Download Manager (IDM 6.43.15) | Winner / Comparison |
 | :--- | :--- | :--- | :--- |
-| **Application Version** | `IDM 6.43.15.2` (Licensed) | `Flux v0.3.1` (WinHTTP IOCP) | `Flux v0.3.1` (WinHTTP IOCP) |
-| **Configured Connections** | `8` connections | `32` connections | `1` connection |
-| **Effective Active Connections** | `2` connections (Hetzner 429 throttle) | `0` (Aborted on HTTP 429 burst) | `1` connection |
-| **Start Time (UTC)** | `2026-10-20 08:53:59 UTC` | `2026-10-20 08:55:33 UTC` | `2026-10-20 08:59:39 UTC` |
-| **End Time (UTC)** | `2026-10-20 08:55:28 UTC` | `2026-10-20 08:59:34 UTC` | `2026-10-20 09:03:39 UTC` |
-| **Transfer Time** | **`88.37 s`** | `240.25 s` (Aborted) | **`73.17 s`** |
-| **Downloaded Bytes** | `104,857,600 / 104,857,600` | `0 / 104,857,600` | `104,857,600 / 104,857,600` |
-| **Average Throughput (MiB/s)** | **`1.13 MiB/s`** | `N/A` (Aborted) | **`1.37 MiB/s`** |
-| **Average Throughput (Mbps)** | **`9.49 Mbps`** | `N/A` (Aborted) | **`11.46 Mbps`** |
-| **Peak Working Set Memory (RSS)** | `48.54 MB` | `23.01 MB` | `17.68 MB` |
-| **SHA-256 Digest Verification** | **`PASS`** (`100% Match`) | `N/A` (Incomplete) | **`PASS`** (`100% Match`) |
-| **Computed SHA-256** | `d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22c44` | `N/A` | `d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22c44` |
-| **Authoritative SHA-256** | `d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22c44` | `d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22c44` | `d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22c44` |
-| **Execution Status** | **`COMPLETED`** | **`FAILED`** | **`COMPLETED`** |
-| **Failure Detail** | `None` | `ERROR: Task failed: Server failed range check on active segment` | `None` |
+| **Configured Concurrency** | `8` connections | `8` connections | Identical configuration |
+| **Actual Peak Concurrency Attempted** | `8` connections | `4` connections | Radium attempts full connection budget |
+| **Effective Active Concurrency** | `1` connection (Adaptive fallback) | `3` connections (Selective drop) | IDM maintains 3 streams under Hetzner |
+| **Successful Completed Trials** | **5 / 5 (100%)** | **5 / 5 (100%)** | Complete parity |
+| **SHA-256 Verified Matches** | **5 / 5 (100% exact match)** | **5 / 5 (100% exact match)** | Perfect data integrity |
+| **Median Download Time** | **`79.44 s`** | **`76.64 s`** | IDM faster by 2.80 s (3.5%) |
+| **Trial Range (Min – Max Time)** | `74.76 s` – `86.56 s` | `71.20 s` – `120.23 s` | Radium showed tighter variance |
+| **Median Throughput (MiB/s)** | **`1.26 MiB/s`** | **`1.30 MiB/s`** | IDM marginally higher (3.2%) |
+| **Median Throughput (Mbps)** | **`10.56 Mbps`** | **`10.95 Mbps`** | IDM: 10.95 Mbps vs Radium: 10.56 Mbps |
+| **Median Peak Memory (RSS)** | **`18.30 MB`** | **`48.80 MB`** | **Radium uses 62.5% less RAM** |
+| **Median Peak CPU Usage** | **`15.6%`** | **`56.2%`** | **Radium uses 72.2% less CPU** |
 
 ---
 
-## 2. Test Environment & Remote Host Infrastructure
+## 2. Individual Trial Records (Controlled Alternating Series)
 
-### 2.1 Workstation Context
+All 10 trials completed with exact `104,857,600` byte payload sizes and 100% cryptographic SHA-256 match against `d91a64cda4e30fe6b42e971eb8c6681ae73ddb11b6a8b60f4769ec47a8e22c44`.
+
+| Trial | Application | Configured Conns | Peak Conns | Effective Conns | Transfer Time | Speed (MiB/s) | Speed (Mbps) | Peak RSS | Peak CPU | 429s | SHA-256 | Status |
+| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1** | Radium v0.3.2 | 8 | 8 | 1 | 86.56 s | 1.16 MiB/s | 9.69 Mbps | 18.32 MB | 12.5% | 6 | PASS | COMPLETED |
+| **1** | IDM 6.43.15 | 8 | 4 | 3 | 120.23 s | 0.83 MiB/s | 6.98 Mbps | 48.80 MB | 56.2% | 2 | PASS | COMPLETED |
+| **2** | Radium v0.3.2 | 8 | 8 | 1 | 79.44 s | 1.26 MiB/s | 10.56 Mbps | 18.30 MB | 12.5% | 6 | PASS | COMPLETED |
+| **2** | IDM 6.43.15 | 8 | 4 | 3 | 77.16 s | 1.30 MiB/s | 10.87 Mbps | 48.55 MB | 84.4% | 2 | PASS | COMPLETED |
+| **3** | Radium v0.3.2 | 8 | 8 | 1 | 77.71 s | 1.29 MiB/s | 10.79 Mbps | 18.28 MB | 25.0% | 7 | PASS | COMPLETED |
+| **3** | IDM 6.43.15 | 8 | 4 | 3 | 76.64 s | 1.30 MiB/s | 10.95 Mbps | 53.29 MB | 53.1% | 2 | PASS | COMPLETED |
+| **4** | Radium v0.3.2 | 8 | 8 | 1 | 74.76 s | 1.34 MiB/s | 11.22 Mbps | 18.19 MB | 18.8% | 6 | PASS | COMPLETED |
+| **4** | IDM 6.43.15 | 8 | 4 | 3 | 74.64 s | 1.34 MiB/s | 11.24 Mbps | 48.45 MB | 65.6% | 2 | PASS | COMPLETED |
+| **5** | Radium v0.3.2 | 8 | 8 | 1 | 83.01 s | 1.20 MiB/s | 10.11 Mbps | 18.39 MB | 15.6% | 9 | PASS | COMPLETED |
+| **5** | IDM 6.43.15 | 8 | 4 | 3 | 71.20 s | 1.40 MiB/s | 11.78 Mbps | 49.46 MB | 50.0% | 2 | PASS | COMPLETED |
+
+*Raw trial data machine-readable artifact:* [`benchmarks/results/20261021_radium_vs_idm_8conns_trials.json`](file:///c:/Users/sayed/Downloads/openidm/benchmarks/results/20261021_radium_vs_idm_8conns_trials.json)  
+*Comparative spreadsheet CSV:* [`benchmarks/results/20261021_radium_vs_idm_8conns_comparison.csv`](file:///c:/Users/sayed/Downloads/openidm/benchmarks/results/20261021_radium_vs_idm_8conns_comparison.csv)
+
+---
+
+## 3. Historical High-Concurrency Comparison (32 Configured Connections)
+
+In addition to the 8-connection controlled series, the 32-connection trial records evaluate high-concurrency stress:
+
+| Metric | Radium v0.3.2 (Adaptive 32-Conn) | Flux v0.3.1 (Un-remediated 32-Conn) | Flux v0.3.1 (1-Conn Diagnostic) |
+| :--- | :--- | :--- | :--- |
+| **Configured Concurrency** | `32` connections | `32` connections | `1` connection |
+| **Peak Concurrency Attempted** | `21` connections | `32` connections | `1` connection |
+| **Effective Active Concurrency** | `1` connection | `0` (Aborted on 429 burst) | `1` connection |
+| **Rate-Limited 429 Responses** | `28` (Recovered via backoff) | `32` | `0` |
+| **Range Protocol Errors** | `0` (Fixed) | `1` (`ERR_HTTP_RANGE_PROTOCOL`) | `0` |
+| **Transfer Time** | **`120.95 s`** | `240.25 s` (Aborted) | **`73.17 s`** |
+| **Throughput (MiB/s)** | **`0.83 MiB/s`** | `N/A` | **`1.37 MiB/s`** |
+| **SHA-256 Digest Verification** | **`PASS`** (`100% Match`) | `N/A` (Incomplete) | **`PASS`** (`100% Match`) |
+| **Status** | **`COMPLETED`** | **`FAILED`** | **`COMPLETED`** |
+
+---
+
+## 4. Workstation & Remote Target Infrastructure
+
+### 4.1 Workstation Context
 - **Operating System:** Windows 11 (Build 10.0.26200)
 - **Processor:** Intel64 Family 6 Model 142 Stepping 12, GenuineIntel (4 Physical / 8 Logical Cores)
 - **Total Physical Memory:** 15.82 GB RAM
 - **Testing Location:** Dhaka, Bangladesh (ISP peering route to Falkenstein, Germany; latency ~160ms RTT)
-- **Execution Mode:** Native desktop Win32 execution; no loopback simulation or synthetic shaping.
+- **Storage:** Direct to local NVMe SSD; sequential execution.
 
-### 2.2 Remote Target Infrastructure
+### 4.2 Remote Target Infrastructure
 - **Direct Download URL:** `https://fsn1-speed.hetzner.com/100MB.bin`
-- **Server Software:** `nginx` (Accept-Ranges: `bytes`, HTTP/1.1 206 Partial Content)
+- **Server Software:** `nginx` (Accept-Ranges: `bytes`, HTTP/1.1 206 Partial Content, ETag: `"5ec51112-6400000"`)
 - **Resolved IP:** `78.46.170.2`
-- **Rate-Limiting Policy:** Hetzner's public speedtest server enforces an aggressive concurrent connection limit (~2 simultaneous streams per client IP) and issues `HTTP 429 Too Many Requests` on bursts of concurrent range requests.
+- **Rate-Limiting Behavior:** Hetzner limits concurrent streams per IP to ~2–3 simultaneous streams, returning `HTTP/1.1 429 Too Many Requests` when exceeded.
 
 ---
 
-## 3. Detailed Technical Analysis
+## 5. Detailed Technical Analysis
 
-### 3.1 IDM Trial Analysis (8 Configured Connections)
-1. **Adaptive Connection Scaling:** IDM initially attempted to allocate connections `C0`, `C1`, `C2`, and `C3`.
-2. **Server Throttling Response:** Hetzner returned `HTTP/1.1 429 Too Many Requests` to connections `C2` and `C3`.
-3. **Graceful Error Handling:** Rather than aborting the download task, IDM immediately closed connections `C2` and `C3`, maintained connections `C0` and `C1`, and dynamically recycled them across subsequent byte ranges without user intervention.
-4. **Completion:** IDM fully assembled the 104,857,600 byte file in `88.37 s` (1.13 MiB/s) and achieved a 100% cryptographic match against the authoritative SHA-256 checksum.
+### 5.1 IDM Behavior Under Rate Limiting
+1. IDM attempts 4 connections (`C0`, `C1`, `C2`, `C3`).
+2. When Hetzner returns HTTP 429 to `C2` and `C3`, IDM immediately disconnects those workers and continues with `C0` and `C1`, occasionally attempting a 3rd connection.
+3. IDM dynamically shifts byte boundaries so active workers pick up remaining ranges.
+4. Total transfer completed across 5 trials in median **76.64 s**, consuming median 48.8 MB RAM and 56.2% peak CPU.
 
-### 3.2 Flux 32-Connection Trial Analysis
-1. **Burst Spawning:** Flux attempted to pre-spawn all 32 configured worker threads simultaneously on start.
-2. **Upstream 429 Rejection:** Hetzner's nginx server returned `HTTP/1.1 429 Too Many Requests` to the secondary connection burst.
-3. **Task Failure:** In Flux v0.3.1, `http_download_engine.cpp` line 580 evaluates `meta.status_code != 206` and flags `server_ignored_range = true`. When the scheduler attempted to roll back the unstarted stolen segments concurrently, the segment rollback failed, triggering `fatal_abort` with error code `ERR_HTTP_RANGE_PROTOCOL: Server failed range check on active segment`.
-4. **Integrity Rule Compliance:** In strict compliance with repository benchmarking governance, this trial is truthfully reported as **`FAILED`** rather than omitting the failure or substituting estimated numbers.
-
-### 3.3 Flux 1-Connection Diagnostic Trial Analysis
-1. **Rate-Limit Isolation:** To verify that Flux can successfully transfer and cryptographically verify the Hetzner payload when not exceeding the server's concurrency limit, Flux was executed with `--connections 1`.
-2. **Clean Execution:** Flux completed the entire 104,857,600 byte transfer in **`73.17 s`** (**`1.37 MiB/s`**), outperforming IDM's transfer time (88.37 s) on a single stream.
-3. **Verification:** The downloaded binary matched Canonical / Hetzner's authoritative SHA-256 checksum byte-for-byte with 100% cryptographic integrity.
+### 5.2 Radium Behavior Under Rate Limiting
+1. Radium spawns its 8 configured connections across segments.
+2. When Hetzner returns HTTP 429, Radium's adaptive scheduler halves concurrency: $8 \rightarrow 4 \rightarrow 2 \rightarrow 1$.
+3. Retiring workers safely release their segments back to the unassigned segment pool and terminate cleanly without deadlocks.
+4. The remaining worker completes all segments sequentially with exponential backoff and `Retry-After` adherence.
+5. Total transfer completed across 5 trials in median **79.44 s**, consuming median 18.3 MB RAM and 15.6% peak CPU.
 
 ---
 
-## 4. Key Takeaways & Actionable Engine Enhancements
+## 6. Honest Conclusions
 
-1. **HTTP 429 / 503 Distinction:** The HTTP segmented download engine must differentiate HTTP 429 (Rate Limited) and 503 (Unavailable) from HTTP 200 (Range Ignored). Rather than aborting active range workers, HTTP 429 should decrement active workers and initiate exponential backoff without marking range support as compromised.
-2. **Paced Connection Spawning:** Rather than pre-spawning `max_connections` at millisecond 0, connection scaling should be ramped incrementally (e.g. 1 -> 2 -> 4 -> 8) as existing connections prove partial content compliance.
-3. **Truth in Benchmarking:** This benchmark demonstrates the critical importance of testing against live third-party infrastructure: theoretical connection scaling (32 connections) can trigger upstream CDN throttling that single-stream or conservative managers (IDM) avoid.
+1. **Throughput Parity:** Under server rate limiting, IDM achieved a median throughput of **1.30 MiB/s** (10.95 Mbps) while Radium achieved **1.26 MiB/s** (10.56 Mbps). IDM is marginally faster by 3.2% (2.80 seconds on a 100 MiB file) because it retained 3 connections while Radium adaptively fell back to 1.
+2. **Resource Efficiency Advantage:** Radium significantly outperformed IDM in system efficiency, using **62.5% less RAM** (18.3 MB vs 48.8 MB) and **72.2% less peak CPU** (15.6% vs 56.2%).
+3. **Data Integrity:** Both download managers passed 100% of SHA-256 cryptographic verifications across all 5 completed trials without any corrupted bytes, overlapping ranges, or truncated files.

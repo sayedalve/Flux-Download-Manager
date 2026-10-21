@@ -628,6 +628,9 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                         req_cancel,
                         [&](const HttpResponseMeta& meta) -> HeaderAction {
                             captured_retry_after_sec = meta.retry_after_sec;
+                            if (meta.status_code == 429 || meta.status_code >= 500) {
+                                return HeaderAction::kAbort;
+                            }
                             if (meta.status_code == 416) {
                                 if (curr == 0 && (total_bytes == 0 || meta.range_total == 0)) {
                                     seg->completed.store(true);

@@ -28,6 +28,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
 if (-not $ScriptDir -or -not (Test-Path $ScriptDir)) {
@@ -186,7 +187,7 @@ try {
         if (-not $UseUpstreamFfmpeg -and $existingFfSize -gt 25MB) {
             Write-Host "Existing ffmpeg.exe ($([Math]::Round($existingFfSize/1MB, 1)) MB) exceeds minimal budget (<25 MB); re-downloading minimal build..." -ForegroundColor Yellow
             $needFfDownload = $true
-        } elseif ($FfmpegExpectedSha256 -and -not (Verify-ExistingBinary $FfExe $FfmpegExpectedSha256)) {
+        } elseif ($FfmpegExpectedSha256 -and -not (Verify-ExistingBinary $FfExe $FfmpegExpectedSha256 $Architecture)) {
             $needFfDownload = $true
         }
     }
@@ -203,7 +204,7 @@ try {
         Expand-Archive -Path $FfZip -DestinationPath (Join-Path $TmpDir "ff") -Force
         $FoundFf = Get-ChildItem -Path (Join-Path $TmpDir "ff") -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
         if (-not $FoundFf) { throw "ffmpeg.exe not found in downloaded archive: $FfZip" }
-        Assert-Pe64Executable $FoundFf.FullName
+        Assert-Pe64Executable $FoundFf.FullName $Architecture
         if ($FfmpegExpectedSha256) {
             Assert-Sha256Checksum $FoundFf.FullName $FfmpegExpectedSha256
         } else {
@@ -223,7 +224,7 @@ try {
     } else {
         Write-Host "`n[2/3] ffmpeg.exe already present and verified in $TargetDir" -ForegroundColor Green
     }
-    Assert-Pe64Executable $FfExe
+    Assert-Pe64Executable $FfExe $Architecture
 
     $ffSize = (Get-Item $FfExe).Length
     $ffSizeMiB = [Math]::Round($ffSize / 1MB, 2)
@@ -244,13 +245,13 @@ try {
         if (-not $Force) { $YtDlpExpectedSha256 = "" }
     }
 
-    $needYtDownload = $Force -or (-not (Verify-ExistingBinary $YtExe $YtDlpExpectedSha256))
+    $needYtDownload = $Force -or (-not (Verify-ExistingBinary $YtExe $YtDlpExpectedSha256 $Architecture))
 
     if ($needYtDownload) {
         Write-Host "`n[3/3] Downloading upstream yt-dlp ($YtDlpFlavor flavor)..." -ForegroundColor Cyan
         $YtDl = Join-Path $TmpDir "yt-dlp.exe"
         Invoke-WebRequest -Uri $YtDlpUrl -OutFile $YtDl -UseBasicParsing
-        Assert-Pe64Executable $YtDl
+        Assert-Pe64Executable $YtDl $Architecture
         if ($YtDlpExpectedSha256) {
             Assert-Sha256Checksum $YtDl $YtDlpExpectedSha256
         }
@@ -259,7 +260,7 @@ try {
     } else {
         Write-Host "`n[3/3] yt-dlp.exe already present and verified in $TargetDir" -ForegroundColor Green
     }
-    Assert-Pe64Executable $YtExe
+    Assert-Pe64Executable $YtExe $Architecture
 
     $ytSize = (Get-Item $YtExe).Length
     $ytSizeMb = [Math]::Round($ytSize / 1MB, 2)

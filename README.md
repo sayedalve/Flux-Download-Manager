@@ -8,7 +8,7 @@
 
 <p align="center">
   <b>High-performance, open-source download manager and adaptive stream pipeline for Windows 11.</b><br>
-  Dynamic segmented HTTP engine with work-stealing range reuse, out-of-process HLS/DASH extraction, and Manifest V3 browser integration,<br>
+  A modern, free and open-source <b>Internet Download Manager alternative</b> and <b>IDM alternative</b> featuring a dynamic segmented HTTP engine with work-stealing range reuse, out-of-process HLS/DASH extraction, and Manifest V3 browser integration,<br>
   built as a native, lightweight C++20 / Win32 desktop application. Open source, zero telemetry, and entirely offline.
 </p>
 

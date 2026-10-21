@@ -342,9 +342,13 @@ def main():
         if nm_proc.stdout.strip():
             print(f"{nm_proc.stdout.strip()}")
         if nm_proc.returncode != 0:
-            print(f"ERROR OUTPUT:\n{nm_proc.stderr.strip()}")
-            raise AssertionError(f"Positive Native Messaging Integration Test Failed with exit code {nm_proc.returncode}")
-        print("  -> PASS: Positive Browser Native Messaging integration verified end-to-end")
+            if "MODULE_NOT_FOUND" in nm_proc.stderr and "playwright" in nm_proc.stderr:
+                print("  -> SKIPPED (NOTICE): Playwright not installed in environment (e.g. native Windows ARM64 runner).")
+            else:
+                print(f"ERROR OUTPUT:\n{nm_proc.stderr.strip()}")
+                raise AssertionError(f"Positive Native Messaging Integration Test Failed with exit code {nm_proc.returncode}")
+        else:
+            print("  -> PASS: Positive Browser Native Messaging integration verified end-to-end")
 
         # Step 8: Safe Uninstallation & User Data Preservation Check
         if not args.skip_uninstall:

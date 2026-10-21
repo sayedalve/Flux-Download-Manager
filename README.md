@@ -26,6 +26,7 @@
   <a href="#everything-in-the-box"><b>Everything in the box</b></a> ·
   <a href="#high-performance-download-engine"><b>Download Engine</b></a> ·
   <a href="#adaptive-stream-pipeline"><b>Stream Pipeline</b></a> ·
+  <a href="#performance-benchmarks"><b>Benchmarks</b></a> ·
   <a href="#browser-integration"><b>Browser Capture</b></a> ·
   <a href="#built-for-automation"><b>Automation & CLI</b></a> ·
   <a href="#under-the-hood"><b>Architecture</b></a> ·
@@ -217,6 +218,30 @@ For media hosted via HLS or DASH manifests, Radium integrates out-of-process wor
 - **Track Probing & Remuxing:** Radium probes stream manifests to identify video, audio, and subtitle streams. Once segment downloads complete, FFmpeg remuxes the media into standard MP4 or MKV containers with magic-byte verification.
 
 See [`docs/STREAM_DOWNLOAD_PIPELINE.md`](docs/STREAM_DOWNLOAD_PIPELINE.md) for the complete pipeline specification.
+
+<br>
+
+## Performance Benchmarks
+
+Radium is continuously benchmarked against industry standards including **Internet Download Manager (IDM)** and **aria2** across both live internet endpoints and controlled RFC 7233 local loopbacks.
+
+### Controlled Head-to-Head: Radium vs Internet Download Manager (IDM)
+Across 10 alternating live internet trials (5 Radium, 5 IDM) on a 100 MiB payload (`https://fsn1-speed.hetzner.com/100MB.bin`) under Falkenstein server rate-limiting:
+
+| Metric | Radium v0.3.2 | Internet Download Manager (IDM 6.43.15) | Comparison / Delta |
+| :--- | :---: | :---: | :--- |
+| **Configured Concurrency** | 8 connections | 8 connections | Identical baseline |
+| **Effective Concurrency** | 1 connection (Adaptive fallback) | 3 connections (Selective drop) | IDM holds 3 streams |
+| **Median Duration** | **79.44 s** | **76.64 s** | IDM faster by 2.80 s (3.5%) |
+| **Median Throughput** | **1.26 MiB/s** (10.56 Mbps) | **1.30 MiB/s** (10.95 Mbps) | Parity (< 4% variance) |
+| **Data Integrity (SHA-256)** | **5 / 5 (100% exact match)** | **5 / 5 (100% exact match)** | Exact verification |
+| **Median Peak Memory (RSS)** | **18.30 MB** | **48.80 MB** | **Radium uses 62.5% less RAM** |
+| **Median Peak CPU Usage** | **15.6%** | **56.2%** | **Radium uses 72.2% less CPU** |
+
+### Adaptive 429 Rate-Limit Recovery (32 Connections)
+When configured with 32 connections against rate-limited servers, Radium detects HTTP 429 responses, backs off exponentially, adaptively halves worker threads (32 -> 16 -> 8 -> 4 -> 2 -> 1), and cleanly coordinates segment reallocation without byte gaps, partial overlaps, or data corruption.
+
+Detailed datasets, machine-readable JSON logs, and instructions to reproduce locally or on live connections are available in [`benchmarks/`](benchmarks/) and [`benchmarks/RESULTS.md`](benchmarks/RESULTS.md).
 
 <br>
 

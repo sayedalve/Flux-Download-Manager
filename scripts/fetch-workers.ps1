@@ -11,6 +11,8 @@
 [CmdletBinding()]
 param(
     [string]$TargetDir = "",
+    [ValidateSet("x64", "ARM64")]
+    [string]$Architecture = "x64",
     [string]$Nm3u8dlUrl = "https://github.com/nilaoda/N_m3u8DL-RE/releases/download/v0.3.0-beta/N_m3u8DL-RE_v0.3.0-beta_win-x64_20241203.zip",
     [string]$Nm3u8dlExpectedSha256 = "E5C93A8DE0C58C50922C17A8A3BABD7D2193FB43B1A7FACD0B18DE9274EF8061",
     [string]$FfmpegUrl = "",
@@ -44,7 +46,7 @@ New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("radium_workers_" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
 
-function Assert-Pe64Executable([string]$FilePath) {
+function Assert-Pe64Executable([string]$FilePath, [string]$TargetArchitecture = "x64") {
     if (-not (Test-Path $FilePath)) {
         throw "Required executable missing: $FilePath"
     }
@@ -54,8 +56,14 @@ function Assert-Pe64Executable([string]$FilePath) {
     }
     $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
     $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
-    if ($machine -ne 0x8664) {
-        throw "Executable $FilePath is not x64 (IMAGE_FILE_MACHINE_AMD64 0x8664); got 0x$($machine.ToString('X4'))"
+    if ($TargetArchitecture -eq "ARM64") {
+        if ($machine -ne 0xAA64 -and $machine -ne 0x8664) {
+            throw "Executable $FilePath is not ARM64 (0xAA64) or x64 (0x8664); got 0x$($machine.ToString('X4'))"
+        }
+    } else {
+        if ($machine -ne 0x8664) {
+            throw "Executable $FilePath is not x64 (IMAGE_FILE_MACHINE_AMD64 0x8664); got 0x$($machine.ToString('X4'))"
+        }
     }
 }
 
@@ -78,10 +86,10 @@ function Assert-Sha256Checksum([string]$FilePath, [string]$ExpectedHash) {
     }
 }
 
-function Verify-ExistingBinary([string]$FilePath, [string]$ExpectedSha256) {
+function Verify-ExistingBinary([string]$FilePath, [string]$ExpectedSha256, [string]$TargetArchitecture = "x64") {
     if (-not (Test-Path $FilePath)) { return $false }
     try {
-        Assert-Pe64Executable $FilePath
+        Assert-Pe64Executable $FilePath $TargetArchitecture
         if ($ExpectedSha256 -and -not $SkipChecksumVerification) {
             Assert-Sha256Checksum $FilePath $ExpectedSha256
         }
@@ -104,7 +112,7 @@ try {
     # Check if TargetDir already has a verified native C++ worker (< 5MB)
     if (Test-Path $NmExe) {
         $existingNmSize = (Get-Item $NmExe).Length
-        if ($existingNmSize -lt 5MB -and (Verify-ExistingBinary $NmExe $null)) {
+        if ($existingNmSize -lt 5MB -and (Verify-ExistingBinary $NmExe $null $Architecture)) {
             $stagedFromNative = $true
             $candSizeKb = [Math]::Round($existingNmSize / 1KB, 1)
             Write-Host "`n[1/3] Using verified native C++ stream worker in $TargetDir ($candSizeKb KB)" -ForegroundColor Green
@@ -123,7 +131,7 @@ try {
             if (Test-Path $cand) {
                 $candSize = (Get-Item $cand).Length
                 if ($candSize -lt 5MB) {
-                    Assert-Pe64Executable $cand
+                    Assert-Pe64Executable $cand $Architecture
                     Copy-Item -Force $cand $NmExe
                     $stagedFromNative = $true
                     $candSizeKb = [Math]::Round($candSize / 1KB, 1)
@@ -135,7 +143,7 @@ try {
     }
 
     if (-not $stagedFromNative) {
-        $needNmDownload = $Force -or (-not (Verify-ExistingBinary $NmExe $Nm3u8dlExpectedSha256))
+        $needNmDownload = $Force -or (-not (Verify-ExistingBinary $NmExe $Nm3u8dlExpectedSha256 $Architecture))
         if ($needNmDownload) {
             Write-Host "`n[1/3] Downloading upstream nilaoda/N_m3u8DL-RE win-x64..." -ForegroundColor Cyan
             $NmZip = Join-Path $TmpDir "nm3u8dl.zip"
@@ -143,7 +151,7 @@ try {
             Expand-Archive -Path $NmZip -DestinationPath (Join-Path $TmpDir "nm") -Force
             $FoundNm = Get-ChildItem -Path (Join-Path $TmpDir "nm") -Filter "N_m3u8DL-RE.exe" -Recurse | Select-Object -First 1
             if (-not $FoundNm) { throw "N_m3u8DL-RE.exe not found in downloaded archive: $NmZip" }
-            Assert-Pe64Executable $FoundNm.FullName
+            Assert-Pe64Executable $FoundNm.FullName $Architecture
             Assert-Sha256Checksum $FoundNm.FullName $Nm3u8dlExpectedSha256
             Copy-Item -Force $FoundNm.FullName $NmExe
             Write-Host "  [OK] Staged and verified upstream N_m3u8DL-RE.exe" -ForegroundColor Green
@@ -151,7 +159,7 @@ try {
             Write-Host "`n[1/3] N_m3u8DL-RE.exe already present and verified in $TargetDir" -ForegroundColor Green
         }
     }
-    Assert-Pe64Executable $NmExe
+    Assert-Pe64Executable $NmExe $Architecture
     $nmSize = (Get-Item $NmExe).Length
     $nmSizeMb = [Math]::Round($nmSize / 1MB, 2)
     Write-Host "  N_m3u8DL-RE binary footprint: $nmSize bytes ($nmSizeMb MiB)" -ForegroundColor White

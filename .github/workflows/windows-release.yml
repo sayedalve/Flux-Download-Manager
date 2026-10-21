@@ -475,7 +475,7 @@ jobs:
       - name: Provision Upstream Stream Workers
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64
+          powershell -ExecutionPolicy Bypass -File scripts/fetch-workers.ps1 -TargetDir tools/win-x64 -Architecture ARM64
 
       - name: Verify PE32+ ARM64 (0xAA64) Executable Headers
         shell: powershell

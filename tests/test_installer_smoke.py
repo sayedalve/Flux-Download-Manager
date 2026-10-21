@@ -335,20 +335,46 @@ def main():
         print("\n[Step 7b/8] Verifying Positive Browser Native Messaging Integration (Chromium + Extension)...")
         nm_script = ROOT / "tests" / "browser" / "test_native_messaging_positive.js"
         assert nm_script.is_file(), f"Native messaging positive integration script missing: {nm_script}"
-        nm_proc = subprocess.run(
-            ["node", str(nm_script), "--install-dir", str(install_dir), "--port", str(port)],
-            capture_output=True, text=True
-        )
-        if nm_proc.stdout.strip():
-            print(f"{nm_proc.stdout.strip()}")
-        if nm_proc.returncode != 0:
-            if "MODULE_NOT_FOUND" in nm_proc.stderr and "playwright" in nm_proc.stderr:
-                print("  -> SKIPPED (NOTICE): Playwright not installed in environment (e.g. native Windows ARM64 runner).")
+
+        # Check if node and playwright are available in the runtime environment
+        node_bin = shutil.which("node")
+        playwright_available = False
+        playwright_skip_reason = ""
+
+        if not node_bin:
+            playwright_skip_reason = "Node.js executable ('node') not found in PATH."
+        else:
+            check_pw = subprocess.run(
+                [
+                    node_bin,
+                    "-e",
+                    "try { const { chromium } = require('playwright'); chromium.executablePath(); process.exit(0); } "
+                    "catch (e) { console.error(e.code || e.message || String(e)); process.exit(42); }",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if check_pw.returncode == 0:
+                playwright_available = True
             else:
+                pw_err = (check_pw.stderr + "\n" + check_pw.stdout).strip()
+                playwright_skip_reason = f"Playwright or Chromium browser unavailable ({pw_err or 'exit code 42'})."
+
+        if not playwright_available:
+            print(f"  -> SKIPPED (NOTICE): {playwright_skip_reason} Skipping optional browser integration test.")
+        else:
+            nm_proc = subprocess.run(
+                [node_bin, str(nm_script), "--install-dir", str(install_dir), "--port", str(port)],
+                capture_output=True,
+                text=True,
+            )
+            if nm_proc.stdout.strip():
+                print(f"{nm_proc.stdout.strip()}")
+            if nm_proc.returncode != 0:
                 print(f"ERROR OUTPUT:\n{nm_proc.stderr.strip()}")
                 raise AssertionError(f"Positive Native Messaging Integration Test Failed with exit code {nm_proc.returncode}")
-        else:
-            print("  -> PASS: Positive Browser Native Messaging integration verified end-to-end")
+            else:
+                print("  -> PASS: Positive Browser Native Messaging integration verified end-to-end")
 
         # Step 8: Safe Uninstallation & User Data Preservation Check
         if not args.skip_uninstall:

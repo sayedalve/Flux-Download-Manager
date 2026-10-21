@@ -11,13 +11,19 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-NMH_PATH = os.path.join(ROOT, "build", "win-x64", "Release", "radium-nmh.exe")
-if not os.path.isfile(NMH_PATH):
-    NMH_PATH = os.path.join(ROOT, "dist", "radium-nmh.exe")
-if not os.path.isfile(NMH_PATH):
-    NMH_PATH = os.path.join(ROOT, "build", "win-x64", "Release", "flux-nmh.exe")
-if not os.path.isfile(NMH_PATH):
-    NMH_PATH = os.path.join(ROOT, "dist", "flux-nmh.exe")
+NMH_CANDIDATES = [
+    os.path.join(ROOT, "build", "win-x64", "Release", "radium-nmh.exe"),
+    os.path.join(ROOT, "build", "Release", "radium-nmh.exe"),
+    os.path.join(ROOT, "dist", "radium-nmh.exe"),
+    os.path.join(ROOT, "build", "win-x64", "Release", "flux-nmh.exe"),
+    os.path.join(ROOT, "build", "Release", "flux-nmh.exe"),
+    os.path.join(ROOT, "dist", "flux-nmh.exe"),
+    os.path.join(ROOT, "build", "radium-nmh.exe"),
+    os.path.join(ROOT, "build", "flux-nmh.exe"),
+]
+NMH_PATH = next((p for p in NMH_CANDIDATES if os.path.isfile(p)), "")
+if not NMH_PATH:
+    NMH_PATH = os.path.join(ROOT, "build", "win-x64", "Release", "radium-nmh.exe")
 
 def send_nmh_rpc(req):
     proc = subprocess.Popen([NMH_PATH], stdin=subprocess.PIPE, stdout=subprocess.PIPE)

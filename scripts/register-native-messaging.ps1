@@ -7,6 +7,7 @@
 param(
     [string]$ExtensionId = "",
     [string]$HostExePath = "",
+    [string]$BuildDir = "",
     [switch]$Unregister = $false,
     [switch]$Uninstall = $false,
     [switch]$Clean = $false
@@ -57,7 +58,16 @@ if ($doUnregister) {
 
 # 2. Locate radium-nmh.exe
 if (-not $HostExePath) {
-    $candidates = @(
+    $candidates = @()
+    if ($BuildDir) {
+        $resolvedBuildDir = if ([System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir } else { Join-Path $RepoRoot $BuildDir }
+        $candidates += @(
+            (Join-Path $resolvedBuildDir "radium-nmh.exe"),
+            (Join-Path $resolvedBuildDir "flux-nmh.exe"),
+            (Join-Path $resolvedBuildDir "openidm-nmh.exe")
+        )
+    }
+    $candidates += @(
         (Join-Path $RepoRoot "build\win-x64\Release\radium-nmh.exe"),
         (Join-Path $RepoRoot "build\Release\radium-nmh.exe"),
         (Join-Path $RepoRoot "dist\radium-nmh.exe"),
@@ -65,6 +75,8 @@ if (-not $HostExePath) {
         (Join-Path $RepoRoot "build\win-x64\Release\flux-nmh.exe"),
         (Join-Path $RepoRoot "build\Release\flux-nmh.exe"),
         (Join-Path $RepoRoot "build\win-x64\flux-nmh.exe"),
+        (Join-Path $RepoRoot "build\flux-nmh.exe"),
+        (Join-Path $RepoRoot "build\radium-nmh.exe"),
         (Join-Path $RepoRoot "dist\flux-nmh.exe"),
         (Join-Path $RepoRoot "flux-nmh.exe")
     )

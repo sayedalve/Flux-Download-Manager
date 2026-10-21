@@ -42,7 +42,7 @@ jobs:
 
       - name: Build Flux Targets
         run: |
-          cmake --build build --config Release --target flux flux-nmh
+          cmake --build build --config Release --target flux flux-nmh radium radium-nmh
 
       - name: Provision Upstream Stream Workers
         shell: powershell
@@ -52,7 +52,7 @@ jobs:
       - name: Register Native Messaging Host
         shell: powershell
         run: |
-          powershell -ExecutionPolicy Bypass -File scripts/register-native-messaging.ps1 -BuildDir build/win-x64/Release
+          powershell -ExecutionPolicy Bypass -File scripts/register-native-messaging.ps1 -BuildDir build/Release
 
       - name: Execute Live Verification Suite
         shell: powershell

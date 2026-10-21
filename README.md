@@ -8,8 +8,8 @@
 
 <p align="center">
   <b>High-performance, open-source download manager and adaptive stream pipeline for Windows 11.</b><br>
-  A modern, free and open-source <b>Internet Download Manager alternative</b> and <b>IDM alternative</b> featuring a dynamic segmented HTTP engine with work-stealing range reuse, out-of-process HLS/DASH extraction, and Manifest V3 browser integration,<br>
-  built as a native, lightweight C++20 / Win32 desktop application. Open source, zero telemetry, and entirely offline.
+  A modern, lightweight <b>IDM alternative</b> featuring a dynamic segmented HTTP engine with work-stealing range reuse, out-of-process HLS/DASH extraction, and Manifest V3 browser integration,<br>
+  built as a native C++20 / Win32 desktop application. Open source, zero telemetry, and entirely offline.
 </p>
 
 <p align="center">
@@ -46,7 +46,7 @@
 </p>
 
 > [!NOTE]
-> **Radium Download Manager is built for speed, transparency, and user privacy.**
+> **Radium Download Manager is a fast, privacy-focused Internet Download Manager alternative for Windows.**
 > Rather than relying on heavy Electron runtimes or commercial subscription wrappers, Radium is engineered from the ground up in native ISO C++20. It combines the multi-connection segment scheduler of [Brisk](https://github.com/BrisklyDev/brisk), the media sniffing intelligence of [Cat Catch](https://github.com/xifangczy/cat-catch), and sandboxed out-of-process stream muxing with [N_m3u8DL-RE](https://github.com/nilaoda/N_m3u8DL-RE) and [FFmpeg](https://ffmpeg.org/).
 
 <br>

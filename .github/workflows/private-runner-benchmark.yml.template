@@ -78,25 +78,25 @@ jobs:
             Write-Host "FDM not found at standard path."
           }
 
-      - name: Configure CMake for Flux
+      - name: Configure CMake for Radium
         shell: powershell
         run: |
           cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build Flux Target
+      - name: Build Radium Target
         run: |
-          cmake --build build --config Release --target flux
+          cmake --build build --config Release --target radium radium-nmh
 
       - name: Execute Full Competitor Benchmark Suite (Local Mode)
         shell: powershell
         run: |
-          $fluxBin = "build/Release/flux.exe"
-          if (-not (Test-Path $fluxBin)) {
-            $fluxBin = "build/win-x64/Release/flux.exe"
+          $radiumBin = "build/Release/radium.exe"
+          if (-not (Test-Path $radiumBin)) {
+            $radiumBin = "build/win-x64/Release/radium.exe"
           }
           $extFlag = if ("${{ inputs.extended_mode }}" -eq "true") { "--extended" } else { "" }
-          Write-Host "Running: python scripts/run-competitor-benchmarks.py --mode local $extFlag --flux-bin $fluxBin"
-          python scripts/run-competitor-benchmarks.py --mode local $extFlag --flux-bin $fluxBin
+          Write-Host "Running: python scripts/run-competitor-benchmarks.py --mode local $extFlag --radium-bin $radiumBin"
+          python scripts/run-competitor-benchmarks.py --mode local $extFlag --radium-bin $radiumBin
 
       - name: Publish Markdown Summary to Job Summary
         shell: powershell

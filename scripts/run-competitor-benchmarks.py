@@ -1217,19 +1217,19 @@ def main():
     parser = argparse.ArgumentParser(description="Flux Competitor Benchmark Harness")
     parser.add_argument("--out-dir", type=str, default=None, help="Output directory for reports (default: benchmarks/)")
     parser.add_argument("--extended", action="store_true", help="Run 5 trials instead of 3")
-    parser.add_argument("--flux-bin", type=str, default=None, help="Path to flux.exe")
+    parser.add_argument("--radium-bin", "--flux-bin", dest="radium_bin", type=str, default=None, help="Path to radium.exe (or legacy flux.exe)")
     parser.add_argument("--mode", choices=["local", "hosted", "auto"], default="auto",
                         help="Execution mode: 'local' benchmarks installed IDM & FDM; 'hosted' is for GitHub Actions")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir).resolve() if args.out_dir else (ROOT / "benchmarks")
-    flux_path = Path(args.flux_bin).resolve() if args.flux_bin else None
+    radium_path = Path(args.radium_bin).resolve() if args.radium_bin else None
 
-    logger.info("Initializing Flux Competitor Benchmark Harness (mode: %s)...", args.mode)
+    logger.info("Initializing Radium Competitor Benchmark Harness (mode: %s)...", args.mode)
     system_specs = get_system_specs()
     logger.info("Host: %s on %s (%s cores)", system_specs["os_name"], system_specs["processor"], system_specs["logical_cpus"])
 
-    harness = BenchmarkHarness(out_dir=out_dir, extended_mode=args.extended, custom_flux_bin=flux_path, mode=args.mode)
+    harness = BenchmarkHarness(out_dir=out_dir, extended_mode=args.extended, custom_flux_bin=radium_path, mode=args.mode)
 
     try:
         harness.start_test_server()

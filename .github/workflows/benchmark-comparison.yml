@@ -87,33 +87,33 @@ jobs:
               throw "CMake configuration failed for all candidate generators."
           }
 
-      - name: Build Flux Target
+      - name: Build Radium Target
         run: |
-          cmake --build build --config Release --target flux flux-nmh
+          cmake --build build --config Release --target radium radium-nmh
 
-      - name: Verify Flux Binary
+      - name: Verify Radium Binary
         shell: powershell
         run: |
-          $bin = "build/Release/flux.exe"
+          $bin = "build/Release/radium.exe"
           if (-not (Test-Path $bin)) {
-            $bin = "build/win-x64/Release/flux.exe"
+            $bin = "build/win-x64/Release/radium.exe"
           }
           if (-not (Test-Path $bin)) {
-            throw "Flux executable missing at expected path!"
+            throw "Radium executable missing at expected path!"
           }
-          Write-Host "Found Flux binary at: $bin"
+          Write-Host "Found Radium binary at: $bin"
           & $bin --version
 
       - name: Run Competitor Benchmark Comparison Suite
         shell: powershell
         run: |
-          $fluxBin = "build/Release/flux.exe"
-          if (-not (Test-Path $fluxBin)) {
-            $fluxBin = "build/win-x64/Release/flux.exe"
+          $radiumBin = "build/Release/radium.exe"
+          if (-not (Test-Path $radiumBin)) {
+            $radiumBin = "build/win-x64/Release/radium.exe"
           }
           $extFlag = if ("${{ inputs.extended_mode }}" -eq "true") { "--extended" } else { "" }
-          Write-Host "Running: python scripts/run-competitor-benchmarks.py $extFlag --flux-bin $fluxBin"
-          python scripts/run-competitor-benchmarks.py $extFlag --flux-bin $fluxBin
+          Write-Host "Running: python scripts/run-competitor-benchmarks.py $extFlag --radium-bin $radiumBin"
+          python scripts/run-competitor-benchmarks.py $extFlag --radium-bin $radiumBin
 
       - name: Publish Markdown Summary to Job Summary
         shell: powershell

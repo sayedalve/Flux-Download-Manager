@@ -81,6 +81,34 @@ Audited `AntivirusScanner::ScanWithDefender` in `src/security/antivirus_scanner.
 
 ---
 
+### 4. Segment-Level HTTP 429 Adaptive-Concurrency Recovery Suite
+Executed the deterministic Windows reliability audit suite (`tests/reliability_audit_windows.py`) covering actual segment-level rate limiting (initial range probe succeeds; rate limiting is triggered on concurrent segment workers):
+- **Case 1 (32 Connections with Concurrency Cap = 4):**
+  - Result: **PASSED** (Completed `payload.bin`, exact SHA-256 match).
+  - Rate limiting encountered: 1 HTTP 429 response.
+  - Concurrency behavior: Dynamic connection spawn ramped towards 32, received 429 on secondary worker, halved target concurrency ($32 \rightarrow 16 \rightarrow 8 \rightarrow 4$), successfully completed 16 MiB payload with peak connections capped at 5.
+- **Case 2 (Temporary Segment Rate Limiting with Budget = 4):**
+  - Result: **PASSED** (Completed `payload.bin`, exact SHA-256 match).
+  - Rate limiting encountered: 4 HTTP 429 responses with `Retry-After: 1`.
+  - Concurrency behavior: Workers backed off with `Retry-After`, reacquired incomplete segments, and resumed transfer once the server rate limit cleared.
+- **Case 3 (Persistent Segment Rate Limiting):**
+  - Test result: **PASSED**.
+  - Download outcome: **FAILED_EXPECTED_RATE_LIMITED** (bounded retry exhaustion).
+  - Verification: Clean exit code 2 (`HTTP 429 Too Many Requests`), bounded execution time (120s), 0 incomplete or corrupted files committed. Proves no infinite retry loop or hang.
+- **Case 4 (Cancellation during Rate-Limit Backoff):**
+  - Result: **PASSED**.
+  - Verification: `TerminateProcess` / graceful cancel during active backoff sleep cleanly closed file handles, detached workers, and exited without deadlocks or zombie processes.
+- **Case 5 (Worker Retirement & Segment Reassignment under Dynamic Limits):**
+  - Result: **PASSED** (Completed `payload.bin`, exact SHA-256 match).
+  - Verification: Worker retirement during segment work-stealing safely unassigned incomplete ranges, returned them to the scheduler pool, and surviving workers completed the file without gap or overlapping bytes.
+
+### 5. Filesystem Fault Injection and Single-Daemon Lifecycle
+- **Locked File Destination:** Successfully handled locked output files via `msvcrt.locking` exclusive write lock. Radium completed safely without crash, hang, or truncating the locked file.
+- **Repeated Lifecycle Actions under Single Daemon:** Verified rapid `download.offer` $\rightarrow$ `pause` $\rightarrow$ `resume` $\rightarrow$ `COMPLETED` sequence under an active headless daemon through NMH JSON-RPC with 100% SHA-256 match.
+- **Daemon Crash and NMH Restart Recovery:** Abruptly terminated daemon process during NMH connection; started replacement daemon on the same named pipe and SQLite database; NMH reconnected successfully and retained task list without state loss.
+
+---
+
 ## Reconciliation of Prior Audit Statements
 
 | Prior Audit Statement | Status in Current Codebase | Current Evidence |
@@ -90,6 +118,36 @@ Audited `AntivirusScanner::ScanWithDefender` in `src/security/antivirus_scanner.
 | *"HTTP 429 probe retry limitation"* | **Resolved** | `http_download_engine.cpp` updated with bounded 3-attempt probe retry honoring `Retry-After`. |
 | *"Range protocol error on 429"* | **Resolved** | Range satisfaction validation strictly distinguishes 429/5xx status codes from genuine range header refusal (200 OK / mismatched range start). |
 | *"Worker counter race during adaptive concurrency reduction"* | **Resolved** | Retiring workers decrement `running_workers` via `fetch_sub` and coordinator loop checks `scheduler.HasIncompleteUnassignedSegment()`. |
+
+---
+
+## Legacy Naming Cleanup & Intentional Backward Compatibility Inventory
+
+As part of the rebranding from OpenIDM/Flux to **Radium Download Manager**, the build system, executables, test runners, and installer have been verified to prioritize and execute Radium binaries (`radium.exe`, `radium-nmh.exe`, `radium_unit_tests.exe`).
+
+### 1. Verification of Active Executable Selection
+- **Unit Test Runner**: Tests run directly against `radium_unit_tests.exe` (64/64 suites passed).
+- **Installer Smoke Test**: Silent Inno Setup installation unpacks and validates `radium.exe` (PE32+ AMD64 GUI subsystem) and `radium-nmh.exe` (PE32+ console subsystem).
+- **Integration Test Suite**: `tests/run_all_integration_tests.py` resolves and executes `radium.exe` as primary binary (8/8 suites passed).
+- **Reliability Audit Suite**: `tests/reliability_audit_windows.py` resolves `dist/Radium.exe` and `build_msvc/Release/radium.exe` first.
+
+### 2. Disambiguation of Extension ID vs. Native Messaging Host Name
+- **Native Messaging Host Identifier**: `com.flux.downloadmanager` is the registered Windows Registry host identifier located under `HKCU\Software\[Google\Chrome|Microsoft\Edge|BraveSoftware\Brave-Browser|Mozilla]\NativeMessagingHosts\com.flux.downloadmanager`. It is **NOT** a browser extension ID.
+- **Chrome Web Store Extension ID**: `mdgmlcnpodoehidlplplfegngnjnilap`. This is the allowed extension origin hash configured in `com.flux.downloadmanager.chromium.json`.
+- The native messaging protocol connects `chrome-extension://mdgmlcnpodoehidlplplfegngnjnilap/` via `chrome.runtime.connectNative("com.flux.downloadmanager")` to launch `radium-nmh.exe`.
+
+### 3. Inventory of Retained Backward-Compatibility References
+
+| Category | Retained Identifier | Purpose / Backward-Compatibility Justification |
+| :--- | :--- | :--- |
+| **Native Host Manifest** | `com.flux.downloadmanager` | Primary registered native messaging host ID in Registry and JSON manifests. Retained so existing browser extension installs do not break communication with the native host. |
+| **Legacy Host Manifest** | `org.openidm.native` | Fallback registered native messaging host ID for earlier OpenIDM developer extension builds. |
+| **Windows Named Pipe** | `\\.\pipe\Flux_IPC_<UserSID>` | Default inter-process communication pipe between `radium-nmh.exe` and `radium.exe`. Changing default pipe name would break live connections during rolling updates. |
+| **Environment Fallbacks** | `RADIUM_IPC_SOCKET` $\rightarrow$ `FLUX_IPC_SOCKET` $\rightarrow$ `OPENIDM_IPC_SOCKET` | Allows user scripts, daemon wrappers, and legacy test runners to configure the IPC pipe path. |
+| **Loopback Security Env** | `RADIUM_ALLOW_LOOPBACK` $\rightarrow$ `FLUX_ALLOW_LOOPBACK` $\rightarrow$ `OPENIDM_ALLOW_LOOPBACK` | Test and audit harness environment cascade for local mock servers. |
+| **Binary Discovery Order** | `Radium.exe` $\rightarrow$ `radium.exe` $\rightarrow$ `Flux.exe` $\rightarrow$ `flux.exe` $\rightarrow$ `openidm.exe` | Used in `src/nmh/main.cpp` so updated native messaging hosts can find and spawn either newly installed Radium or existing legacy installs without breaking. |
+| **Build Aliases** | CMake targets `flux`, `flux-nmh`, `openidm`, `openidm-nmh` | Alias targets in `CMakeLists.txt` allowing external build scripts and historical CI configs to build the current codebase. |
+| **C++ Namespaces** | `openidm::core`, `openidm::engine`, `openidm::ipc`, `openidm::storage`, `openidm::ui` | Internal source architecture namespaces retained to avoid high-churn refactoring of internal symbols without functional benefit. |
 
 ---
 

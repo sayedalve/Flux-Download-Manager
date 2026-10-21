@@ -791,9 +791,9 @@ Result<std::filesystem::path> HttpDownloadEngine::ExecuteDownload(
                             }
                         }
 
-                        // For rate limiting (429), allow up to 20 retries with backoff and reset streak so concurrent 429s don't prematurely abort
-                        int max_retries = (res.error->code == "ERR_HTTP_429_RATE_LIMITED") ? 20 : m_cfg.max_retries_per_worker;
-                        uint32_t max_streak = (res.error->code == "ERR_HTTP_429_RATE_LIMITED") ? 30 : 12;
+                        // For rate limiting (429), allow up to 8 retries per worker with backoff and reset streak so concurrent 429s don't prematurely abort
+                        int max_retries = (res.error->code == "ERR_HTTP_429_RATE_LIMITED") ? 8 : m_cfg.max_retries_per_worker;
+                        uint32_t max_streak = (res.error->code == "ERR_HTTP_429_RATE_LIMITED") ? 16 : 12;
 
                         if (!res.error->retryable || retries >= max_retries || fail_streak > max_streak) {
                             seg->active_worker.store(false);

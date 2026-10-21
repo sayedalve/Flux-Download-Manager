@@ -35,12 +35,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN_CANDIDATES = [
     ROOT / "dist" / "Radium.exe",
     ROOT / "build" / "win-x64" / "Release" / "radium.exe",
+    ROOT / "build_msvc" / "Release" / "radium.exe",
     ROOT / "build_msvc" / "Release" / "openidm.exe",
 ]
 BIN = next((p for p in BIN_CANDIDATES if p.exists()), BIN_CANDIDATES[0])
 NMH_CANDIDATES = [
     ROOT / "dist" / "radium-nmh.exe",
     ROOT / "build" / "win-x64" / "Release" / "radium-nmh.exe",
+    ROOT / "build_msvc" / "Release" / "radium-nmh.exe",
     ROOT / "build_msvc" / "Release" / "openidm-nmh.exe",
 ]
 NMH = next((p for p in NMH_CANDIDATES if p.exists()), NMH_CANDIDATES[0])
@@ -424,7 +426,7 @@ def run_filesystem_and_lifecycle_tests():
         env["RADIUM_IPC_SOCKET"] = pipe
         env["FLUX_IPC_SOCKET"] = pipe
         env["OPENIDM_IPC_SOCKET"] = pipe
-        isolated_nmh = root_tmp / "isolated_nmh" / "openidm-nmh.exe"
+        isolated_nmh = root_tmp / "isolated_nmh" / "radium-nmh.exe"
         isolated_nmh.parent.mkdir()
         shutil.copy2(NMH, isolated_nmh)
 

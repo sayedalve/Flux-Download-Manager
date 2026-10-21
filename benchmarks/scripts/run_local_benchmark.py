@@ -31,6 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 BIN_CANDIDATES = [
     ROOT / "dist" / "Radium.exe",
+    ROOT / "build_msvc" / "Release" / "radium.exe",
     ROOT / "build" / "win-x64" / "Release" / "radium.exe",
     ROOT / "build_msvc" / "Release" / "openidm.exe",
     ROOT / "dist" / "Flux.exe",
